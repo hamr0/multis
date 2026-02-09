@@ -3,10 +3,22 @@
   "pairing_code": "",
   "owner_id": null,
   "allowed_users": [],
+  "platforms": {
+    "telegram": {
+      "enabled": true,
+      "bot_token": ""
+    },
+    "beeper": {
+      "enabled": false,
+      "url": "http://localhost:23373",
+      "command_prefix": "//",
+      "poll_interval": 3000
+    }
+  },
   "llm": {
     "provider": "anthropic",
     "apiKey": "",
-    "model": "claude-sonnet-4-5-20250929",
+    "model": "claude-haiku-4-5-20251001",
     "temperature": 0.7,
     "maxTokens": 2048
   },

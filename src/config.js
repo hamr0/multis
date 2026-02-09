@@ -65,6 +65,11 @@ function loadConfig() {
 
   const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
 
+  // Ensure platforms block exists
+  if (!config.platforms) config.platforms = {};
+  if (!config.platforms.telegram) config.platforms.telegram = { enabled: true };
+  if (!config.platforms.beeper) config.platforms.beeper = { enabled: false };
+
   // .env overrides
   if (process.env.TELEGRAM_BOT_TOKEN) {
     config.telegram_bot_token = process.env.TELEGRAM_BOT_TOKEN;
@@ -75,11 +80,14 @@ function loadConfig() {
   if (process.env.LLM_PROVIDER) {
     config.llm.provider = process.env.LLM_PROVIDER;
   }
-  if (process.env.ANTHROPIC_API_KEY) {
+  // Set API key based on active provider
+  const provider = config.llm.provider;
+  if (provider === 'anthropic' && process.env.ANTHROPIC_API_KEY) {
     config.llm.apiKey = process.env.ANTHROPIC_API_KEY;
-  }
-  if (process.env.OPENAI_API_KEY) {
+  } else if (provider === 'openai' && process.env.OPENAI_API_KEY) {
     config.llm.apiKey = process.env.OPENAI_API_KEY;
+  } else if (provider === 'gemini' && process.env.GEMINI_API_KEY) {
+    config.llm.apiKey = process.env.GEMINI_API_KEY;
   }
   if (process.env.LLM_MODEL) {
     config.llm.model = process.env.LLM_MODEL;
@@ -89,6 +97,11 @@ function loadConfig() {
   if (!config.owner_id && config.allowed_users && config.allowed_users.length > 0) {
     config.owner_id = config.allowed_users[0];
     saveConfig(config);
+  }
+
+  // Backward compat: sync telegram_bot_token into platforms block
+  if (config.telegram_bot_token && !config.platforms.telegram.bot_token) {
+    config.platforms.telegram.bot_token = config.telegram_bot_token;
   }
 
   // Generate pairing code if not set

@@ -21,3 +21,13 @@ Thumbs.db
 # Temporary files
 tmp/
 temp/
+
+# Claude Code
+.claude/
+
+# Test documents
+docs/manuals/
+
+# Beeper storage / tokens
+.beeper-storage/
+docs/archive/old-beeper/beeper-storage/

@@ -277,9 +277,18 @@ CREATE TABLE conversations (
 - Audit logging
 - JSON-based policies
 
+## Multi-Platform (POC7)
+
+See [MULTI_PLATFORM_PLAN.md](MULTI_PLATFORM_PLAN.md) for the full plan.
+
+- **Path 1**: Telegram (mandatory, direct Bot API, zero infra)
+- **Path 2**: Matrix self-hosted (optional, per-user VPS with Synapse + mautrix bridges)
+- **Beeper**: Evaluated and rejected — iOS hijacks cross-signing, no programmatic verification
+- **Element**: Same Synapse under the hood, no personal plan, no bridges included
+- **One config**: `~/.multis/config.json` with `platforms` block — fill in what you have, leave rest null
+
 ## Future Enhancements
 
-- [ ] Discord bot integration
 - [ ] Web UI for onboarding
 - [ ] Browser control (Playwright)
 - [ ] Calendar integration

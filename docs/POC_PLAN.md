@@ -135,16 +135,38 @@
 
 ---
 
+### POC 7: Multi-Platform Messaging (3-5 days)
+**Goal:** Connect to WhatsApp, Signal, Discord via self-hosted Matrix
+
+**Prerequisites:** POC4, POC5, POC6
+
+**Scope:**
+- Abstract transport layer (Telegram + Matrix)
+- `multis setup matrix` provisions user's VPS with Synapse + mautrix bridges
+- `/bridge <platform>` connects a platform via Telegram chat
+- All messages from all platforms → same SQLite → same LLM
+
+**Exit Criteria:**
+1. `multis setup matrix` deploys Docker Compose stack to user's VPS via SSH
+2. `/bridge whatsapp` → QR code sent via Telegram → WhatsApp linked
+3. WhatsApp message → bot responds via WhatsApp
+4. `/ask` works with context from any platform
+
+**Full plan:** [MULTI_PLATFORM_PLAN.md](MULTI_PLATFORM_PLAN.md)
+
+---
+
 ## Total Timeline
 
-- POC 1: 1 day
-- POC 2: 1-2 days
-- POC 3: 2 days
-- POC 4: 1 day
+- POC 1: 1 day ✅
+- POC 2: 1-2 days ✅
+- POC 3: 2 days ✅
+- POC 4: 1 day ← NEXT
 - POC 5: 2 days
 - POC 6: 2 days
+- POC 7: 3-5 days
 
-**Total: 9-10 days for full MVP**
+**Total: 12-16 days for full MVP with multi-platform**
 
 ---
 
@@ -155,6 +177,10 @@
 - `better-sqlite3` - SQLite database
 - `pdf-parse` - PDF parsing
 - `mammoth` - DOCX parsing
+
+### Required (POC 7)
+- `matrix-bot-sdk` - Matrix client (already installed)
+- `@matrix-org/matrix-sdk-crypto-nodejs` - E2EE (already installed)
 
 ### Optional (for later)
 - `chokidar` - File watching (memory.md sync)
