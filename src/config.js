@@ -85,6 +85,12 @@ function loadConfig() {
     config.llm.model = process.env.LLM_MODEL;
   }
 
+  // Migrate: set first allowed user as owner if owner_id missing
+  if (!config.owner_id && config.allowed_users && config.allowed_users.length > 0) {
+    config.owner_id = config.allowed_users[0];
+    saveConfig(config);
+  }
+
   // Generate pairing code if not set
   if (!config.pairing_code) {
     config.pairing_code = generatePairingCode();
@@ -103,21 +109,34 @@ function saveConfig(config) {
 }
 
 /**
- * Add a user ID to the allowed users list
+ * Add a user ID to the allowed users list.
+ * First paired user automatically becomes owner.
  */
 function addAllowedUser(userId) {
   const config = loadConfig();
   if (!config.allowed_users.includes(userId)) {
     config.allowed_users.push(userId);
-    saveConfig(config);
   }
+  // First paired user becomes owner
+  if (!config.owner_id) {
+    config.owner_id = userId;
+  }
+  saveConfig(config);
   return config;
+}
+
+/**
+ * Check if a user is the owner
+ */
+function isOwner(userId, config) {
+  return config.owner_id === userId;
 }
 
 module.exports = {
   loadConfig,
   saveConfig,
   addAllowedUser,
+  isOwner,
   generatePairingCode,
   ensureMultisDir,
   MULTIS_DIR,

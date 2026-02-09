@@ -1,6 +1,12 @@
 const { Telegraf } = require('telegraf');
 const { logAudit } = require('../governance/audit');
-const { handleStart, handleStatus, handleUnpair, handleExec, handleRead, handleSkills, handleHelp, handleMessage } = require('./handlers');
+const { DocumentIndexer } = require('../indexer/index');
+const {
+  handleStart, handleStatus, handleUnpair,
+  handleExec, handleRead,
+  handleIndex, handleDocument, handleSearch, handleDocs,
+  handleSkills, handleHelp, handleMessage
+} = require('./handlers');
 
 /**
  * Create and configure the Telegram bot
@@ -13,17 +19,24 @@ function createBot(config) {
   }
 
   const bot = new Telegraf(config.telegram_bot_token);
+  const indexer = new DocumentIndexer();
 
   // Commands
   bot.start(handleStart(config));
   bot.command('status', handleStatus(config));
   bot.command('exec', handleExec(config));
   bot.command('read', handleRead(config));
+  bot.command('index', handleIndex(config, indexer));
+  bot.command('search', handleSearch(config, indexer));
+  bot.command('docs', handleDocs(config, indexer));
   bot.command('skills', handleSkills(config));
   bot.command('help', handleHelp(config));
   bot.command('unpair', handleUnpair(config));
 
-  // Echo all text messages
+  // Document uploads (PDF, DOCX, etc.)
+  bot.on('document', handleDocument(config, indexer));
+
+  // Text messages
   bot.on('text', handleMessage(config));
 
   // Log errors

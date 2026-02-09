@@ -1,6 +1,7 @@
 {
   "telegram_bot_token": "",
   "pairing_code": "",
+  "owner_id": null,
   "allowed_users": [],
   "llm": {
     "provider": "anthropic",
