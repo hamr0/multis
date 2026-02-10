@@ -12,9 +12,9 @@ class OpenAIProvider extends LLMProvider {
   }
 
   async generate(prompt, options = {}) {
-    const messages = options.context
+    const messages = options.system
       ? [
-          { role: 'system', content: options.context },
+          { role: 'system', content: options.system },
           { role: 'user', content: prompt }
         ]
       : [{ role: 'user', content: prompt }];

@@ -13,20 +13,18 @@ class AnthropicProvider extends LLMProvider {
   }
 
   async generate(prompt, options = {}) {
-    const messages = options.context
-      ? [
-          { role: 'user', content: options.context },
-          { role: 'assistant', content: 'I understand the context.' },
-          { role: 'user', content: prompt }
-        ]
-      : [{ role: 'user', content: prompt }];
-
-    const response = await this._makeRequest({
+    const body = {
       model: this.model,
       max_tokens: options.maxTokens || 2048,
       temperature: options.temperature || 0.7,
-      messages
-    });
+      messages: [{ role: 'user', content: prompt }]
+    };
+
+    if (options.system) {
+      body.system = options.system;
+    }
+
+    const response = await this._makeRequest(body);
 
     return response.content[0].text;
   }

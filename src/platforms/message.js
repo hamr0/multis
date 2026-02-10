@@ -4,7 +4,7 @@
  * Beeper messages are commands only when prefixed with //.
  */
 class Message {
-  constructor({ id, platform, chatId, chatName, senderId, senderName, isSelf, text, raw }) {
+  constructor({ id, platform, chatId, chatName, senderId, senderName, isSelf, text, raw, routeAs }) {
     this.id = id;
     this.platform = platform;
     this.chatId = chatId;
@@ -14,6 +14,8 @@ class Message {
     this.isSelf = isSelf || false;
     this.text = text || '';
     this.raw = raw || null;
+    /** @type {'natural'|'business'|null} Set by platform for non-command routing */
+    this.routeAs = routeAs || null;
   }
 
   /**

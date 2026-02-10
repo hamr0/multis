@@ -2,6 +2,8 @@ const { logAudit } = require('../governance/audit');
 const { addAllowedUser, isOwner } = require('../config');
 const { execCommand, readFile, listSkills } = require('../skills/executor');
 const { DocumentIndexer } = require('../indexer/index');
+const { createLLMClient } = require('../llm/client');
+const { buildRAGPrompt } = require('../llm/prompts');
 
 /**
  * Check if a user is paired (allowed).
@@ -25,10 +27,27 @@ function isPaired(msgOrCtx, config) {
 function createMessageRouter(config) {
   const indexer = new DocumentIndexer();
 
+  // Create LLM client if configured (null if no API key)
+  let llm = null;
+  try {
+    if (config.llm?.apiKey || config.llm?.provider === 'ollama') {
+      llm = createLLMClient(config.llm);
+    }
+  } catch (err) {
+    console.warn(`LLM init skipped: ${err.message}`);
+  }
+
   return async (msg, platform) => {
     // Handle Telegram document uploads
     if (msg._document) {
       await handleDocumentUpload(msg, platform, config, indexer);
+      return;
+    }
+
+    // Natural language / business routing (set by platform adapter)
+    if (msg.routeAs === 'natural' || msg.routeAs === 'business') {
+      if (!isPaired(msg, config)) return;
+      await routeAsk(msg, platform, config, indexer, llm, msg.text);
       return;
     }
 
@@ -38,8 +57,6 @@ function createMessageRouter(config) {
     if (!parsed) return;
 
     const { command, args } = parsed;
-    const userId = msg.senderId;
-    const username = msg.senderName;
 
     // Pairing: /start <code> (Telegram) or //start <code> (Beeper)
     if (command === 'start') {
@@ -52,7 +69,6 @@ function createMessageRouter(config) {
       if (msg.platform === 'telegram') {
         await platform.send(msg.chatId, 'You are not paired. Send /start <pairing_code> to pair.');
       }
-      // On Beeper, silently ignore unpaired self-commands
       return;
     }
 
@@ -81,14 +97,19 @@ function createMessageRouter(config) {
       case 'skills':
         await platform.send(msg.chatId, `Available skills:\n${listSkills()}`);
         break;
+      case 'ask':
+        await routeAsk(msg, platform, config, indexer, llm, args);
+        break;
+      case 'mode':
+        await routeMode(msg, platform, config, args);
+        break;
       case 'help':
         await routeHelp(msg, platform, config);
         break;
       default:
-        // Plain text (no recognized command) — echo for POC
+        // Telegram plain text (no recognized command) → implicit ask
         if (msg.platform === 'telegram' && !msg.text.startsWith('/')) {
-          logAudit({ action: 'message', user_id: userId, username, text: msg.text });
-          await platform.send(msg.chatId, `Echo: ${msg.text}`);
+          await routeAsk(msg, platform, config, indexer, llm, msg.text);
         }
         break;
     }
@@ -261,16 +282,63 @@ async function routeDocs(msg, platform, config, indexer) {
   await platform.send(msg.chatId, lines.join('\n') || 'No documents indexed yet.');
 }
 
+async function routeAsk(msg, platform, config, indexer, llm, question) {
+  if (!question) {
+    const prefix = msg.platform === 'telegram' ? '/' : '//';
+    await platform.send(msg.chatId, `Usage: ${prefix}ask <question>`);
+    return;
+  }
+
+  if (!llm) {
+    await platform.send(msg.chatId, 'LLM not configured. Set an API key in ~/.multis/config.json or .env');
+    return;
+  }
+
+  try {
+    const chunks = indexer.search(question, 5);
+    const { system, user } = buildRAGPrompt(question, chunks);
+    const answer = await llm.generate(user, { system });
+    await platform.send(msg.chatId, answer);
+    logAudit({ action: 'ask', user_id: msg.senderId, question, chunks: chunks.length, routeAs: msg.routeAs });
+  } catch (err) {
+    await platform.send(msg.chatId, `LLM error: ${err.message}`);
+  }
+}
+
+async function routeMode(msg, platform, config, mode) {
+  if (!mode || !['personal', 'business'].includes(mode.trim().toLowerCase())) {
+    const prefix = msg.platform === 'telegram' ? '/' : '//';
+    await platform.send(msg.chatId, `Usage: ${prefix}mode <personal|business>`);
+    return;
+  }
+
+  mode = mode.trim().toLowerCase();
+  if (!config.platforms) config.platforms = {};
+  if (!config.platforms.beeper) config.platforms.beeper = {};
+  if (!config.platforms.beeper.chat_modes) config.platforms.beeper.chat_modes = {};
+
+  config.platforms.beeper.chat_modes[msg.chatId] = mode;
+  const { saveConfig } = require('../config');
+  saveConfig(config);
+
+  await platform.send(msg.chatId, `Chat mode set to: ${mode}`);
+  logAudit({ action: 'mode', user_id: msg.senderId, chatId: msg.chatId, mode });
+}
+
 async function routeHelp(msg, platform, config) {
   const prefix = msg.platform === 'telegram' ? '/' : '//';
   const cmds = [
     'multis commands:',
+    `${prefix}ask <question> - Ask about indexed documents`,
     `${prefix}status - Bot info`,
     `${prefix}search <query> - Search indexed documents`,
     `${prefix}docs - Show indexing stats`,
+    `${prefix}mode <personal|business> - Set chat mode (Beeper)`,
     `${prefix}skills - List available skills`,
     `${prefix}unpair - Remove pairing`,
-    `${prefix}help - This message`
+    `${prefix}help - This message`,
+    '',
+    'Plain text messages are treated as questions.'
   ];
   if (isOwner(msg.senderId, config)) {
     cmds.splice(1, 0,
@@ -422,12 +490,15 @@ function handleHelp(config) {
     if (!isPaired(ctx, config)) return;
     const cmds = [
       'multis commands:',
+      '/ask <question> - Ask about indexed documents',
       '/status - Bot info',
       '/search <query> - Search indexed documents',
       '/docs - Show indexing stats',
       '/skills - List available skills',
       '/unpair - Remove pairing',
-      '/help - This message'
+      '/help - This message',
+      '',
+      'Plain text messages are treated as questions.'
     ];
     if (isOwner(ctx.from.id, config)) {
       cmds.splice(1, 0,

@@ -24,6 +24,7 @@ class BeeperPlatform extends Platform {
     this._pollTimer = null;
     this._lastSeen = {}; // chatId -> last message ID (numeric) we processed
     this._initialized = false; // first poll seeds _lastSeen without processing
+    this._personalChats = new Set(); // chatIds that are self/note-to-self chats
   }
 
   async start() {
@@ -76,12 +77,23 @@ class BeeperPlatform extends Platform {
       for (const chat of chats) {
         const chatId = chat.id || chat.chatID;
         if (!chatId) continue;
+
+        // Detect self/note-to-self chats by type or participant count
+        const chatType = chat.type || '';
+        const participants = chat.participants || chat.members || [];
+        if (chatType === 'single' && participants.length <= 1) {
+          this._personalChats.add(chatId);
+        }
+
         const msgData = await this._api('GET', `/v1/chats/${encodeURIComponent(chatId)}/messages?limit=1`);
         const messages = msgData.items || [];
         if (messages.length > 0) {
           const id = messages[0].id || messages[0].messageID;
           if (id) this._lastSeen[chatId] = Number(id);
         }
+      }
+      if (this._personalChats.size > 0) {
+        console.log(`Beeper: detected ${this._personalChats.size} personal/self chat(s)`);
       }
     } catch (err) {
       console.error(`Beeper: seed error — ${err.message}`);
@@ -114,15 +126,37 @@ class BeeperPlatform extends Platform {
           // Update last seen
           this._lastSeen[chatId] = msgId;
 
-          // Only process self-messages with command prefix
           const isSelf = this._isSelf(msg);
           const text = msg.text || '';
 
           // Skip our own responses to avoid cascade
           if (text.startsWith('[multis]')) continue;
 
-          if (isSelf && text.startsWith(this.commandPrefix) && this._messageCallback) {
-            console.log(`Beeper: command from ${chat.title || chatId}: ${text}`);
+          if (!this._messageCallback) continue;
+
+          // Detect self/personal chats (single participant or DM type)
+          const isPersonalChat = this._personalChats.has(chatId);
+          const mode = this._getChatMode(chatId);
+
+          // Determine how to route this message
+          let routeAs = null;
+          let shouldProcess = false;
+
+          if (isSelf && text.startsWith(this.commandPrefix)) {
+            // Explicit command: //ask, //mode, etc.
+            shouldProcess = true;
+          } else if (isSelf && isPersonalChat && !text.startsWith(this.commandPrefix)) {
+            // Self-message in personal/note-to-self chat → natural language ask
+            routeAs = 'natural';
+            shouldProcess = true;
+          } else if (!isSelf && mode === 'business') {
+            // Incoming message in a business-mode chat → auto-respond
+            routeAs = 'business';
+            shouldProcess = true;
+          }
+
+          if (shouldProcess) {
+            console.log(`Beeper: ${routeAs || 'command'} from ${chat.title || chatId}: ${text.slice(0, 80)}`);
 
             const normalized = new Message({
               id: msgId,
@@ -131,9 +165,10 @@ class BeeperPlatform extends Platform {
               chatName: chat.title || chat.name || '',
               senderId: msg.senderID || msg.sender || '',
               senderName: msg.senderName || '',
-              isSelf: true,
+              isSelf,
               text,
               raw: msg,
+              routeAs,
             });
 
             try {
@@ -158,6 +193,12 @@ class BeeperPlatform extends Platform {
   _isSelf(msg) {
     const sender = msg.senderID || msg.sender || '';
     return this.selfIds.has(sender);
+  }
+
+  _getChatMode(chatId) {
+    const modes = this.config.platforms?.beeper?.chat_modes;
+    if (modes && modes[chatId]) return modes[chatId];
+    return this.config.platforms?.beeper?.default_mode || 'personal';
   }
 
   _loadToken() {

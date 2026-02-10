@@ -12,19 +12,21 @@ class OllamaProvider extends LLMProvider {
   }
 
   async generate(prompt, options = {}) {
-    const fullPrompt = options.context
-      ? `${options.context}\n\nUser: ${prompt}\n\nAssistant:`
-      : prompt;
-
-    const response = await this._makeRequest({
+    const body = {
       model: this.model,
-      prompt: fullPrompt,
+      prompt,
       stream: false,
       options: {
         temperature: options.temperature || 0.7,
         num_predict: options.maxTokens || 2048
       }
-    });
+    };
+
+    if (options.system) {
+      body.system = options.system;
+    }
+
+    const response = await this._makeRequest(body);
 
     return response.response;
   }
@@ -40,7 +42,7 @@ class OllamaProvider extends LLMProvider {
 
     const response = await this.generate(prompt, {
       ...options,
-      context: systemPrompt
+      system: systemPrompt
     });
 
     return { content: response };
