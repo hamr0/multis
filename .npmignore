@@ -1,0 +1,7 @@
+.env
+.claude/
+.multis-template/
+test/
+docs/
+*.db
+audit.log

@@ -3,7 +3,9 @@ const { addAllowedUser, isOwner } = require('../config');
 const { execCommand, readFile, listSkills } = require('../skills/executor');
 const { DocumentIndexer } = require('../indexer/index');
 const { createLLMClient } = require('../llm/client');
-const { buildRAGPrompt } = require('../llm/prompts');
+const { buildRAGPrompt, buildMemorySystemPrompt } = require('../llm/prompts');
+const { getMemoryManager } = require('../memory/manager');
+const { runCapture } = require('../memory/capture');
 
 /**
  * Check if a user is paired (allowed).
@@ -26,6 +28,14 @@ function isPaired(msgOrCtx, config) {
  */
 function createMessageRouter(config) {
   const indexer = new DocumentIndexer();
+  const memoryManagers = new Map();
+
+  // Memory config defaults
+  const memCfg = {
+    recent_window: config.memory?.recent_window || 20,
+    capture_threshold: config.memory?.capture_threshold || 20,
+    ...config.memory
+  };
 
   // Create LLM client if configured (null if no API key)
   let llm = null;
@@ -47,7 +57,7 @@ function createMessageRouter(config) {
     // Natural language / business routing (set by platform adapter)
     if (msg.routeAs === 'natural' || msg.routeAs === 'business') {
       if (!isPaired(msg, config)) return;
-      await routeAsk(msg, platform, config, indexer, llm, msg.text);
+      await routeAsk(msg, platform, config, indexer, llm, msg.text, memoryManagers, memCfg);
       return;
     }
 
@@ -98,7 +108,16 @@ function createMessageRouter(config) {
         await platform.send(msg.chatId, `Available skills:\n${listSkills()}`);
         break;
       case 'ask':
-        await routeAsk(msg, platform, config, indexer, llm, args);
+        await routeAsk(msg, platform, config, indexer, llm, args, memoryManagers, memCfg);
+        break;
+      case 'memory':
+        await routeMemory(msg, platform, memoryManagers);
+        break;
+      case 'forget':
+        await routeForget(msg, platform, memoryManagers);
+        break;
+      case 'remember':
+        await routeRemember(msg, platform, memoryManagers, args);
         break;
       case 'mode':
         await routeMode(msg, platform, config, args);
@@ -109,7 +128,7 @@ function createMessageRouter(config) {
       default:
         // Telegram plain text (no recognized command) → implicit ask
         if (msg.platform === 'telegram' && !msg.text.startsWith('/')) {
-          await routeAsk(msg, platform, config, indexer, llm, msg.text);
+          await routeAsk(msg, platform, config, indexer, llm, msg.text, memoryManagers, memCfg);
         }
         break;
     }
@@ -282,7 +301,7 @@ async function routeDocs(msg, platform, config, indexer) {
   await platform.send(msg.chatId, lines.join('\n') || 'No documents indexed yet.');
 }
 
-async function routeAsk(msg, platform, config, indexer, llm, question) {
+async function routeAsk(msg, platform, config, indexer, llm, question, memoryManagers, memCfg) {
   if (!question) {
     const prefix = msg.platform === 'telegram' ? '/' : '//';
     await platform.send(msg.chatId, `Usage: ${prefix}ask <question>`);
@@ -294,15 +313,84 @@ async function routeAsk(msg, platform, config, indexer, llm, question) {
     return;
   }
 
+  const mem = memoryManagers ? getMemoryManager(memoryManagers, msg.chatId) : null;
+
   try {
+    // Record user message
+    if (mem) {
+      mem.appendMessage('user', question);
+      mem.appendToLog('user', question);
+    }
+
+    // Search for relevant documents
     const chunks = indexer.search(question, 5);
-    const { system, user } = buildRAGPrompt(question, chunks);
-    const answer = await llm.generate(user, { system });
+
+    // Build messages array from recent conversation
+    const recent = mem ? mem.loadRecent() : [];
+    const memoryMd = mem ? mem.loadMemory() : '';
+    const system = buildMemorySystemPrompt(memoryMd, chunks);
+
+    // Build messages array: recent history (excluding the just-appended user msg if already there)
+    // Recent already includes the current user message from appendMessage above
+    const messages = recent.map(m => ({ role: m.role, content: m.content }));
+
+    // If no recent history (no memory manager), fall back to single-message
+    let answer;
+    if (messages.length > 0) {
+      answer = await llm.generateWithMessages(messages, { system });
+    } else {
+      const ragPrompt = buildRAGPrompt(question, chunks);
+      answer = await llm.generate(ragPrompt.user, { system: ragPrompt.system });
+    }
+
     await platform.send(msg.chatId, answer);
+
+    // Record assistant response
+    if (mem) {
+      mem.appendMessage('assistant', answer);
+      mem.appendToLog('assistant', answer);
+    }
+
     logAudit({ action: 'ask', user_id: msg.senderId, question, chunks: chunks.length, routeAs: msg.routeAs });
+
+    // Fire-and-forget capture if threshold reached
+    if (mem && memCfg && mem.shouldCapture(memCfg.capture_threshold)) {
+      runCapture(msg.chatId, mem, llm, indexer, { keepLast: 5 }).catch(err => {
+        console.error(`[capture] Background error: ${err.message}`);
+      });
+    }
   } catch (err) {
     await platform.send(msg.chatId, `LLM error: ${err.message}`);
   }
+}
+
+async function routeMemory(msg, platform, memoryManagers) {
+  const mem = getMemoryManager(memoryManagers, msg.chatId);
+  const memory = mem.loadMemory();
+  if (!memory.trim()) {
+    await platform.send(msg.chatId, 'No memory notes for this chat yet.');
+    return;
+  }
+  await platform.send(msg.chatId, `Memory notes:\n\n${memory}`);
+}
+
+async function routeForget(msg, platform, memoryManagers) {
+  const mem = getMemoryManager(memoryManagers, msg.chatId);
+  mem.clearMemory();
+  await platform.send(msg.chatId, 'Memory cleared for this chat.');
+  logAudit({ action: 'forget', user_id: msg.senderId, chatId: msg.chatId });
+}
+
+async function routeRemember(msg, platform, memoryManagers, note) {
+  if (!note) {
+    const prefix = msg.platform === 'telegram' ? '/' : '//';
+    await platform.send(msg.chatId, `Usage: ${prefix}remember <note>`);
+    return;
+  }
+  const mem = getMemoryManager(memoryManagers, msg.chatId);
+  mem.appendMemory(note);
+  await platform.send(msg.chatId, 'Noted.');
+  logAudit({ action: 'remember', user_id: msg.senderId, chatId: msg.chatId, note });
 }
 
 async function routeMode(msg, platform, config, mode) {
@@ -333,6 +421,9 @@ async function routeHelp(msg, platform, config) {
     `${prefix}status - Bot info`,
     `${prefix}search <query> - Search indexed documents`,
     `${prefix}docs - Show indexing stats`,
+    `${prefix}memory - Show conversation memory`,
+    `${prefix}remember <note> - Save a note to memory`,
+    `${prefix}forget - Clear conversation memory`,
     `${prefix}mode <personal|business> - Set chat mode (Beeper)`,
     `${prefix}skills - List available skills`,
     `${prefix}unpair - Remove pairing`,

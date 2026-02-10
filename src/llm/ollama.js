@@ -48,6 +48,60 @@ class OllamaProvider extends LLMProvider {
     return { content: response };
   }
 
+  async generateWithMessages(messages, options = {}) {
+    const body = {
+      model: this.model,
+      messages,
+      stream: false,
+      options: {
+        temperature: options.temperature || 0.7,
+        num_predict: options.maxTokens || 2048
+      }
+    };
+
+    if (options.system) {
+      body.messages = [{ role: 'system', content: options.system }, ...messages];
+    }
+
+    const response = await this._makeChatRequest(body);
+    return response.message.content;
+  }
+
+  _makeChatRequest(body) {
+    return new Promise((resolve, reject) => {
+      const data = JSON.stringify(body);
+      const url = new URL('/api/chat', this.baseUrl);
+
+      const options = {
+        hostname: url.hostname,
+        port: url.port || 80,
+        path: url.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(data)
+        }
+      };
+
+      const req = http.request(options, (res) => {
+        let responseBody = '';
+        res.on('data', (chunk) => { responseBody += chunk; });
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            try { resolve(JSON.parse(responseBody)); }
+            catch (err) { reject(new Error('Failed to parse response: ' + err.message)); }
+          } else {
+            reject(new Error(`Ollama error (${res.statusCode}): ${responseBody}`));
+          }
+        });
+      });
+
+      req.on('error', reject);
+      req.write(data);
+      req.end();
+    });
+  }
+
   _makeRequest(body) {
     return new Promise((resolve, reject) => {
       const data = JSON.stringify(body);

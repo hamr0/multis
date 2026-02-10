@@ -44,6 +44,22 @@ class AnthropicProvider extends LLMProvider {
     return response;
   }
 
+  async generateWithMessages(messages, options = {}) {
+    const body = {
+      model: this.model,
+      max_tokens: options.maxTokens || 2048,
+      temperature: options.temperature || 0.7,
+      messages
+    };
+
+    if (options.system) {
+      body.system = options.system;
+    }
+
+    const response = await this._makeRequest(body);
+    return response.content[0].text;
+  }
+
   _makeRequest(body) {
     return new Promise((resolve, reject) => {
       const data = JSON.stringify(body);

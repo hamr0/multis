@@ -24,7 +24,9 @@
   },
   "memory": {
     "enabled": true,
-    "indexInterval": 300000,
+    "recent_window": 20,
+    "capture_threshold": 20,
+    "decay_rate": 0.05,
     "retentionDays": 90
   },
   "documents": {

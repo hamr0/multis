@@ -36,4 +36,36 @@ function buildRAGPrompt(question, chunks) {
   };
 }
 
-module.exports = { buildRAGPrompt };
+/**
+ * Build a system prompt that includes durable memory and optional RAG chunks.
+ * Used by the memory-aware conversation flow.
+ * @param {string} memoryMd - Contents of memory.md (durable notes)
+ * @param {Array} chunks - Optional RAG search chunks
+ * @returns {string} - Combined system prompt
+ */
+function buildMemorySystemPrompt(memoryMd, chunks) {
+  const parts = [SYSTEM_PROMPT];
+
+  if (memoryMd && memoryMd.trim()) {
+    parts.push(`\n## Memory (durable notes about this conversation)\n${memoryMd.trim()}`);
+  }
+
+  if (chunks && chunks.length > 0) {
+    const formattedChunks = chunks.map((chunk, i) => {
+      const source = chunk.name || 'unknown';
+      const section = chunk.sectionPath?.join(' > ') || '';
+      const pages = chunk.pageStart != null
+        ? chunk.pageEnd && chunk.pageEnd !== chunk.pageStart
+          ? `pages ${chunk.pageStart}-${chunk.pageEnd}`
+          : `page ${chunk.pageStart}`
+        : '';
+      const meta = [source, section, pages].filter(Boolean).join(', ');
+      return `--- Document ${i + 1} [${meta}] ---\n${chunk.content}`;
+    });
+    parts.push(`\n## Relevant documents\n${formattedChunks.join('\n\n')}`);
+  }
+
+  return parts.join('\n');
+}
+
+module.exports = { buildRAGPrompt, buildMemorySystemPrompt };

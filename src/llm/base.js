@@ -23,6 +23,16 @@ class LLMProvider {
   async generateWithTools(prompt, tools, options = {}) {
     throw new Error('Must implement generateWithTools() method');
   }
+
+  /**
+   * Generate a response from a messages array (for conversation memory)
+   * @param {Array<{role: string, content: string}>} messages - Conversation messages
+   * @param {Object} options - Additional options (system, temperature, etc.)
+   * @returns {Promise<string>} - The generated response
+   */
+  async generateWithMessages(messages, options = {}) {
+    throw new Error('Must implement generateWithMessages() method');
+  }
 }
 
 module.exports = { LLMProvider };
