@@ -1,4 +1,11 @@
-# multis
+```
+   ╭────────────────────╮
+   │  ╔╦╗╦ ╦╦ ╔╦╗╦╔═╗   │
+   │  ║║║║ ║║  ║ ║╚═╗   │
+   │  ╩ ╩╚═╝╩═╝╩ ╩╚═╝   │
+   ╰──╮─────────────────╯
+      ╰── your AI, your machine, every chat.
+```
 
 **A personal and business AI agent that lives in your chat apps** — answering questions from your documents, running commands on your machine, and auto-responding to contacts when you want it to.
 
