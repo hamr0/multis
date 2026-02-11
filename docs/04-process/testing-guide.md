@@ -1,6 +1,6 @@
 # Testing Guide
 
-> Last updated: 2026-02-11 | 168 tests | 0 failures
+> Last updated: 2026-02-11 | 182 tests | 0 failures
 
 ## Running Tests
 
@@ -21,17 +21,17 @@ node --test test/*.test.js            # unit only
     / ====== \   Integration: 62 tests
    / ======== \  Handler pipeline, CLI, SQLite smoke
   / ========== \
- / ============ \  Unit: 106 tests
-/________________\ PIN, injection, config, store, memory, cleanup, activation
+ / ============ \  Unit: 120 tests
+/________________\ PIN, injection, config, store, memory, cleanup, activation, governance
 ```
 
-**Current ratio: 106 unit / 62 integration / 0 automated e2e**
+**Current ratio: 120 unit / 62 integration / 0 automated e2e**
 
 This is the right shape for a single-user local tool. The integration layer catches wiring bugs (like the `escalationRetries` closure bug found during initial test writing). E2E is manual until we ship to others.
 
 ---
 
-## Unit Tests (106 tests, 9 suites)
+## Unit Tests (120 tests, 11 suites)
 
 All in `test/*.test.js`. Each tests a single module in isolation.
 
@@ -78,6 +78,13 @@ All in `test/*.test.js`. Each tests a single module in isolation.
 |-------|-------|----------------|
 | ChatMemoryManager | 5 | pruneMemory (section splitting), admin shared path, manager cache, trimRecent, shouldCapture |
 | runCapture | 2 | LLM summary indexed with scope, skip "no notable information" |
+
+### `test/governance.test.js` — 14 tests
+
+| Suite | Tests | What it covers |
+|-------|-------|----------------|
+| isCommandAllowed | 8 | Allowlist, denylist, not-in-allowlist denied, denylist wins, requireConfirmation, whitespace trimming |
+| isPathAllowed | 6 | Allowed path/subdirectory, denied path/subdirectory, denied priority over allowed, not-in-any-list |
 
 ---
 
@@ -181,6 +188,7 @@ Not now. Automate when:
 | SQLite + FTS5 | 4 | 13 | Schema, CRUD, search, activation, re-index, triggers |
 | Memory lifecycle | 7 | 2 | Prune, capture, /remember → /memory → /forget |
 | CLI | — | 7 | All subcommands except init (interactive) |
+| Governance | 14 | — | Allowlist, denylist, path validation, priority rules, confirmation |
 
 ### Gaps (known, acceptable)
 
@@ -191,35 +199,28 @@ Not now. Automate when:
 | Beeper adapter | Medium | Requires Desktop API running | Add mock HTTP server test when Beeper goes live |
 | Real LLM round-trip | Low | Costly, flaky, provider-dependent | Nightly CI job in Model C |
 | PDF/DOCX parsing | Medium | Depends on pdf-parse/mammoth | Add parser-specific tests if indexing bugs appear |
-| Governance validation | Medium | Uses real `~/.multis/governance.json` | Make `loadGovernance()` accept path param for testability |
+| Governance via handler | Low | Handler calls `execCommand` which uses real governance file | Inject governance into executor if needed |
 | Document upload (Telegram) | Low | Requires telegram.getFileLink mock | When upload bugs appear |
 | Capture fire-and-forget | Low | Async, hard to assert timing | Tested at unit level (runCapture) |
 | Concurrent access | Low | Single-user, single-process | Not applicable until multi-user |
 
 ### Recommended Next Tests (by priority)
 
-**1. Governance testability** (~30 min)
-Make `loadGovernance()` accept an optional path parameter. Then test:
-- Command in allowlist → allowed
-- Command in denylist → denied
-- Command not in either → denied
-- Path in allowed → allowed
-- Path in denied → denied
-- Confirm patterns → requiresConfirmation
+**~~1. Governance testability~~** — DONE (14 tests in `test/governance.test.js`)
 
-**2. PDF/DOCX parser smoke tests** (~1 hour)
+**1. PDF/DOCX parser smoke tests** (~1 hour)
 Create small test fixtures:
 - 2-page PDF with headings → verify section_path extraction
 - DOCX with styles → verify heading detection
 - Edge cases: empty file, single line, no headings
 
-**3. Beeper mock server** (when Beeper goes live)
+**2. Beeper mock server** (when Beeper goes live)
 Lightweight HTTP server returning canned responses:
 - `/v1/accounts` → account list
 - `/v1/chats` → chat list with messages
 - Verify message routing: self `//command`, self natural, business incoming
 
-**4. Error recovery** (~30 min)
+**3. Error recovery** (~30 min)
 - LLM throws mid-response → error message sent to user
 - SQLite DB locked → graceful failure
 - indexFile on nonexistent path → error message
