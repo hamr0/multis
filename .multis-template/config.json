@@ -22,12 +22,29 @@
     "temperature": 0.7,
     "maxTokens": 2048
   },
+  "security": {
+    "pin_hash": null,
+    "pin_timeout_hours": 24,
+    "pin_lockout_minutes": 60,
+    "prompt_injection_detection": true
+  },
+  "business": {
+    "escalation": {
+      "max_retries_before_escalate": 2,
+      "escalate_keywords": ["refund", "complaint", "manager", "supervisor", "urgent", "emergency"],
+      "allowed_urls": []
+    },
+    "admin_chat": null
+  },
   "memory": {
     "enabled": true,
     "recent_window": 20,
     "capture_threshold": 20,
     "decay_rate": 0.05,
-    "retentionDays": 90
+    "memory_max_sections": 5,
+    "retention_days": 90,
+    "admin_retention_days": 365,
+    "log_retention_days": 30
   },
   "documents": {
     "maxSize": 10485760,

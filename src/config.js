@@ -93,6 +93,39 @@ function loadConfig() {
     config.llm.model = process.env.LLM_MODEL;
   }
 
+  // Merge defaults for security section
+  if (!config.security) config.security = {};
+  config.security = {
+    pin_timeout_hours: 24,
+    pin_lockout_minutes: 60,
+    prompt_injection_detection: true,
+    ...config.security
+  };
+
+  // Merge defaults for business section
+  if (!config.business) config.business = {};
+  if (!config.business.escalation) config.business.escalation = {};
+  config.business.escalation = {
+    max_retries_before_escalate: 2,
+    escalate_keywords: ['refund', 'complaint', 'manager', 'supervisor', 'urgent', 'emergency'],
+    allowed_urls: [],
+    ...config.business.escalation
+  };
+
+  // Merge defaults for memory section
+  if (!config.memory) config.memory = {};
+  config.memory = {
+    enabled: true,
+    recent_window: 20,
+    capture_threshold: 20,
+    decay_rate: 0.05,
+    memory_max_sections: 5,
+    retention_days: 90,
+    admin_retention_days: 365,
+    log_retention_days: 30,
+    ...config.memory
+  };
+
   // Migrate: set first allowed user as owner if owner_id missing
   if (!config.owner_id && config.allowed_users && config.allowed_users.length > 0) {
     config.owner_id = config.allowed_users[0];

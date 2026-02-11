@@ -93,6 +93,16 @@ class DocumentStore {
 
       CREATE INDEX IF NOT EXISTS idx_access_chunk ON access_history(chunk_id);
     `);
+
+    // Migration: add scope column if missing
+    try {
+      this.db.prepare('SELECT scope FROM chunks LIMIT 0').get();
+    } catch {
+      this.db.exec(`
+        ALTER TABLE chunks ADD COLUMN scope TEXT DEFAULT 'kb';
+        CREATE INDEX IF NOT EXISTS idx_chunks_scope ON chunks(scope);
+      `);
+    }
   }
 
   /**
@@ -103,9 +113,9 @@ class DocumentStore {
       INSERT OR REPLACE INTO chunks
         (chunk_id, file_path, page_start, page_end, element_type, name, content,
          parent_chunk_id, section_path, section_level, document_type, metadata,
-         created_at, updated_at)
+         scope, created_at, updated_at)
       VALUES
-        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -121,6 +131,7 @@ class DocumentStore {
       chunk.sectionLevel,
       chunk.documentType,
       JSON.stringify(chunk.metadata),
+      chunk.scope || 'kb',
       chunk.createdAt,
       chunk.updatedAt
     );
@@ -144,7 +155,7 @@ class DocumentStore {
    * @param {number} limit - Max results
    * @returns {Array} - Chunks sorted by BM25 relevance
    */
-  search(query, limit = 10) {
+  search(query, limit = 10, options = {}) {
     // Convert natural language to FTS5 OR query
     // Filter out stopwords, join remaining with OR for broader matching
     const stopwords = new Set(['a','an','the','is','are','was','were','be','been',
@@ -163,16 +174,28 @@ class DocumentStore {
 
     const ftsQuery = terms.join(' OR ');
 
+    // Build scope filter if provided
+    const { scopes } = options;
+    let scopeClause = '';
+    const params = [ftsQuery];
+    if (scopes && scopes.length > 0) {
+      const placeholders = scopes.map(() => '?').join(', ');
+      scopeClause = `AND c.scope IN (${placeholders})`;
+      params.push(...scopes);
+    }
+    params.push(limit);
+
     const stmt = this.db.prepare(`
       SELECT c.*, rank
       FROM chunks_fts fts
       JOIN chunks c ON fts.chunk_id = c.chunk_id
       WHERE chunks_fts MATCH ?
+      ${scopeClause}
       ORDER BY rank
       LIMIT ?
     `);
 
-    const rows = stmt.all(ftsQuery, limit);
+    const rows = stmt.all(...params);
     return rows.map(row => ({
       chunkId: row.chunk_id,
       filePath: row.file_path,
@@ -186,6 +209,7 @@ class DocumentStore {
       sectionLevel: row.section_level,
       documentType: row.document_type,
       metadata: JSON.parse(row.metadata || '{}'),
+      scope: row.scope,
       activation: row.activation,
       rank: row.rank,
       createdAt: row.created_at,

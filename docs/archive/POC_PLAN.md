@@ -112,26 +112,58 @@
 
 ---
 
-### POC 6: Daemon + Onboarding (2 days)
-**Goal:** Prove installation works
+### POC 6: Daemon + CLI + Security + Data Isolation (3-4 days)
+**Goal:** Production-ready daemon with auth, data isolation, escalation, and cleanup
+
+**Full design:** `docs/00-context/blueprint.md` (sections 5-13)
 
 **Scope:**
-- `multis init` wizard (creates config, pairs with Telegram)
-- `multis start` (starts daemon)
-- `multis stop` (stops daemon)
-- Auto-start on reboot (systemd/launchd)
+- `multis init` wizard (config, Telegram, LLM, PIN, Beeper optional)
+- `multis start/stop/status` (daemon with PID file, systemd)
+- PIN authentication (4-6 digit, 24h timeout, lockout after 3 fails)
+- Chunk scoping (`scope` column: `kb`, `admin`, `user:<chatId>`)
+- `/index <path> kb|admin` (must specify scope, bot asks if missing)
+- Hard SQL scope filtering on all searches (customers only see `kb` + own history)
+- Prompt injection defense (pattern detection + `prompt_injection_audit.log`)
+- Memory.md pruning (keep last N sections, old summaries already in FTS)
+- FTS retention cleanup (90d default, admin 365d)
+- Log cleanup (30d auto-clean on startup + daily)
+- Admin identity aggregation (shared `admin/memory.md` across platforms)
+- Business-mode escalation (4-tier: KB → URLs → Clarify → Human)
+- Customer reminders forwarded as notes to admin (no customer self-serve cron)
+- Admin-only cron (`/remind`, `/cron`)
+- All settings configurable via `config.json` with sane defaults
 
 **Exit Criteria:**
-1. New user runs `multis init` → guided setup
-2. `multis start` → daemon runs in background
-3. Reboot machine → daemon auto-starts
-4. `multis stop` → daemon stops cleanly
+1. `multis init` → guided setup, PIN set, config created
+2. `multis start` → daemon runs in background, platforms connect
+3. `multis stop` → graceful shutdown
+4. Owner command after 24h → bot asks for PIN before executing
+5. `/index ~/docs/faq.pdf kb` → chunks stored with `scope=kb`
+6. `/index ~/docs/private.pdf admin` → chunks stored with `scope=admin`
+7. `/index ~/docs/file.pdf` (no scope) → bot asks "Label as kb or admin?"
+8. Customer in business-mode asks question → only sees `kb` + own history
+9. Customer tries prompt injection → flagged in `prompt_injection_audit.log`
+10. Capture fires → summary appended to memory.md + indexed in FTS → memory.md pruned to last 5 sections
+11. Old logs (>30d) auto-cleaned on startup
+12. Customer asks unanswerable question → escalated to admin via `admin_chat`
+13. Reboot → daemon auto-starts (systemd)
 
-**Files to create:**
-- `src/cli/init.js` - Onboarding wizard
-- `src/cli/daemon.js` - Start/stop daemon
-- `bin/multis.js` - CLI entry point
-- `scripts/install-daemon.sh` - systemd/launchd setup
+**Files to create/modify:**
+- `bin/multis.js` - CLI entry point (`init`, `start`, `stop`, `status`)
+- `src/cli/init.js` - Onboarding wizard (PIN, config, platform setup)
+- `src/cli/daemon.js` - Daemon lifecycle (PID file, fork, shutdown)
+- `src/security/pin.js` - PIN hash/verify, session tracking, lockout
+- `src/security/injection.js` - Prompt injection pattern detection + audit
+- `src/indexer/store.js` - Add `scope` column, scoped search
+- `src/bot/handlers.js` - `/index` scope arg, PIN check on owner commands, escalation routing
+- `src/memory/capture.js` - Scoped indexing, memory.md pruning
+- `src/memory/manager.js` - Admin memory aggregation, log cleanup
+- `src/cron/scheduler.js` - Cleanup jobs, admin reminders
+- `src/cron/jobs.js` - Job storage + execution
+- `skills/admin.md` - Admin policy skill
+- `skills/customer-support.md` - Customer policy skill
+- `scripts/multis.service` - systemd unit file
 
 ---
 
@@ -156,17 +188,56 @@
 
 ---
 
+### Optional: Phone Control (deferred)
+**Goal:** Control Android/iOS phone from multis or run multis on the phone
+
+**Android (Termux — full control):**
+- Termux + Node.js runs multis natively on the phone
+- `termux-api` package exposes phone hardware as shell commands:
+  - SMS: `termux-sms-send -n <number> <message>`
+  - Camera: `termux-camera-photo <path>`
+  - Notifications: `termux-notification --title <t> --content <c>`
+  - Clipboard: `termux-clipboard-set <text>`, `termux-clipboard-get`
+  - Location: `termux-location`
+  - TTS: `termux-tts-speak <text>`
+  - Volume, vibrate, battery status, Wi-Fi scan, media player
+- multis `/exec` already handles these — no new code needed on the phone
+- Background service via `termux-wake-lock` (OEM battery killers are the main risk)
+
+**Remote phone agent (Android → laptop):**
+- Lightweight Termux agent (~50 lines Node.js) on the phone
+- Connects back to laptop multis via reverse SSH tunnel or MQTT
+- Receives commands from laptop, executes `termux-api` calls, returns results
+- Enables "send SMS from laptop" / "take photo from laptop" workflows
+
+**iOS (interface-only):**
+- No native Node.js runtime — cannot run multis on device
+- Interface via Telegram already works (phone → Telegram → laptop multis → response)
+- Limited automation via Shortcuts app + webhook triggers (ntfy.sh/Pushover)
+  - Laptop multis sends HTTP to ntfy.sh → iOS Shortcut picks up → executes action
+  - Works for notifications, simple automations; no camera/SMS/clipboard access
+
+**Cross-platform fallback (both iOS/Android):**
+- Webhook triggers: ntfy.sh or Pushover → Tasker (Android) / Shortcuts (iOS)
+- No code running on phone, limited to what the automation app supports
+- Good for notifications and simple triggers, not full control
+
+**Status:** Skipped for now. Revisit after POC7 (multi-platform). Android via Termux is the only real path for full phone control.
+
+---
+
 ## Total Timeline
 
 - POC 1: 1 day ✅
 - POC 2: 1-2 days ✅
 - POC 3: 2 days ✅
-- POC 4: 1 day ← NEXT
-- POC 5: 2 days
-- POC 6: 2 days
+- POC 4: 1 day ✅
+- POC 5: 2 days ✅
+- POC 6: 3-4 days ← NEXT (daemon + CLI + security + data isolation)
 - POC 7: 3-5 days
+- Optional: Phone control (deferred)
 
-**Total: 12-16 days for full MVP with multi-platform**
+**Total: 13-18 days for full MVP with multi-platform**
 
 ---
 

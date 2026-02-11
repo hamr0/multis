@@ -46,7 +46,7 @@ npm test             # node --test test/**/*.test.js
 
 ## POC Status
 
-POC 1-4 done (bot, skills, indexing, RAG). POC 5 next (memory + ACT-R). POC 6 (daemon), POC 7 (multi-platform) planned.
+POC 1-5 done (bot, skills, indexing, RAG, memory). POC 6 next (daemon + CLI + security + data isolation). POC 7 (multi-platform) planned.
 
 ## Constraints
 

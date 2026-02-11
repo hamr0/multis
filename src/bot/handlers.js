@@ -1,11 +1,13 @@
 const { logAudit } = require('../governance/audit');
-const { addAllowedUser, isOwner } = require('../config');
+const { addAllowedUser, isOwner, saveConfig } = require('../config');
 const { execCommand, readFile, listSkills } = require('../skills/executor');
 const { DocumentIndexer } = require('../indexer/index');
 const { createLLMClient } = require('../llm/client');
 const { buildRAGPrompt, buildMemorySystemPrompt } = require('../llm/prompts');
 const { getMemoryManager } = require('../memory/manager');
 const { runCapture } = require('../memory/capture');
+const { PinManager, hashPin } = require('../security/pin');
+const { detectInjection, logInjectionAttempt } = require('../security/injection');
 
 /**
  * Check if a user is paired (allowed).
@@ -29,6 +31,8 @@ function isPaired(msgOrCtx, config) {
 function createMessageRouter(config) {
   const indexer = new DocumentIndexer();
   const memoryManagers = new Map();
+  const pinManager = new PinManager(config);
+  const escalationRetries = new Map(); // chatId -> retry count
 
   // Memory config defaults
   const memCfg = {
@@ -47,6 +51,9 @@ function createMessageRouter(config) {
     console.warn(`LLM init skipped: ${err.message}`);
   }
 
+  // Owner commands that require PIN auth
+  const PIN_PROTECTED = new Set(['exec', 'read', 'index']);
+
   return async (msg, platform) => {
     // Handle Telegram document uploads
     if (msg._document) {
@@ -57,7 +64,40 @@ function createMessageRouter(config) {
     // Natural language / business routing (set by platform adapter)
     if (msg.routeAs === 'natural' || msg.routeAs === 'business') {
       if (!isPaired(msg, config)) return;
-      await routeAsk(msg, platform, config, indexer, llm, msg.text, memoryManagers, memCfg);
+      await routeAsk(msg, platform, config, indexer, llm, msg.text, memoryManagers, memCfg, escalationRetries);
+      return;
+    }
+
+    // Check for PIN input (4-6 digit text from user with pending command)
+    const text = msg.text || '';
+    if (pinManager.hasPending(msg.senderId) && /^\d{4,6}$/.test(text.trim())) {
+      const pending = pinManager.getPending(msg.senderId);
+      if (!pending) {
+        await platform.send(msg.chatId, 'PIN entry expired. Please re-send the command.');
+        return;
+      }
+
+      // Handle PIN change flow
+      if (pending.action === 'pin_change') {
+        await handlePinChangeStep(msg, platform, config, pinManager, text.trim(), pending);
+        return;
+      }
+
+      const result = pinManager.authenticate(msg.senderId, text.trim());
+      if (!result.success) {
+        await platform.send(msg.chatId, result.reason);
+        if (result.locked) pinManager.clearPending(msg.senderId);
+        return;
+      }
+
+      // PIN correct — execute the stored command
+      await platform.send(msg.chatId, 'PIN accepted.');
+      const stored = pending;
+      pinManager.clearPending(msg.senderId);
+      // Re-route the stored command
+      msg = stored.msg;
+      // Fall through to command handling below with stored command/args
+      await executeCommand(stored.command, stored.args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager);
       return;
     }
 
@@ -82,6 +122,25 @@ function createMessageRouter(config) {
       return;
     }
 
+    // PIN check for protected owner commands
+    if (PIN_PROTECTED.has(command) && isOwner(msg.senderId, config)) {
+      const authNeeded = pinManager.needsAuth(msg.senderId);
+      if (authNeeded === 'locked') {
+        await platform.send(msg.chatId, 'Account locked due to failed PIN attempts. Try again later.');
+        return;
+      }
+      if (authNeeded === true) {
+        pinManager.setPending(msg.senderId, { command, args, msg, platform });
+        await platform.send(msg.chatId, 'Enter your PIN:');
+        return;
+      }
+    }
+
+    await executeCommand(command, args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager);
+  };
+}
+
+async function executeCommand(command, args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager) {
     switch (command) {
       case 'status':
         await routeStatus(msg, platform, config);
@@ -108,19 +167,22 @@ function createMessageRouter(config) {
         await platform.send(msg.chatId, `Available skills:\n${listSkills()}`);
         break;
       case 'ask':
-        await routeAsk(msg, platform, config, indexer, llm, args, memoryManagers, memCfg);
+        await routeAsk(msg, platform, config, indexer, llm, args, memoryManagers, memCfg, escalationRetries);
         break;
       case 'memory':
-        await routeMemory(msg, platform, memoryManagers);
+        await routeMemory(msg, platform, config, memoryManagers);
         break;
       case 'forget':
-        await routeForget(msg, platform, memoryManagers);
+        await routeForget(msg, platform, config, memoryManagers);
         break;
       case 'remember':
-        await routeRemember(msg, platform, memoryManagers, args);
+        await routeRemember(msg, platform, config, memoryManagers, args);
         break;
       case 'mode':
         await routeMode(msg, platform, config, args);
+        break;
+      case 'pin':
+        await routePinChange(msg, platform, config, pinManager);
         break;
       case 'help':
         await routeHelp(msg, platform, config);
@@ -128,11 +190,51 @@ function createMessageRouter(config) {
       default:
         // Telegram plain text (no recognized command) → implicit ask
         if (msg.platform === 'telegram' && !msg.text.startsWith('/')) {
-          await routeAsk(msg, platform, config, indexer, llm, msg.text, memoryManagers, memCfg);
+          await routeAsk(msg, platform, config, indexer, llm, msg.text, memoryManagers, memCfg, escalationRetries);
         }
         break;
     }
-  };
+}
+
+async function routePinChange(msg, platform, config, pinManager) {
+  if (!isOwner(msg.senderId, config)) {
+    await platform.send(msg.chatId, 'Owner only command.');
+    return;
+  }
+
+  if (!pinManager.isEnabled()) {
+    // No PIN set — go straight to setting new PIN
+    pinManager.setPending(msg.senderId, { action: 'pin_change', step: 'new' });
+    await platform.send(msg.chatId, 'No PIN set. Enter a new PIN (4-6 digits):');
+    return;
+  }
+
+  // PIN is set — verify current first
+  pinManager.setPending(msg.senderId, { action: 'pin_change', step: 'verify' });
+  await platform.send(msg.chatId, 'Enter your current PIN:');
+}
+
+async function handlePinChangeStep(msg, platform, config, pinManager, pin, pending) {
+  if (pending.step === 'verify') {
+    const result = pinManager.authenticate(msg.senderId, pin);
+    if (!result.success) {
+      await platform.send(msg.chatId, result.reason);
+      if (result.locked) pinManager.clearPending(msg.senderId);
+      return;
+    }
+    pinManager.setPending(msg.senderId, { action: 'pin_change', step: 'new' });
+    await platform.send(msg.chatId, 'Enter your new PIN (4-6 digits):');
+  } else if (pending.step === 'new') {
+    if (!/^\d{4,6}$/.test(pin)) {
+      await platform.send(msg.chatId, 'PIN must be 4-6 digits. Try again:');
+      return;
+    }
+    config.security.pin_hash = hashPin(pin);
+    saveConfig(config);
+    pinManager.clearPending(msg.senderId);
+    await platform.send(msg.chatId, 'PIN updated successfully.');
+    logAudit({ action: 'pin_change', user_id: msg.senderId });
+  }
 }
 
 async function routeStart(msg, platform, config, code) {
@@ -186,7 +288,6 @@ async function routeStatus(msg, platform, config) {
 async function routeUnpair(msg, platform, config) {
   const userId = msg.senderId;
   config.allowed_users = config.allowed_users.filter(id => id !== userId);
-  const { saveConfig } = require('../config');
   saveConfig(config);
 
   const prefix = msg.platform === 'telegram' ? '/' : '//';
@@ -242,24 +343,42 @@ async function routeRead(msg, platform, config, filePath) {
   await platform.send(msg.chatId, result.output);
 }
 
-async function routeIndex(msg, platform, config, indexer, filePath) {
+async function routeIndex(msg, platform, config, indexer, args) {
   if (!isOwner(msg.senderId, config)) {
     await platform.send(msg.chatId, 'Owner only command.');
     return;
   }
 
-  if (!filePath) {
+  if (!args) {
     const prefix = msg.platform === 'telegram' ? '/' : '//';
-    await platform.send(msg.chatId, `Usage: ${prefix}index <path>`);
+    await platform.send(msg.chatId, `Usage: ${prefix}index <path> <kb|admin>`);
+    return;
+  }
+
+  // Parse: last token may be scope (kb or admin)
+  const parts = args.trim().split(/\s+/);
+  const validScopes = ['kb', 'admin'];
+  let scope = null;
+  let filePath;
+
+  if (parts.length >= 2 && validScopes.includes(parts[parts.length - 1].toLowerCase())) {
+    scope = parts.pop().toLowerCase();
+    filePath = parts.join(' ');
+  } else {
+    filePath = parts.join(' ');
+  }
+
+  if (!scope) {
+    await platform.send(msg.chatId, 'Please specify scope: kb (public knowledge base) or admin (owner-only).\nExample: /index ~/doc.pdf kb');
     return;
   }
 
   const expanded = filePath.replace(/^~/, process.env.HOME || process.env.USERPROFILE);
 
   try {
-    await platform.send(msg.chatId, `Indexing: ${filePath}...`);
-    const count = await indexer.indexFile(expanded);
-    await platform.send(msg.chatId, `Indexed ${count} chunks from ${filePath}`);
+    await platform.send(msg.chatId, `Indexing: ${filePath} (scope: ${scope})...`);
+    const count = await indexer.indexFile(expanded, scope);
+    await platform.send(msg.chatId, `Indexed ${count} chunks from ${filePath} [${scope}]`);
   } catch (err) {
     await platform.send(msg.chatId, `Index error: ${err.message}`);
   }
@@ -272,7 +391,9 @@ async function routeSearch(msg, platform, config, indexer, query) {
     return;
   }
 
-  const results = indexer.search(query, 5);
+  const admin = isOwner(msg.senderId, config);
+  const scopes = admin ? undefined : ['kb', `user:${msg.chatId}`];
+  const results = indexer.search(query, 5, { scopes });
 
   if (results.length === 0) {
     await platform.send(msg.chatId, 'No results found.');
@@ -301,7 +422,7 @@ async function routeDocs(msg, platform, config, indexer) {
   await platform.send(msg.chatId, lines.join('\n') || 'No documents indexed yet.');
 }
 
-async function routeAsk(msg, platform, config, indexer, llm, question, memoryManagers, memCfg) {
+async function routeAsk(msg, platform, config, indexer, llm, question, memoryManagers, memCfg, escalationRetries) {
   if (!question) {
     const prefix = msg.platform === 'telegram' ? '/' : '//';
     await platform.send(msg.chatId, `Usage: ${prefix}ask <question>`);
@@ -313,7 +434,24 @@ async function routeAsk(msg, platform, config, indexer, llm, question, memoryMan
     return;
   }
 
-  const mem = memoryManagers ? getMemoryManager(memoryManagers, msg.chatId) : null;
+  const admin = isOwner(msg.senderId, config);
+
+  // Prompt injection detection for non-admin chats
+  if (!admin && config.security?.prompt_injection_detection) {
+    const injection = detectInjection(question);
+    if (injection.flagged) {
+      logInjectionAttempt({
+        chatId: msg.chatId,
+        senderId: msg.senderId,
+        platform: msg.platform,
+        text: question,
+        patterns: injection.patterns
+      });
+      // Still answer — scoped data is the hard boundary
+    }
+  }
+
+  const mem = memoryManagers ? getMemoryManager(memoryManagers, msg.chatId, { isAdmin: admin }) : null;
 
   try {
     // Record user message
@@ -322,8 +460,51 @@ async function routeAsk(msg, platform, config, indexer, llm, question, memoryMan
       mem.appendToLog('user', question);
     }
 
-    // Search for relevant documents
-    const chunks = indexer.search(question, 5);
+    // Search for relevant documents (scoped)
+    const scopes = admin ? undefined : ['kb', `user:${msg.chatId}`];
+    const chunks = indexer.search(question, 5, { scopes });
+
+    // Business escalation for non-admin chats
+    if (msg.routeAs === 'business' && !admin && escalationRetries) {
+      const esc = config.business?.escalation || {};
+      const keywords = esc.escalate_keywords || [];
+      const maxRetries = esc.max_retries_before_escalate || 2;
+      const questionLower = question.toLowerCase();
+      const keywordMatch = keywords.some(k => questionLower.includes(k.toLowerCase()));
+
+      if (keywordMatch) {
+        // Immediate escalation on keyword
+        await platform.send(msg.chatId, "I'm checking with the team on this. Someone will follow up shortly.");
+        if (config.business?.admin_chat) {
+          await platform.send(config.business.admin_chat, `[Escalation] Chat ${msg.chatId}: "${question}" (keyword match)`);
+        }
+        logAudit({ action: 'escalate', chatId: msg.chatId, reason: 'keyword', question });
+        escalationRetries.delete(msg.chatId);
+        return;
+      }
+
+      if (chunks.length === 0) {
+        const retries = (escalationRetries.get(msg.chatId) || 0) + 1;
+        escalationRetries.set(msg.chatId, retries);
+
+        if (retries >= maxRetries) {
+          await platform.send(msg.chatId, "I'm checking with the team on this. Someone will follow up shortly.");
+          if (config.business?.admin_chat) {
+            await platform.send(config.business.admin_chat, `[Escalation] Chat ${msg.chatId}: "${question}" (${retries} unanswered)`);
+          }
+          logAudit({ action: 'escalate', chatId: msg.chatId, reason: 'retries', retries, question });
+          escalationRetries.delete(msg.chatId);
+          return;
+        }
+
+        await platform.send(msg.chatId, "I don't have information on that. Could you rephrase or provide more details?");
+        logAudit({ action: 'ask_clarify', chatId: msg.chatId, retries, question });
+        return;
+      }
+
+      // Successful answer — reset retry counter
+      escalationRetries.delete(msg.chatId);
+    }
 
     // Build messages array from recent conversation
     const recent = mem ? mem.loadRecent() : [];
@@ -355,7 +536,12 @@ async function routeAsk(msg, platform, config, indexer, llm, question, memoryMan
 
     // Fire-and-forget capture if threshold reached
     if (mem && memCfg && mem.shouldCapture(memCfg.capture_threshold)) {
-      runCapture(msg.chatId, mem, llm, indexer, { keepLast: 5 }).catch(err => {
+      const captureScope = admin ? 'admin' : `user:${msg.chatId}`;
+      runCapture(msg.chatId, mem, llm, indexer, {
+        keepLast: 5,
+        scope: captureScope,
+        maxSections: memCfg.memory_max_sections
+      }).catch(err => {
         console.error(`[capture] Background error: ${err.message}`);
       });
     }
@@ -364,8 +550,8 @@ async function routeAsk(msg, platform, config, indexer, llm, question, memoryMan
   }
 }
 
-async function routeMemory(msg, platform, memoryManagers) {
-  const mem = getMemoryManager(memoryManagers, msg.chatId);
+async function routeMemory(msg, platform, config, memoryManagers) {
+  const mem = getMemoryManager(memoryManagers, msg.chatId, { isAdmin: isOwner(msg.senderId, config) });
   const memory = mem.loadMemory();
   if (!memory.trim()) {
     await platform.send(msg.chatId, 'No memory notes for this chat yet.');
@@ -374,20 +560,20 @@ async function routeMemory(msg, platform, memoryManagers) {
   await platform.send(msg.chatId, `Memory notes:\n\n${memory}`);
 }
 
-async function routeForget(msg, platform, memoryManagers) {
-  const mem = getMemoryManager(memoryManagers, msg.chatId);
+async function routeForget(msg, platform, config, memoryManagers) {
+  const mem = getMemoryManager(memoryManagers, msg.chatId, { isAdmin: isOwner(msg.senderId, config) });
   mem.clearMemory();
   await platform.send(msg.chatId, 'Memory cleared for this chat.');
   logAudit({ action: 'forget', user_id: msg.senderId, chatId: msg.chatId });
 }
 
-async function routeRemember(msg, platform, memoryManagers, note) {
+async function routeRemember(msg, platform, config, memoryManagers, note) {
   if (!note) {
     const prefix = msg.platform === 'telegram' ? '/' : '//';
     await platform.send(msg.chatId, `Usage: ${prefix}remember <note>`);
     return;
   }
-  const mem = getMemoryManager(memoryManagers, msg.chatId);
+  const mem = getMemoryManager(memoryManagers, msg.chatId, { isAdmin: isOwner(msg.senderId, config) });
   mem.appendMemory(note);
   await platform.send(msg.chatId, 'Noted.');
   logAudit({ action: 'remember', user_id: msg.senderId, chatId: msg.chatId, note });
@@ -406,7 +592,6 @@ async function routeMode(msg, platform, config, mode) {
   if (!config.platforms.beeper.chat_modes) config.platforms.beeper.chat_modes = {};
 
   config.platforms.beeper.chat_modes[msg.chatId] = mode;
-  const { saveConfig } = require('../config');
   saveConfig(config);
 
   await platform.send(msg.chatId, `Chat mode set to: ${mode}`);
@@ -435,7 +620,8 @@ async function routeHelp(msg, platform, config) {
     cmds.splice(1, 0,
       `${prefix}exec <cmd> - Run a shell command (owner)`,
       `${prefix}read <path> - Read a file or directory (owner)`,
-      `${prefix}index <path> - Index a document (owner)`,
+      `${prefix}index <path> <kb|admin> - Index a document (owner)`,
+      `${prefix}pin - Change PIN (owner)`,
       'Send a file to index it (owner, Telegram only)'
     );
   }
@@ -467,8 +653,8 @@ async function handleDocumentUpload(msg, platform, config, indexer) {
     const response = await fetch(fileLink.href);
     const buffer = Buffer.from(await response.arrayBuffer());
 
-    const count = await indexer.indexBuffer(buffer, filename);
-    await platform.send(msg.chatId, `Indexed ${count} chunks from ${filename}`);
+    const count = await indexer.indexBuffer(buffer, filename, 'kb');
+    await platform.send(msg.chatId, `Indexed ${count} chunks from ${filename} [kb]`);
     logAudit({ action: 'index_upload', user_id: msg.senderId, filename, chunks: count });
   } catch (err) {
     await platform.send(msg.chatId, `Index error: ${err.message}`);

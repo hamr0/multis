@@ -11,13 +11,21 @@ const MEMORY_BASE = path.join(
  * All I/O is synchronous (single process, no concurrency).
  */
 class ChatMemoryManager {
-  constructor(chatId) {
+  constructor(chatId, options = {}) {
     this.chatId = String(chatId);
+    this.isAdmin = !!options.isAdmin;
     this.dir = path.join(MEMORY_BASE, this.chatId);
     this.profilePath = path.join(this.dir, 'profile.json');
     this.recentPath = path.join(this.dir, 'recent.json');
-    this.memoryPath = path.join(this.dir, 'memory.md');
     this.logDir = path.join(this.dir, 'log');
+    // Admin chats share a single memory.md across platforms
+    if (this.isAdmin) {
+      const adminDir = path.join(MEMORY_BASE, 'admin');
+      if (!fs.existsSync(adminDir)) fs.mkdirSync(adminDir, { recursive: true });
+      this.memoryPath = path.join(adminDir, 'memory.md');
+    } else {
+      this.memoryPath = path.join(this.dir, 'memory.md');
+    }
     this.ensureDirectories();
   }
 
@@ -90,6 +98,16 @@ class ChatMemoryManager {
     fs.writeFileSync(this.memoryPath, '');
   }
 
+  pruneMemory(maxSections = 5) {
+    const content = this.loadMemory();
+    if (!content.trim()) return;
+    // Split by date-stamped section headers
+    const sections = content.split(/(?=\n## \d{4}-)/);
+    if (sections.length <= maxSections) return;
+    const kept = sections.slice(-maxSections);
+    fs.writeFileSync(this.memoryPath, kept.join('').trimStart());
+  }
+
   // --- Daily log (append-only) ---
 
   appendToLog(role, content) {
@@ -113,11 +131,12 @@ class ChatMemoryManager {
  * Get or create a ChatMemoryManager for a chatId.
  * Uses a Map cache to avoid re-creating managers.
  */
-function getMemoryManager(cache, chatId) {
-  if (!cache.has(chatId)) {
-    cache.set(chatId, new ChatMemoryManager(chatId));
+function getMemoryManager(cache, chatId, options = {}) {
+  const key = `${chatId}:${options.isAdmin ? 'admin' : 'user'}`;
+  if (!cache.has(key)) {
+    cache.set(key, new ChatMemoryManager(chatId, options));
   }
-  return cache.get(chatId);
+  return cache.get(key);
 }
 
 module.exports = { ChatMemoryManager, getMemoryManager };

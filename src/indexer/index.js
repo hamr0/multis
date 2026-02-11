@@ -20,7 +20,7 @@ class DocumentIndexer {
    * @param {string} filePath - Path to document
    * @returns {Promise<number>} - Number of chunks created
    */
-  async indexFile(filePath) {
+  async indexFile(filePath, scope = 'kb') {
     const resolved = path.resolve(filePath);
 
     if (!fs.existsSync(resolved)) {
@@ -45,12 +45,18 @@ class DocumentIndexer {
     // Chunk (split large sections)
     const processed = this.chunker.process(rawChunks);
 
+    // Set scope on each chunk
+    for (const chunk of processed) {
+      chunk.scope = scope;
+    }
+
     // Store
     this.store.saveChunks(processed);
 
     logAudit({
       action: 'index_file',
       file: resolved,
+      scope,
       raw_chunks: rawChunks.length,
       stored_chunks: processed.length
     });
@@ -64,7 +70,7 @@ class DocumentIndexer {
    * @param {string} filename - Original filename
    * @returns {Promise<number>} - Number of chunks created
    */
-  async indexBuffer(buffer, filename) {
+  async indexBuffer(buffer, filename, scope = 'kb') {
     // Write to temp file, index it, then clean up
     const tmpDir = path.join(require('../config').MULTIS_DIR, 'tmp');
     if (!fs.existsSync(tmpDir)) {
@@ -75,7 +81,7 @@ class DocumentIndexer {
     fs.writeFileSync(tmpPath, buffer);
 
     try {
-      const count = await this.indexFile(tmpPath);
+      const count = await this.indexFile(tmpPath, scope);
       return count;
     } finally {
       // Clean up temp file
@@ -131,8 +137,8 @@ class DocumentIndexer {
    * @param {number} limit - Max results
    * @returns {Array} - Matching chunks
    */
-  search(query, limit = 5) {
-    return this.store.search(query, limit);
+  search(query, limit = 5, options = {}) {
+    return this.store.search(query, limit, options);
   }
 
   /**

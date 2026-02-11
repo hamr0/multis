@@ -18,6 +18,7 @@ class DocChunk {
     sectionLevel = 0,           // heading depth 1-5, 0 = body
     documentType = 'unknown',   // pdf, docx, md, txt
     metadata = {},
+    scope = 'kb',               // kb, admin, user:<chatId>
     createdAt = null,
     updatedAt = null
   }) {
@@ -33,6 +34,7 @@ class DocChunk {
     this.sectionLevel = sectionLevel;
     this.documentType = documentType;
     this.metadata = metadata;
+    this.scope = scope;
     this.createdAt = createdAt || new Date().toISOString();
     this.updatedAt = updatedAt || new Date().toISOString();
   }
@@ -59,6 +61,7 @@ class DocChunk {
       section_level: this.sectionLevel,
       document_type: this.documentType,
       metadata: this.metadata,
+      scope: this.scope,
       created_at: this.createdAt,
       updated_at: this.updatedAt
     };

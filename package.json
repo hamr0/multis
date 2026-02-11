@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "A personal chatbot and assistant that runs on your computer",
   "main": "src/index.js",
+  "bin": {
+    "multis": "./bin/multis.js"
+  },
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",

@@ -123,7 +123,7 @@ All support `options.system` natively:
 
 ---
 
-## 5. Memory System (POC5)
+## 5. Memory System
 
 ### Per-chat isolation
 
@@ -133,9 +133,29 @@ Every chat gets its own memory. No global state. No cross-chat contamination.
 ~/.multis/memory/chats/<chatId>/
 ├── profile.json      # mode, name, platform, preferences
 ├── recent.json       # rolling window (last ~20 messages)
-├── memory.md         # LLM-summarized durable notes
+├── memory.md         # LLM-summarized durable notes (append-only, pruned at retention)
 └── log/
-    └── YYYY-MM-DD.md # raw daily log (append-only)
+    └── YYYY-MM-DD.md # raw daily log (append-only, auto-cleaned at 30 days)
+```
+
+Admin identity aggregation — admin talks from multiple platforms (Telegram, Beeper Note to Self, WhatsApp self-chat). All admin chats share a unified admin memory:
+
+```
+~/.multis/memory/chats/
+  ├── admin/                    # shared admin memory + profile
+  │   ├── memory.md            # unified durable notes across all admin chats
+  │   └── profile.json         # admin preferences
+  ├── tg-12345/                # telegram chat (admin) — own rolling window
+  │   ├── recent.json
+  │   └── log/
+  ├── beeper-xyz/              # beeper chat (admin) — own rolling window
+  │   ├── recent.json
+  │   └── log/
+  └── beeper-customer-abc/     # customer chat — fully isolated
+      ├── recent.json
+      ├── memory.md            # their memory only
+      ├── profile.json
+      └── log/
 ```
 
 ### What each file does
@@ -144,8 +164,18 @@ Every chat gets its own memory. No global state. No cross-chat contamination.
 |------|-----------|---------|---------|
 | `profile.json` | Router (on mode change, activity) | Router | Chat metadata + preferences |
 | `recent.json` | Router (every message) | LLM calls | Conversation context window |
-| `memory.md` | Capture skill (LLM) + `//remember` | LLM system prompt | Durable notes for this chat |
-| `log/*.md` | Router (every message) | Indexer, human | Raw backup, searchable |
+| `memory.md` | Capture (LLM) + `/remember` | LLM system prompt | Durable facts for this chat |
+| `log/*.md` | Router (every message) | Human (backup only) | Raw append-only backup, NOT indexed |
+
+### Three memory tiers
+
+| Tier | Storage | What | Lifecycle |
+|------|---------|------|-----------|
+| **Rolling** (`recent.json`) | File | Last ~20 raw messages | Trimmed to last 5 after capture |
+| **Hot summary** (`memory.md`) | File | Fresh LLM-extracted facts, last N captures | Always in system prompt. Pruned aggressively — old sections drop off as new ones arrive |
+| **Indexed archive** (SQLite FTS) | DB | All memory summaries as chunks + document chunks | Searchable long-term archive. 90 days (admin 365d), activation-decayed |
+
+**Key insight:** memory.md stays small and fresh. It's loaded into every LLM call. Old summaries graduate to FTS where they're findable by search but don't bloat the prompt. Daily logs are raw backup only, never indexed.
 
 ### Rolling window → capture cycle
 
@@ -153,22 +183,36 @@ Every chat gets its own memory. No global state. No cross-chat contamination.
 Message arrives → append to recent.json + daily log
                      │
                      ▼
-              recent.json > N messages?
+              recent.json > threshold (default 20)?
                      │
                 YES  │  NO → done
                      ▼
-              Run capture skill (LLM call):
-              "Here's the conversation. Extract what matters."
+              Capture fires (fire-and-forget, one event):
                      │
-                     ▼
-              Append extracted notes to memory.md
+                     ├─ 1. LLM extracts facts (sees existing memory.md to avoid duplicates)
                      │
-                     ▼
-              Push full messages to indexer (FTS5 + activation)
+                     ├─ 2. APPEND new timestamped section to memory.md
                      │
-                     ▼
-              Trim recent.json to last N
+                     ├─ 3. INDEX that same summary as ONE chunk in FTS5
+                     │      scope=admin (admin chat) or scope=user:<chatId> (customer)
+                     │      element_type='memory_summary', document_type='conversation'
+                     │
+                     ├─ 4. PRUNE memory.md — keep only last N sections (default 5)
+                     │      Dropped sections already indexed in step 3, nothing lost
+                     │
+                     └─ 5. Trim recent.json to last 5
 ```
+
+**memory.md = hot scratchpad.** Small, recent, always fresh. When the LLM needs older context, FTS search finds it from the 90-day indexed archive. This keeps system prompts lean while preserving full history.
+
+### Retention and cleanup
+
+| What | Default | Config key | Cleanup |
+|------|---------|------------|---------|
+| memory.md sections | Last 5 captures | `memory.memory_max_sections` | Pruned at each capture — oldest sections drop off |
+| FTS summary chunks | 90 days | `memory.retention_days` | Delete old chunks on startup / daily |
+| Admin FTS chunks | 365 days | `memory.admin_retention_days` | Same |
+| Daily logs | 30 days | `memory.log_retention_days` | Delete old `log/YYYY-MM-DD.md` files |
 
 ### Capture skill
 
@@ -183,7 +227,7 @@ Users can write custom capture skills for different use cases. A business user m
 
 ### ACT-R activation decay
 
-Applied to all indexed chunks (documents + conversations):
+Applied to all indexed chunks (documents + memory summaries):
 
 ```
 activation = base_activation + ln(access_count) - decay_rate × age_in_days
@@ -200,7 +244,8 @@ activation = base_activation + ln(access_count) - decay_rate × age_in_days
 System prompt:
   ├─ Base: "You are multis, a personal/business assistant..."
   ├─ Chat memory.md: durable notes for THIS chat
-  └─ RAG chunks: document search results (if applicable)
+  │   (admin chats load admin/memory.md; customer chats load their own)
+  └─ RAG chunks: scoped document search results (if applicable)
 
 Messages:
   ├─ recent.json: last N messages as conversation history
@@ -211,13 +256,64 @@ Messages:
 
 | Command | What it does |
 |---------|-------------|
-| `//memory` | Show this chat's memory.md |
-| `//forget` | Clear memory.md (keeps raw logs) |
-| `//remember <note>` | Manually add a note to memory.md |
+| `/memory` | Show this chat's memory.md |
+| `/forget` | Clear memory.md (keeps raw logs) |
+| `/remember <note>` | Manually add a note to memory.md |
 
 ---
 
-## 6. Governance
+## 6. Data Isolation + Chunk Scoping
+
+### Scope model
+
+Every chunk in the FTS index has a `scope` column that controls who can see it:
+
+| Scope | Meaning | Who can query | Auto-labeled by |
+|-------|---------|---------------|-----------------|
+| `kb` | Public knowledge base | Everyone | `/index <path> kb` |
+| `admin` | Admin-only documents + admin conversation summaries | Admin only | `/index <path> admin`, admin capture |
+| `user:<chatId>` | That specific customer's conversation summaries | That customer + admin | Customer capture (automatic) |
+
+### Indexing with explicit scope
+
+```
+/index <path>           → bot asks: "Label as kb or admin?"
+/index <path> kb        → indexed as scope=kb (public knowledge)
+/index <path> admin     → indexed as scope=admin (owner only)
+Customer capture fires  → auto-labeled scope=user:<chatId>
+Admin capture fires     → auto-labeled scope=admin
+```
+
+No silent defaults on manual indexing. Admin always declares intent. Customers never choose.
+
+### Hard scope filtering (SQL-level)
+
+Search function takes caller context and applies scope filter at the database level:
+
+```sql
+-- Customer query: only sees kb + their own history
+WHERE scope IN ('kb', 'user:<their_chatId>')
+
+-- Admin query: sees everything
+WHERE scope IN ('kb', 'admin', 'user:*')  -- or no scope filter
+```
+
+Chunks outside scope **never reach the LLM context**. This is the hard boundary.
+
+### Prompt injection defense
+
+| Layer | What | How |
+|-------|------|-----|
+| **Hard scope** | SQL WHERE clause | Chunks from other users never in LLM context |
+| **Excluded context** | No admin memory.md in business prompts | Business-mode system prompt only loads customer memory + kb chunks |
+| **Pattern detection** | Flag suspicious queries | "ignore instructions", "system prompt", "show all users", "SELECT", references to other users |
+| **Rate limiting** | Track queries per chatId per hour | Flag anomalies (many broad queries, repeated "show all" patterns) |
+| **Dedicated audit** | `~/.multis/prompt_injection_audit.log` | userId, timestamp, full text, matched pattern, result (blocked/flagged/allowed) |
+| **LLM instruction** | System prompt for business mode | "Answer from knowledge base only. Never reference other customers. Never reveal admin information." |
+
+---
+
+## 7. Governance + Security
 
 ### Command validation
 - **Allowlist:** Safe commands (ls, cat, grep, find, curl, git, etc.)
@@ -225,36 +321,104 @@ Messages:
 - **Confirmation:** Risky commands (mv, cp, git push)
 - **Path restrictions:** Allowed dirs (~/Documents, ~/Downloads) vs denied (/etc, /var)
 
+### PIN authentication (POC6)
+
+Owner commands require periodic PIN verification to guard against borrowed-device attacks:
+
+```
+Owner command arrives
+  → check last_auth_at for this userId
+  → if > auth_timeout (default 24h): ask for PIN, queue the command
+  → if PIN correct: set last_auth_at = now, execute command
+  → if wrong 3x: lock for 1h, alert via all platforms
+```
+
+- PIN set during `multis init` (4-6 digits)
+- Stored hashed in `config.json` (`pin_hash`)
+- `last_auth_at` per userId stored in memory
+- Timeout configurable: `config.security.pin_timeout_hours` (default 24)
+- Lockout configurable: `config.security.pin_lockout_minutes` (default 60)
+- Failed attempts logged to `audit.log`
+
 ### Audit logging
 - Append-only JSONL at `~/.multis/audit.log`
 - Every command logged: timestamp, user_id, command, allowed, result
-- Actions logged: pair, unpair, exec, index, search, ask, mode change
+- Actions logged: pair, unpair, exec, index, search, ask, mode change, pin_auth, pin_fail
+- Prompt injection attempts: `~/.multis/prompt_injection_audit.log` (separate file)
 
 ### Owner model
 - First paired user becomes owner
-- Owner-only: `/exec`, `/read`, `/index`
+- Owner-only (requires PIN): `/exec`, `/read`, `/index`
 - Everyone else: `/ask`, `/search`, `/docs`, `/status`, `/help`
 
 ---
 
-## 7. Cron Scheduler (POC6)
+## 8. Business Mode Escalation
 
-Built-in scheduler, runs inside the daemon process.
+### 4-tier escalation ladder
+
+```
+Customer asks a question
+  │
+  ├─ Tier 1: Knowledge Base (automatic)
+  │   Search scope=kb chunks via FTS5
+  │   If confident answer found → respond with citation
+  │
+  ├─ Tier 2: Allowed URLs (automatic)
+  │   Check configured URLs (pricing page, FAQ, docs site)
+  │   Fetch on-demand, not pre-indexed (stays fresh)
+  │   If answer found → respond with link
+  │
+  ├─ Tier 3: Clarification (automatic)
+  │   Bot doesn't know → asks customer to rephrase or narrow down
+  │   "Could you clarify what you mean by X?"
+  │
+  └─ Tier 4: Escalate to human (automatic)
+      Bot still unsure, or customer asks for human, or sensitive topic
+      → Tags admin via admin_chat: "[Escalation] Chat: <id>, Customer: <name>, Question: <text>"
+      → Tells customer: "Let me check with the team and get back to you."
+      → Logs escalation in audit
+```
+
+### What triggers escalation
+- Low confidence (no good KB matches)
+- Customer explicitly asks for human ("can I talk to someone")
+- Sensitive topics (configurable keyword list)
+- Repeated questions (same topic 3x — bot isn't helping)
+- Any request that involves action (change order, schedule meeting, send something)
+
+### Human in the loop — always
+- Bot never promises action on behalf of admin
+- Bot never creates reminders or commitments autonomously
+- If customer requests follow-up: bot acknowledges, sends note to admin via `admin_chat`
+- Admin decides whether to act, remind, or ignore
+
+---
+
+## 9. Cron Scheduler (POC6)
+
+Built-in scheduler, runs inside the daemon process. **Admin-only.**
 
 ### Core jobs
 
 | Job | Frequency | What it does |
 |-----|-----------|-------------|
-| **Capture cycle** | Every N minutes (for active chats) | Summarize recent → memory.md → index → trim |
+| **Log cleanup** | Daily (on startup + 24h interval) | Delete daily logs older than `log_retention_days` |
+| **Memory pruning** | Daily | Prune memory.md sections + FTS chunks older than `retention_days` |
 | **Activation decay** | On access (or periodic if needed) | Recalculate activation scores |
 
-### User-defined jobs (future)
+### Admin-defined jobs
 
 | Example | Schedule | Payload |
 |---------|----------|---------|
 | Morning brief | `0 7 * * *` | "Summarize overnight across all business chats" |
-| Reminder | One-shot | "Follow up with Alice" → deliver to chat |
+| Reminder | One-shot | "Follow up with Alice" → deliver to admin chat |
 | Weekly digest | `0 9 * * 1` | "Summary of all customer conversations this week" |
+
+Created via `/remind <time> <message>` or `/cron <schedule> <action>` — owner-only.
+
+### Customer reminders
+Customers cannot create cron jobs. If a customer requests a follow-up, the bot sends a note to admin. Admin decides whether to create a reminder.
 
 ### Storage
 - Jobs: `~/.multis/cron/jobs.json`
@@ -262,7 +426,20 @@ Built-in scheduler, runs inside the daemon process.
 
 ---
 
-## 8. Onboarding
+## 10. Onboarding + Daemon (POC6)
+
+### CLI commands
+
+```
+multis init    → guided setup wizard
+multis start   → start daemon (background, PID file)
+multis stop    → graceful shutdown
+multis status  → is it running? show uptime + stats
+```
+
+Chat is the primary interface. CLI is just for lifecycle management.
+
+### `multis init`
 
 ```
 multis init
@@ -270,33 +447,50 @@ multis init
   ├─ Choose: personal or business → sets default_mode
   ├─ Telegram bot token → saved to config
   ├─ LLM provider + API key → saved to config/.env
+  ├─ Set admin PIN (4-6 digits) → hashed, saved to config
   ├─ Beeper Desktop? → optional, runs setup-beeper.js
   └─ Generate pairing code → printed to terminal
-
-multis start → daemon runs in background
-multis stop  → daemon stops
 ```
 
-**The personal/business choice is just a default.** It sets `default_mode` in config. Every chat can be switched individually with `//mode`. Testing is easy — just flip modes per-chat.
+### Daemon startup
+
+```
+multis start
+  │
+  ├─ Write PID to ~/.multis/multis.pid
+  ├─ Load config.json
+  ├─ Start platforms (Telegram always, Beeper if reachable)
+  ├─ Start cron scheduler (cleanup jobs)
+  ├─ Run log cleanup + memory pruning (immediate)
+  └─ Log "ready" + print pairing code
+```
+
+### Auto-start on boot
+- Linux: systemd unit file (`scripts/multis.service`)
+- macOS: launchd plist (future)
+- No PM2 — native system services handle restarts and logging
 
 ---
 
-## 9. Configuration
+## 11. Configuration
 
 ### Files
 
 | File | Location | Purpose |
 |------|----------|---------|
-| `config.json` | `~/.multis/` | Main config: platforms, LLM, users, modes |
+| `config.json` | `~/.multis/` | Main config — all behavioral settings with defaults |
 | `governance.json` | `~/.multis/` | Command allowlist/denylist |
 | `.env` | Project root | API keys (overrides config.json) |
-| `multis.db` | `~/.multis/` | SQLite: document chunks + FTS5 |
+| `documents.db` | `~/.multis/` | SQLite: document chunks + FTS5 (with scope column) |
 | `audit.log` | `~/.multis/` | Append-only audit log |
+| `prompt_injection_audit.log` | `~/.multis/` | Prompt injection detection log |
 | `beeper-token.json` | `~/.multis/` | Beeper Desktop API token |
 | `memory/chats/` | `~/.multis/` | Per-chat profiles + memory |
 | `cron/jobs.json` | `~/.multis/` | Scheduled jobs |
 
 ### Config structure
+
+All behavioral settings are configurable. Sane defaults applied when missing.
 
 ```json
 {
@@ -321,8 +515,26 @@ multis stop  → daemon stops
   },
   "memory": {
     "recent_window": 20,
-    "capture_interval_minutes": 15,
+    "capture_threshold": 20,
+    "memory_max_sections": 5,
+    "retention_days": 90,
+    "admin_retention_days": 365,
+    "log_retention_days": 30,
     "decay_rate": 0.05
+  },
+  "security": {
+    "pin_hash": "...",
+    "pin_timeout_hours": 24,
+    "pin_lockout_minutes": 60,
+    "prompt_injection_detection": true
+  },
+  "business": {
+    "escalation": {
+      "admin_chat": "tg-12345",
+      "max_retries_before_escalate": 2,
+      "escalate_keywords": ["refund", "complaint", "urgent", "human", "manager"],
+      "allowed_urls": []
+    }
   },
   "governance": { "enabled": true }
 }
@@ -330,31 +542,52 @@ multis stop  → daemon stops
 
 ---
 
-## 10. Skills
+## 12. Skills
 
 ### What skills are
 
-Markdown files in `skills/` that define capabilities. Two types:
+Markdown files in `skills/` that define capabilities and policy. Skills are the governance unit for what the bot can do in a given context.
 
-1. **Governance skills** (existing): `shell.md`, `files.md`, `weather.md` — describe what commands are allowed/denied, how to use them
-2. **LLM skills** (POC5+): `capture.md` — instructions for the LLM on what to extract from conversations
+### Skill types
 
-### Skill format
+1. **Governance skills**: `shell.md`, `files.md` — what commands are allowed/denied
+2. **LLM skills**: `capture.md` — instructions for LLM extraction
+3. **Policy skills** (POC6+): `customer-support.md` — define scope, allowed actions, memory rules per role
 
-```markdown
+### Policy skill format
+
+```yaml
 ---
-name: capture
-description: Extract durable notes from conversation history
+name: customer-support
+description: Handle customer queries from business-mode chats
+scope: kb + user:$chatId
+escalation: true
+allowed_urls: from config
+actions: none
+memory_rules:
+  capture: true
+  index: true
+  visible: own
 ---
 
-Instructions for the LLM on what to look for and how to format output.
+You are a support assistant for [business name].
+Answer from the knowledge base only. Cite sources.
+If unsure, say "Let me check with the team."
+Never make promises. Never discuss other customers.
+Never reveal internal processes or admin information.
 ```
 
-Skills are loaded and injected into LLM prompts when relevant. The capture skill is used by the cron job. Other skills could be added for specific use cases.
+### Default skills
+
+| Skill | For | Scope | Actions |
+|-------|-----|-------|---------|
+| `admin.md` | Owner chats | `kb + admin + user:*` | exec, read, index, cron, all |
+| `customer-support.md` | Business-mode chats | `kb + user:$chatId` | ask, search only |
+| `capture.md` | Memory extraction | n/a | LLM instructions |
 
 ---
 
-## 11. What We Borrowed and Changed
+## 13. What We Borrowed and Changed
 
 | Source | What | Our version |
 |--------|------|-------------|

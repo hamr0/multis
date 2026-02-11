@@ -23,6 +23,8 @@ Rules:
  */
 async function runCapture(chatId, mem, llm, indexer, options = {}) {
   const keepLast = options.keepLast || 5;
+  const scope = options.scope || 'kb';
+  const maxSections = options.maxSections || 5;
 
   try {
     const recent = mem.loadRecent();
@@ -44,34 +46,37 @@ async function runCapture(chatId, mem, llm, indexer, options = {}) {
       { system, maxTokens: 512, temperature: 0.3 }
     );
 
-    // Append to durable memory (skip if nothing notable)
+    // Append to durable memory + index as FTS chunk (skip if nothing notable)
     if (summary && !summary.toLowerCase().includes('no notable information')) {
       mem.appendMemory(summary);
-    }
 
-    // Index raw messages as conversation chunks
-    for (const m of recent.slice(0, -keepLast)) {
+      // Index summary as a single searchable chunk
+      const now = new Date().toISOString();
       try {
         indexer.store.saveChunk({
-          chunk_id: `conv-${chatId}-${m.timestamp}`,
-          file_path: `memory/chats/${chatId}`,
-          page_start: null,
-          page_end: null,
-          element_type: 'conversation',
-          name: `${m.role} @ ${m.timestamp}`,
-          content: m.content,
-          parent_chunk_id: null,
-          section_path: JSON.stringify([chatId, m.role]),
-          section_level: 0,
-          document_type: 'conversation',
-          metadata: JSON.stringify({ role: m.role, chatId }),
-          created_at: m.timestamp,
-          updated_at: m.timestamp
+          chunkId: `mem-${chatId}-${Date.now()}`,
+          filePath: `memory/chats/${chatId}`,
+          pageStart: 0,
+          pageEnd: 0,
+          elementType: 'memory_summary',
+          name: `Memory capture ${now}`,
+          content: summary,
+          parentChunkId: null,
+          sectionPath: JSON.stringify([chatId]),
+          sectionLevel: 0,
+          documentType: 'conversation',
+          metadata: JSON.stringify({ chatId }),
+          scope,
+          createdAt: now,
+          updatedAt: now
         });
       } catch {
-        // Duplicate chunk_id or store error — not critical
+        // Store error — not critical
       }
     }
+
+    // Prune memory.md to max sections
+    mem.pruneMemory(maxSections);
 
     // Trim recent to keep last N messages
     mem.trimRecent(keepLast);

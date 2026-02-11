@@ -1,0 +1,14 @@
+[Unit]
+Description=multis personal assistant daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /home/hamr/PycharmProjects/multis/src/index.js
+WorkingDirectory=/home/hamr/PycharmProjects/multis
+Restart=on-failure
+RestartSec=10
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=default.target

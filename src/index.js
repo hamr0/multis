@@ -1,8 +1,12 @@
-const { loadConfig, ensureMultisDir } = require('./config');
+const { loadConfig, ensureMultisDir, MULTIS_DIR } = require('./config');
 const { logAudit } = require('./governance/audit');
 const { createMessageRouter } = require('./bot/handlers');
 const { TelegramPlatform } = require('./platforms/telegram');
 const { BeeperPlatform } = require('./platforms/beeper');
+const { cleanupLogs, pruneMemoryChunks } = require('./maintenance/cleanup');
+const { DocumentStore } = require('./indexer/store');
+const fs = require('fs');
+const path = require('path');
 
 async function main() {
   ensureMultisDir();
@@ -51,10 +55,44 @@ async function main() {
 
   console.log(`Running on: ${platforms.map(p => p.name).join(', ')}`);
 
+  // Write PID file for daemon management
+  const pidPath = path.join(MULTIS_DIR, 'multis.pid');
+  fs.writeFileSync(pidPath, String(process.pid));
+
+  // Run cleanup on startup
+  try {
+    const store = new DocumentStore();
+    const logDays = config.memory?.log_retention_days || 30;
+    const memDays = config.memory?.retention_days || 90;
+    const logResult = cleanupLogs(logDays);
+    const chunksPruned = pruneMemoryChunks(store, memDays);
+    if (logResult.deleted > 0 || chunksPruned > 0) {
+      console.log(`Cleanup: ${logResult.deleted} old logs, ${chunksPruned} old chunks removed`);
+    }
+    store.close();
+  } catch (err) {
+    console.warn(`Cleanup warning: ${err.message}`);
+  }
+
+  // Schedule daily cleanup
+  const DAILY_MS = 24 * 60 * 60 * 1000;
+  setInterval(() => {
+    try {
+      const store = new DocumentStore();
+      cleanupLogs(config.memory?.log_retention_days || 30);
+      pruneMemoryChunks(store, config.memory?.retention_days || 90);
+      store.close();
+    } catch (err) {
+      console.warn(`Scheduled cleanup error: ${err.message}`);
+    }
+  }, DAILY_MS);
+
   // Graceful shutdown
   const shutdown = async (signal) => {
     console.log(`\nShutting down (${signal})...`);
     logAudit({ action: 'bot_stop', reason: signal });
+    // Remove PID file
+    try { fs.unlinkSync(pidPath); } catch { /* ignore */ }
     for (const p of platforms) {
       await p.stop();
     }
