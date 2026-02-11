@@ -5,7 +5,7 @@ Personal chatbot/assistant that runs locally. Control your laptop and query your
 ## Tech Stack
 
 - Node.js >= 20, vanilla (minimal deps)
-- Telegraf (Telegram), better-sqlite3 (SQLite + FTS5), pdf-parse, mammoth
+- Telegraf (Telegram), better-sqlite3 (SQLite + FTS5), pdfjs-dist (PDF.js), mammoth
 - Beeper Desktop API on localhost:23373 (opt-in)
 - LLM: Anthropic, OpenAI, Ollama (configurable via .env)
 
@@ -64,3 +64,7 @@ POC 1-5 done (bot, skills, indexing, RAG, memory). POC 6 next (daemon + CLI + se
 ## Deep Reference
 
 -> docs/KNOWLEDGE_BASE.md (topic index with links to full docs)
+
+<!-- MEMORY:START -->
+@.claude/memory/MEMORY.md
+<!-- MEMORY:END -->

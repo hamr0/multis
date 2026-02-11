@@ -77,7 +77,7 @@ Borrowed the good parts — daemon architecture, pairing flow, skill.md pattern 
 
 ## Tech Stack
 
-Node.js (vanilla, minimal deps) · Telegraf · better-sqlite3 · pdf-parse · mammoth
+Node.js (vanilla, minimal deps) · Telegraf · better-sqlite3 · pdfjs-dist · mammoth
 
 ## Project Structure
 

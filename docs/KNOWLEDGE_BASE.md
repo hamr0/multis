@@ -24,6 +24,10 @@ Three paths: Telegram (mandatory), Beeper Desktop API localhost:23373 (opt-in), 
 Document upload/index -> FTS5 search -> buildRAGPrompt -> LLM -> answer with citations.
 -> docs/02-features/rag.md
 
+## Memory and Indexing (comprehensive)
+Document indexing (parse → chunk → store), conversation memory (capture → summarize → index), search (FTS5 + ACT-R), scope enforcement, RAG prompt composition. End-to-end reference.
+-> docs/02-features/memory-indexing.md
+
 ## Chat Modes
 Beeper per-chat modes: personal (self-chat, natural language) vs business (auto-respond to others).
 -> docs/02-features/chat-modes.md
@@ -49,7 +53,7 @@ Node.js only, single user, offline except LLM calls. Beeper Desktop API may chan
 -> docs/00-context/assumptions.md
 
 ## Testing
-168 tests: 106 unit, 62 integration, 0 automated e2e. Coverage analysis, gap tracking, manual smoke checklist.
+243 tests: 181 unit, 62 integration, 0 automated e2e. Coverage analysis, gap tracking, manual smoke checklist.
 -> docs/04-process/testing-guide.md
 
 ## Key Decisions

@@ -24,7 +24,7 @@ When you run `/index ~/report.pdf kb`, this happens:
 ┌─────────────────────────────────────────────┐
 │ 1. PARSE (src/indexer/parsers.js)           │
 │                                             │
-│ PDF  → pdf-parse → split by page count      │
+│ PDF  → pdfjs-dist → TOC sections or pages   │
 │ DOCX → mammoth → HTML → split by headings   │
 │ MD   → native → split by # headings         │
 │ TXT  → single chunk per file                │
@@ -81,7 +81,7 @@ Each chunk gets a deterministic ID: `doc:<sha256(filePath:name:content[:200])[:1
 
 | Format | Parser | Chunking Strategy |
 |--------|--------|-------------------|
-| PDF | pdf-parse | Split by estimated page boundaries |
+| PDF | pdfjs-dist | TOC-based sections (Tier 1) or per-page (Tier 3) |
 | DOCX | mammoth → HTML | Split by heading hierarchy (h1-h6) |
 | Markdown | Native | Split by `#` heading levels |
 | Plain text | Native | Single chunk per file |

@@ -14,7 +14,7 @@ File → Parser → Sections → Chunker → SQLite (FTS5)
 
 | Format | Library | Output |
 |--------|---------|--------|
-| PDF | pdf-parse | Raw text + page numbers |
+| PDF | pdfjs-dist | TOC-based sections (outline) or per-page text |
 | DOCX | mammoth | HTML → text with heading detection |
 | Markdown | built-in | Heading-based sections |
 | Plain text | built-in | Raw text |

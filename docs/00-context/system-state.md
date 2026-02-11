@@ -56,7 +56,7 @@ src/
 ├── indexer/
 │   ├── chunk.js          # DocChunk data class
 │   ├── chunker.js        # Hierarchical text chunking (2000ch, 200 overlap)
-│   ├── parsers.js        # PDF (pdf-parse), DOCX (mammoth), MD, TXT parsers
+│   ├── parsers.js        # PDF (pdfjs-dist), DOCX (mammoth), MD, TXT parsers
 │   ├── store.js          # SQLite store with FTS5 + activation columns
 │   └── index.js          # DocumentIndexer facade (indexFile, search, getStats)
 ├── llm/
@@ -102,5 +102,5 @@ All config lives in `~/.multis/`:
 |---------|---------|
 | `telegraf` | Telegram bot framework |
 | `better-sqlite3` | SQLite database |
-| `pdf-parse` | PDF parsing |
+| `pdfjs-dist` | PDF parsing (TOC + per-page text) |
 | `mammoth` | DOCX parsing |

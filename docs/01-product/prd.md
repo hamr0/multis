@@ -43,7 +43,7 @@
 **Goal:** Prove document retrieval works (no LLM yet).
 
 **What was built:**
-- Parsers: PDF (pdf-parse), DOCX (mammoth), MD, TXT
+- Parsers: PDF (pdfjs-dist), DOCX (mammoth), MD, TXT
 - Hierarchical section-based chunking: 2000 chars, 200 overlap, sentence-boundary-aware
 - SQLite store with FTS5 for BM25 search
 - Activation columns pre-built for ACT-R: `base_activation`, `last_accessed`, `access_count`
@@ -296,7 +296,7 @@ See [multi-platform.md](../02-features/multi-platform.md) for full design.
 |---------|---------|-----|
 | `telegraf` | Telegram bot | 1+ |
 | `better-sqlite3` | SQLite + FTS5 | 3+ |
-| `pdf-parse` | PDF parsing | 3+ |
+| `pdfjs-dist` | PDF parsing (TOC + per-page) | 3+ |
 | `mammoth` | DOCX parsing | 3+ |
 
 No new dependencies expected for POC 5-6. POC 7 (full) may need Matrix SDK.
