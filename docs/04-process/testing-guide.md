@@ -1,6 +1,6 @@
 # Testing Guide
 
-> Last updated: 2026-02-11 | 182 tests | 0 failures
+> Last updated: 2026-02-11 | 202 tests | 0 failures
 
 ## Running Tests
 
@@ -21,17 +21,17 @@ node --test test/*.test.js            # unit only
     / ====== \   Integration: 62 tests
    / ======== \  Handler pipeline, CLI, SQLite smoke
   / ========== \
- / ============ \  Unit: 120 tests
-/________________\ PIN, injection, config, store, memory, cleanup, activation, governance
+ / ============ \  Unit: 140 tests
+/________________\ PIN, injection, config, store, memory, cleanup, activation, governance, parsers
 ```
 
-**Current ratio: 120 unit / 62 integration / 0 automated e2e**
+**Current ratio: 140 unit / 62 integration / 0 automated e2e**
 
 This is the right shape for a single-user local tool. The integration layer catches wiring bugs (like the `escalationRetries` closure bug found during initial test writing). E2E is manual until we ship to others.
 
 ---
 
-## Unit Tests (120 tests, 11 suites)
+## Unit Tests (140 tests, 17 suites)
 
 All in `test/*.test.js`. Each tests a single module in isolation.
 
@@ -85,6 +85,18 @@ All in `test/*.test.js`. Each tests a single module in isolation.
 |-------|-------|----------------|
 | isCommandAllowed | 8 | Allowlist, denylist, not-in-allowlist denied, denylist wins, requireConfirmation, whitespace trimming |
 | isPathAllowed | 6 | Allowed path/subdirectory, denied path/subdirectory, denied priority over allowed, not-in-any-list |
+
+### `test/parsers.test.js` — 20 tests
+
+| Suite | Tests | What it covers |
+|-------|-------|----------------|
+| getParser | 6 | Routing per extension (.md/.txt/.pdf/.docx), unsupported returns null, uppercase extensions |
+| parseMD | 5 | Heading extraction, sectionPath hierarchy, sectionLevel, content text, no-headings fallback |
+| parseTXT | 3 | Single chunk, empty file → [], elementType paragraph |
+| parsePDF | 3 | Text extraction from real PDF fixture, filePath set, DocChunk instances |
+| parseDOCX | 3 | Text extraction from programmatic DOCX, heading hierarchy, no-headings fallback |
+
+Test fixtures in `test/fixtures/`: `sample.md`, `sample.txt`, `sample.pdf` (LibreOffice-generated), `empty.txt`, `no-headings.md`. DOCX fixtures built at test time via minimal ZIP constructor.
 
 ---
 
@@ -189,6 +201,7 @@ Not now. Automate when:
 | Memory lifecycle | 7 | 2 | Prune, capture, /remember → /memory → /forget |
 | CLI | — | 7 | All subcommands except init (interactive) |
 | Governance | 14 | — | Allowlist, denylist, path validation, priority rules, confirmation |
+| Parsers | 20 | — | All 4 formats (MD/TXT/PDF/DOCX), heading hierarchy, edge cases |
 
 ### Gaps (known, acceptable)
 
@@ -198,7 +211,7 @@ Not now. Automate when:
 | Telegram adapter | Low | Thin wrapper over Telegraf, tested by library | When upgrading Telegraf versions |
 | Beeper adapter | Medium | Requires Desktop API running | Add mock HTTP server test when Beeper goes live |
 | Real LLM round-trip | Low | Costly, flaky, provider-dependent | Nightly CI job in Model C |
-| PDF/DOCX parsing | Medium | Depends on pdf-parse/mammoth | Add parser-specific tests if indexing bugs appear |
+| PDF/DOCX edge cases | Low | Basic parsing tested; complex layouts (tables, images, nested lists) untested | Add if parsing bugs appear with real documents |
 | Governance via handler | Low | Handler calls `execCommand` which uses real governance file | Inject governance into executor if needed |
 | Document upload (Telegram) | Low | Requires telegram.getFileLink mock | When upload bugs appear |
 | Capture fire-and-forget | Low | Async, hard to assert timing | Tested at unit level (runCapture) |
@@ -208,19 +221,15 @@ Not now. Automate when:
 
 **~~1. Governance testability~~** — DONE (14 tests in `test/governance.test.js`)
 
-**1. PDF/DOCX parser smoke tests** (~1 hour)
-Create small test fixtures:
-- 2-page PDF with headings → verify section_path extraction
-- DOCX with styles → verify heading detection
-- Edge cases: empty file, single line, no headings
+**~~2. PDF/DOCX parser smoke tests~~** — DONE (20 tests in `test/parsers.test.js`)
 
-**2. Beeper mock server** (when Beeper goes live)
+**1. Beeper mock server** (when Beeper goes live)
 Lightweight HTTP server returning canned responses:
 - `/v1/accounts` → account list
 - `/v1/chats` → chat list with messages
 - Verify message routing: self `//command`, self natural, business incoming
 
-**3. Error recovery** (~30 min)
+**2. Error recovery** (~30 min)
 - LLM throws mid-response → error message sent to user
 - SQLite DB locked → graceful failure
 - indexFile on nonexistent path → error message
