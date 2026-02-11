@@ -1,14 +1,14 @@
 # Testing Guide
 
-> Last updated: 2026-02-11 | 202 tests | 0 failures
+> Last updated: 2026-02-11 | 243 tests | 0 failures
 
 ## Running Tests
 
 ```bash
-npm test                              # integration tests only (test/**/*)
-node --test test/**/*.test.js         # full suite (unit + integration)
+npm test                                # full suite (unit + integration)
+node --test test/*.test.js              # unit only
 node --test test/integration/*.test.js  # integration only
-node --test test/*.test.js            # unit only
+node --test test/beeper.test.js         # beeper platform only
 ```
 
 ## Test Pyramid
@@ -21,17 +21,17 @@ node --test test/*.test.js            # unit only
     / ====== \   Integration: 62 tests
    / ======== \  Handler pipeline, CLI, SQLite smoke
   / ========== \
- / ============ \  Unit: 140 tests
-/________________\ PIN, injection, config, store, memory, cleanup, activation, governance, parsers
+ / ============ \  Unit: 181 tests
+/________________\ PIN, injection, config, store, memory, cleanup, activation, governance, parsers, beeper
 ```
 
-**Current ratio: 140 unit / 62 integration / 0 automated e2e**
+**Current ratio: 181 unit / 62 integration / 0 automated e2e**
 
 This is the right shape for a single-user local tool. The integration layer catches wiring bugs (like the `escalationRetries` closure bug found during initial test writing). E2E is manual until we ship to others.
 
 ---
 
-## Unit Tests (140 tests, 17 suites)
+## Unit Tests (181 tests, 28 suites)
 
 All in `test/*.test.js`. Each tests a single module in isolation.
 
@@ -97,6 +97,23 @@ All in `test/*.test.js`. Each tests a single module in isolation.
 | parseDOCX | 3 | Text extraction from programmatic DOCX, heading hierarchy, no-headings fallback |
 
 Test fixtures in `test/fixtures/`: `sample.md`, `sample.txt`, `sample.pdf` (LibreOffice-generated), `empty.txt`, `no-headings.md`. DOCX fixtures built at test time via minimal ZIP constructor.
+
+### `test/beeper.test.js` — 41 tests
+
+| Suite | Tests | What it covers |
+|-------|-------|----------------|
+| constructor | 3 | Default URL/poll/prefix, custom config, initial state (empty selfIds/lastSeen) |
+| _loadToken | 3 | Load from ~/.multis/beeper-token.json, missing file → null, malformed JSON → null |
+| _isSelf | 3 | senderID match, unknown sender, fallback to `sender` field |
+| _getChatMode | 3 | Default personal, config default_mode, per-chat override |
+| send | 1 | Prefixes outgoing messages with `[multis]` |
+| start | 3 | No token → abort, API failure → abort, populates selfIds from accounts |
+| stop | 1 | Clears poll timer |
+| _seedLastSeen | 3 | Seeds lastSeen from message IDs, detects personal/self chats, API error graceful |
+| _poll | 11 | Skip when not initialized, route self // commands, natural language in personal chats, business mode routing, ignore non-self personal, skip [multis] cascade, dedup via lastSeen, oldest-first ordering, lastSeen update, normalized Message fields, handler error resilience, poll error suppression + clear |
+| Message (beeper) | 7 | isCommand (self/non-self/plain), commandText strip //, parseCommand extract, non-command → null |
+
+Uses temp HOME directory with mocked `_api` method — no real HTTP calls needed.
 
 ---
 
@@ -202,6 +219,7 @@ Not now. Automate when:
 | CLI | — | 7 | All subcommands except init (interactive) |
 | Governance | 14 | — | Allowlist, denylist, path validation, priority rules, confirmation |
 | Parsers | 20 | — | All 4 formats (MD/TXT/PDF/DOCX), heading hierarchy, edge cases |
+| Beeper platform | 41 | 3 | Token loading, self detection, chat modes, polling, message routing, dedup, ordering, cascade prevention |
 
 ### Gaps (known, acceptable)
 
@@ -209,7 +227,7 @@ Not now. Automate when:
 |------|------|---------------|-------------|
 | `multis init` wizard | Low | Interactive readline, hard to automate | Extract `createConfig(answers)` if it breaks twice |
 | Telegram adapter | Low | Thin wrapper over Telegraf, tested by library | When upgrading Telegraf versions |
-| Beeper adapter | Medium | Requires Desktop API running | Add mock HTTP server test when Beeper goes live |
+| Beeper live HTTP | Low | 41 unit tests cover all logic via mocked _api; no live HTTP tests | Add mock HTTP server if API contract changes |
 | Real LLM round-trip | Low | Costly, flaky, provider-dependent | Nightly CI job in Model C |
 | PDF/DOCX edge cases | Low | Basic parsing tested; complex layouts (tables, images, nested lists) untested | Add if parsing bugs appear with real documents |
 | Governance via handler | Low | Handler calls `execCommand` which uses real governance file | Inject governance into executor if needed |
@@ -223,13 +241,9 @@ Not now. Automate when:
 
 **~~2. PDF/DOCX parser smoke tests~~** — DONE (20 tests in `test/parsers.test.js`)
 
-**1. Beeper mock server** (when Beeper goes live)
-Lightweight HTTP server returning canned responses:
-- `/v1/accounts` → account list
-- `/v1/chats` → chat list with messages
-- Verify message routing: self `//command`, self natural, business incoming
+**~~3. Beeper platform tests~~** — DONE (41 tests in `test/beeper.test.js`)
 
-**2. Error recovery** (~30 min)
+**1. Error recovery** (~30 min)
 - LLM throws mid-response → error message sent to user
 - SQLite DB locked → graceful failure
 - indexFile on nonexistent path → error message
