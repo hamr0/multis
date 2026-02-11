@@ -408,6 +408,13 @@ async function routeSearch(msg, platform, config, indexer, query) {
 
   await platform.send(msg.chatId, formatted.join('\n\n'));
   logAudit({ action: 'search', user_id: msg.senderId, query, results: results.length });
+
+  // Record access for ACT-R activation tracking
+  if (results.length > 0) {
+    try {
+      indexer.store.recordSearchAccess(results.map(c => c.chunkId), query);
+    } catch { /* non-critical */ }
+  }
 }
 
 async function routeDocs(msg, platform, config, indexer) {
@@ -533,6 +540,13 @@ async function routeAsk(msg, platform, config, indexer, llm, question, memoryMan
     }
 
     logAudit({ action: 'ask', user_id: msg.senderId, question, chunks: chunks.length, routeAs: msg.routeAs });
+
+    // Record access for ACT-R activation tracking
+    if (chunks.length > 0) {
+      try {
+        indexer.store.recordSearchAccess(chunks.map(c => c.chunkId), question);
+      } catch { /* non-critical */ }
+    }
 
     // Fire-and-forget capture if threshold reached
     if (mem && memCfg && mem.shouldCapture(memCfg.capture_threshold)) {

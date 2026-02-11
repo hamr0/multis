@@ -5,10 +5,15 @@ const { MULTIS_DIR } = require('../config');
 
 const DB_PATH = path.join(MULTIS_DIR, 'documents.db');
 
+// ACT-R base-level activation: B_i = ln(Σ t_j^-d)
+// where t_j = seconds since j-th access, d = decay rate (default 0.5)
+const DEFAULT_DECAY = 0.5;
+const ACTIVATION_WEIGHT = 2.0; // how much activation influences final rank
+
 /**
  * DocumentStore - SQLite storage for document chunks with FTS5 search.
  * Ported from aurora_core.store.sqlite (Python).
- * Includes activation columns for future ACT-R (POC5).
+ * ACT-R activation blended with BM25 for retrieval ranking.
  */
 class DocumentStore {
   constructor(dbPath = DB_PATH) {
@@ -150,14 +155,15 @@ class DocumentStore {
   }
 
   /**
-   * BM25 full-text search using FTS5
+   * BM25 + ACT-R activation search using FTS5.
+   * Fetches 3x candidates, computes blended score, returns top `limit`.
    * @param {string} query - Search query
    * @param {number} limit - Max results
-   * @returns {Array} - Chunks sorted by BM25 relevance
+   * @param {Object} options - { scopes: string[], decay: number }
+   * @returns {Array} - Chunks sorted by blended relevance
    */
   search(query, limit = 10, options = {}) {
     // Convert natural language to FTS5 OR query
-    // Filter out stopwords, join remaining with OR for broader matching
     const stopwords = new Set(['a','an','the','is','are','was','were','be','been',
       'being','have','has','had','do','does','did','will','would','could','should',
       'may','might','can','i','me','my','we','our','you','your','he','she','it',
@@ -175,7 +181,7 @@ class DocumentStore {
     const ftsQuery = terms.join(' OR ');
 
     // Build scope filter if provided
-    const { scopes } = options;
+    const { scopes, decay } = options;
     let scopeClause = '';
     const params = [ftsQuery];
     if (scopes && scopes.length > 0) {
@@ -183,7 +189,9 @@ class DocumentStore {
       scopeClause = `AND c.scope IN (${placeholders})`;
       params.push(...scopes);
     }
-    params.push(limit);
+    // Fetch 3x candidates for activation re-ranking
+    const candidateLimit = limit * 3;
+    params.push(candidateLimit);
 
     const stmt = this.db.prepare(`
       SELECT c.*, rank
@@ -196,25 +204,41 @@ class DocumentStore {
     `);
 
     const rows = stmt.all(...params);
-    return rows.map(row => ({
-      chunkId: row.chunk_id,
-      filePath: row.file_path,
-      pageStart: row.page_start,
-      pageEnd: row.page_end,
-      elementType: row.element_type,
-      name: row.name,
-      content: row.content,
-      parentChunkId: row.parent_chunk_id,
-      sectionPath: JSON.parse(row.section_path || '[]'),
-      sectionLevel: row.section_level,
-      documentType: row.document_type,
-      metadata: JSON.parse(row.metadata || '{}'),
-      scope: row.scope,
-      activation: row.activation,
-      rank: row.rank,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at
-    }));
+
+    // Map rows and compute blended score
+    const results = rows.map(row => {
+      // BM25 rank is negative (lower = more relevant), normalize to positive
+      const bm25Score = -row.rank;
+      // Use cached activation or compute live
+      const act = row.activation || this.computeActivation(row.chunk_id, decay || DEFAULT_DECAY);
+      // Blended: BM25 + weighted activation
+      const blended = bm25Score + ACTIVATION_WEIGHT * act;
+
+      return {
+        chunkId: row.chunk_id,
+        filePath: row.file_path,
+        pageStart: row.page_start,
+        pageEnd: row.page_end,
+        elementType: row.element_type,
+        name: row.name,
+        content: row.content,
+        parentChunkId: row.parent_chunk_id,
+        sectionPath: JSON.parse(row.section_path || '[]'),
+        sectionLevel: row.section_level,
+        documentType: row.document_type,
+        metadata: JSON.parse(row.metadata || '{}'),
+        scope: row.scope,
+        activation: act,
+        bm25: bm25Score,
+        rank: blended,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      };
+    });
+
+    // Sort by blended score descending (higher = more relevant), take top limit
+    results.sort((a, b) => b.rank - a.rank);
+    return results.slice(0, limit);
   }
 
   /**
@@ -260,16 +284,59 @@ class DocumentStore {
   }
 
   /**
-   * Record a search access for ACT-R activation tracking (POC5)
+   * Compute ACT-R base-level activation for a chunk.
+   * B_i = ln(Σ t_j^-d) where t_j = seconds since j-th access, d = decay
+   * Returns 0.0 if chunk has never been accessed.
+   */
+  computeActivation(chunkId, decay = DEFAULT_DECAY) {
+    const rows = this.db.prepare(
+      'SELECT accessed_at FROM access_history WHERE chunk_id = ? ORDER BY accessed_at DESC LIMIT 50'
+    ).all(chunkId);
+
+    if (rows.length === 0) return 0.0;
+
+    const now = Date.now();
+    let sum = 0;
+    for (const row of rows) {
+      const ageSec = (now - new Date(row.accessed_at).getTime()) / 1000;
+      // Floor at 1 second to avoid infinity for very recent accesses
+      const age = Math.max(ageSec, 1);
+      sum += Math.pow(age, -decay);
+    }
+
+    // Use ln(1 + sum) to ensure positive activation for any access
+    // Standard ACT-R uses ln(sum) but that gives 0 for a single recent access
+    return sum > 0 ? Math.log(1 + sum) : 0.0;
+  }
+
+  /**
+   * Record a search access for ACT-R activation tracking.
+   * Updates access_history and the cached activation value on the chunk.
    */
   recordAccess(chunkId, query) {
+    const now = new Date().toISOString();
     this.db.prepare(
       'INSERT INTO access_history (chunk_id, accessed_at, query) VALUES (?, ?, ?)'
-    ).run(chunkId, new Date().toISOString(), query);
+    ).run(chunkId, now, query);
 
+    // Recompute and cache activation
+    const activation = this.computeActivation(chunkId);
     this.db.prepare(
-      'UPDATE chunks SET access_count = access_count + 1, last_accessed = ? WHERE chunk_id = ?'
-    ).run(new Date().toISOString(), chunkId);
+      'UPDATE chunks SET access_count = access_count + 1, last_accessed = ?, activation = ? WHERE chunk_id = ?'
+    ).run(now, activation, chunkId);
+  }
+
+  /**
+   * Record access for multiple chunks from a search (batch, in transaction).
+   */
+  recordSearchAccess(chunkIds, query) {
+    if (!chunkIds || chunkIds.length === 0) return;
+    const tx = this.db.transaction((ids) => {
+      for (const id of ids) {
+        this.recordAccess(id, query);
+      }
+    });
+    tx(chunkIds);
   }
 
   close() {
