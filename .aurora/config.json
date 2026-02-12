@@ -1,0 +1,11 @@
+{
+  "storage": {
+    "path": ".aurora/memory.db"
+  },
+  "planning": {
+    "base_dir": ".aurora/plans"
+  },
+  "logging": {
+    "level": "INFO"
+  }
+}
