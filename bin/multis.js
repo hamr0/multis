@@ -618,6 +618,64 @@ async function runDoctor() {
     }
   }
 
+  // Agents
+  check('Agents', () => {
+    if (!config?.agents) return { ok: true, detail: 'not configured (single-agent mode)' };
+    if (typeof config.agents !== 'object' || Array.isArray(config.agents)) {
+      return { ok: false, detail: '"agents" must be an object' };
+    }
+
+    const warnings = [];
+    const agentNames = [];
+
+    for (const [name, agent] of Object.entries(config.agents)) {
+      if (!agent || typeof agent !== 'object') {
+        warnings.push(`"${name}" invalid`);
+        continue;
+      }
+      if (!agent.persona) {
+        warnings.push(`"${name}" missing persona`);
+        continue;
+      }
+      if (agent.model && typeof agent.model !== 'string') {
+        warnings.push(`"${name}" model must be a string`);
+      }
+      agentNames.push(name);
+    }
+
+    // Check defaults reference valid agents
+    if (config.defaults && typeof config.defaults === 'object') {
+      const validModes = ['personal', 'business'];
+      for (const [mode, agentName] of Object.entries(config.defaults)) {
+        if (!validModes.includes(mode)) {
+          warnings.push(`default "${mode}" is not a valid mode`);
+        } else if (!agentNames.includes(agentName)) {
+          warnings.push(`default "${mode}" points to unknown agent "${agentName}"`);
+        }
+      }
+    }
+
+    // Check chat_agents reference valid agents
+    if (config.chat_agents && typeof config.chat_agents === 'object') {
+      for (const [chatId, agentName] of Object.entries(config.chat_agents)) {
+        if (!agentNames.includes(agentName)) {
+          warnings.push(`chat_agents["${chatId}"] points to unknown agent "${agentName}"`);
+        }
+      }
+    }
+
+    if (warnings.length > 0) {
+      const detail = `${agentNames.length} defined (${agentNames.join(', ')})\n` +
+        warnings.map(w => `           WARNING — ${w}`).join('\n');
+      return { ok: false, detail };
+    }
+
+    const defaultsStr = config.defaults
+      ? Object.entries(config.defaults).map(([m, a]) => `${m}→${a}`).join(', ')
+      : 'none';
+    return { ok: true, detail: `${agentNames.length} defined (${agentNames.join(', ')}) — defaults: ${defaultsStr}` };
+  });
+
   // SQLite DB
   check('SQLite database', () => {
     const dbPath = path.join(MULTIS_DIR, 'documents.db');

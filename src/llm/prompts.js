@@ -10,10 +10,11 @@ const SYSTEM_PROMPT = `You are multis, a personal assistant. Answer based on the
  * @param {Array} chunks - Search result chunks from the indexer
  * @returns {{ system: string, user: string }}
  */
-function buildRAGPrompt(question, chunks) {
+function buildRAGPrompt(question, chunks, persona) {
+  const base = persona || SYSTEM_PROMPT;
   if (!chunks || chunks.length === 0) {
     return {
-      system: SYSTEM_PROMPT,
+      system: base,
       user: `No matching documents found.\n\nQuestion: ${question}`
     };
   }
@@ -31,7 +32,7 @@ function buildRAGPrompt(question, chunks) {
   });
 
   return {
-    system: SYSTEM_PROMPT,
+    system: base,
     user: `${formattedChunks.join('\n\n')}\n\n---\nQuestion: ${question}`
   };
 }
@@ -43,8 +44,8 @@ function buildRAGPrompt(question, chunks) {
  * @param {Array} chunks - Optional RAG search chunks
  * @returns {string} - Combined system prompt
  */
-function buildMemorySystemPrompt(memoryMd, chunks) {
-  const parts = [SYSTEM_PROMPT];
+function buildMemorySystemPrompt(memoryMd, chunks, persona) {
+  const parts = [persona || SYSTEM_PROMPT];
 
   if (memoryMd && memoryMd.trim()) {
     parts.push(`\n## Memory (durable notes about this conversation)\n${memoryMd.trim()}`);

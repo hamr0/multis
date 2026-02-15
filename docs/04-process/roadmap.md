@@ -83,6 +83,24 @@ Start from scratch as if you're a new user. Validates the full install → first
 - [ ] Non-owner tries `/mode business` — rejected?
 - [ ] Non-owner tries `/exec` — rejected?
 
+### A6. Multi-Agent
+
+- [ ] Add second agent to config.json (e.g. "coder" with different persona)
+- [ ] `multis doctor` — shows agent count, defaults validated?
+- [ ] `/agents` — lists all agents with persona preview?
+- [ ] Send plain message — responds as default agent?
+- [ ] `@coder how do I parse JSON?` — responds with [coder] prefix?
+- [ ] `/agent coder` — assigns coder to current chat?
+- [ ] Send plain message — responds as coder (sticky)?
+- [ ] `/agent` (no args) — shows current agent?
+- [ ] `/agent assistant` — switches back?
+- [ ] `/mode personal coder` — sets both mode and agent?
+- [ ] `@nonexistent hello` — treated as plain text, default agent responds?
+- [ ] Remove `agents` from config.json — bot starts normally, no crash?
+- [ ] Malform `agents` (e.g. `"agents": 123`) — bot starts with warning?
+- [ ] Agent missing `persona` field — skipped with warning, doctor reports it?
+- [ ] `defaults.business` points to nonexistent agent — doctor warns, fallback works?
+
 ### A5. Bug & Friction Log
 
 Keep a running list here as you test. Each entry: what happened, expected vs actual.

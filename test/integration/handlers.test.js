@@ -1,6 +1,6 @@
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert');
-const { createMessageRouter } = require('../../src/bot/handlers');
+const { createMessageRouter, buildAgentRegistry, resolveAgent } = require('../../src/bot/handlers');
 const { PinManager, hashPin } = require('../../src/security/pin');
 const { createTestEnv, mockPlatform, mockLLM, msg } = require('../helpers/setup');
 
@@ -630,6 +630,231 @@ describe('Natural language routing', () => {
     const m = msg('sneak in', { senderId: 'stranger', routeAs: 'natural' });
     await router(m, platform);
     assert.strictEqual(platform.sent.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Multi-agent
+// ---------------------------------------------------------------------------
+
+describe('buildAgentRegistry', () => {
+  it('returns single default entry when no config.agents', () => {
+    const llm = mockLLM();
+    const registry = buildAgentRegistry({ llm: { model: 'test-model' } }, llm);
+    assert.strictEqual(registry.size, 1);
+    assert.ok(registry.has('default'));
+    assert.strictEqual(registry.get('default').llm, llm);
+    assert.strictEqual(registry.get('default').persona, null);
+  });
+
+  it('returns fallback when config.agents is not an object', () => {
+    const llm = mockLLM();
+    const registry = buildAgentRegistry({ llm: { model: 'test' }, agents: 'broken' }, llm);
+    assert.strictEqual(registry.size, 1);
+    assert.ok(registry.has('default'));
+  });
+
+  it('returns fallback when config.agents is an array', () => {
+    const llm = mockLLM();
+    const registry = buildAgentRegistry({ llm: { model: 'test' }, agents: [1, 2] }, llm);
+    assert.strictEqual(registry.size, 1);
+    assert.ok(registry.has('default'));
+  });
+
+  it('skips agents without persona', () => {
+    const llm = mockLLM();
+    const registry = buildAgentRegistry({
+      llm: { model: 'test' },
+      agents: { good: { persona: 'I am good' }, bad: { model: 'x' } }
+    }, llm);
+    assert.strictEqual(registry.size, 1);
+    assert.ok(registry.has('good'));
+    assert.ok(!registry.has('bad'));
+  });
+
+  it('builds registry from valid agents', () => {
+    const llm = mockLLM();
+    const registry = buildAgentRegistry({
+      llm: { model: 'test' },
+      agents: {
+        assistant: { persona: 'Helpful assistant' },
+        coder: { persona: 'Senior dev', model: 'test' }
+      }
+    }, llm);
+    assert.strictEqual(registry.size, 2);
+    assert.strictEqual(registry.get('assistant').persona, 'Helpful assistant');
+    assert.strictEqual(registry.get('coder').persona, 'Senior dev');
+    // Same model → reuses same LLM
+    assert.strictEqual(registry.get('coder').llm, llm);
+  });
+
+  it('returns fallback when all agents are invalid', () => {
+    const llm = mockLLM();
+    const registry = buildAgentRegistry({
+      llm: { model: 'test' },
+      agents: { bad1: {}, bad2: null }
+    }, llm);
+    assert.strictEqual(registry.size, 1);
+    assert.ok(registry.has('default'));
+  });
+});
+
+describe('resolveAgent', () => {
+  const llm = mockLLM();
+  const registry = new Map([
+    ['assistant', { llm, persona: 'Helpful', model: 'test' }],
+    ['coder', { llm, persona: 'Senior dev', model: 'test' }]
+  ]);
+
+  it('@mention resolves to named agent and strips prefix', () => {
+    const result = resolveAgent('@coder how do I parse JSON?', 'chat1', {}, registry);
+    assert.strictEqual(result.name, 'coder');
+    assert.strictEqual(result.text, 'how do I parse JSON?');
+    assert.strictEqual(result.agent.persona, 'Senior dev');
+  });
+
+  it('@unknown falls through to first agent', () => {
+    const result = resolveAgent('@unknown hello', 'chat1', {}, registry);
+    assert.strictEqual(result.name, 'assistant');
+    assert.strictEqual(result.text, '@unknown hello'); // kept as-is
+  });
+
+  it('per-chat assignment takes precedence over default', () => {
+    const config = { chat_agents: { chat1: 'coder' } };
+    const result = resolveAgent('hello', 'chat1', config, registry);
+    assert.strictEqual(result.name, 'coder');
+  });
+
+  it('mode default used when no per-chat assignment', () => {
+    const config = {
+      defaults: { personal: 'coder' },
+      platforms: { beeper: { chat_modes: { chat1: 'personal' } } }
+    };
+    const result = resolveAgent('hello', 'chat1', config, registry);
+    assert.strictEqual(result.name, 'coder');
+  });
+
+  it('falls back to first agent in registry', () => {
+    const result = resolveAgent('hello', 'chat99', {}, registry);
+    assert.strictEqual(result.name, 'assistant');
+  });
+});
+
+describe('Agent commands', () => {
+  it('/agents lists all agents with persona preview', async () => {
+    const env = createTestEnv({
+      allowed_users: ['user1'], owner_id: 'user1',
+      agents: {
+        assistant: { persona: 'You are a helpful assistant.' },
+        coder: { persona: 'You are a senior developer.' }
+      }
+    });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/agents'), platform);
+    const text = platform.sent[0].text;
+    assert.match(text, /assistant/);
+    assert.match(text, /coder/);
+    assert.match(text, /helpful assistant/i);
+  });
+
+  it('/agent shows current agent (default)', async () => {
+    const env = createTestEnv({
+      allowed_users: ['user1'], owner_id: 'user1',
+      agents: { assistant: { persona: 'Helper' } }
+    });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/agent'), platform);
+    assert.match(platform.sent[0].text, /assistant/);
+  });
+
+  it('/agent <name> assigns agent to chat', async () => {
+    const env = createTestEnv({
+      allowed_users: ['user1'], owner_id: 'user1',
+      agents: {
+        assistant: { persona: 'Helper' },
+        coder: { persona: 'Dev' }
+      }
+    });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/agent coder'), platform);
+    assert.match(platform.sent[0].text, /Agent set to: coder/);
+    assert.strictEqual(env.config.chat_agents?.chat1, 'coder');
+  });
+
+  it('/agent <invalid> shows available agents', async () => {
+    const env = createTestEnv({
+      allowed_users: ['user1'], owner_id: 'user1',
+      agents: { assistant: { persona: 'Helper' } }
+    });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/agent nonexistent'), platform);
+    assert.match(platform.sent[0].text, /Unknown agent/);
+    assert.match(platform.sent[0].text, /assistant/);
+  });
+
+  it('/agent rejected for non-owner', async () => {
+    const env = createTestEnv({
+      allowed_users: ['user1', 'user2'], owner_id: 'user1',
+      agents: { assistant: { persona: 'Helper' } }
+    });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/agent coder', { senderId: 'user2' }), platform);
+    assert.match(platform.sent[0].text, /Owner only/);
+  });
+});
+
+describe('Agent routing in /ask', () => {
+  it('@mention routes to specific agent with prefix', async () => {
+    const env = createTestEnv({
+      allowed_users: ['user1'], owner_id: 'user1',
+      agents: {
+        assistant: { persona: 'Helper' },
+        coder: { persona: 'You are a senior developer.' }
+      }
+    });
+    const platform = mockPlatform();
+    const llm = mockLLM('code answer');
+    const router = createMessageRouter(env.config, { llm, indexer: stubIndexer() });
+
+    await router(msg('/ask @coder how do I parse JSON?'), platform);
+    // Should have [coder] prefix since multiple agents
+    assert.match(platform.lastTo('chat1').text, /\[coder\] code answer/);
+    // System prompt should use coder persona
+    const call = llm.calls[0];
+    assert.match(call.opts.system, /senior developer/i);
+  });
+
+  it('single agent does not prefix response', async () => {
+    const env = createTestEnv({
+      allowed_users: ['user1'], owner_id: 'user1',
+      agents: { assistant: { persona: 'Helper' } }
+    });
+    const platform = mockPlatform();
+    const llm = mockLLM('solo answer');
+    const router = createMessageRouter(env.config, { llm, indexer: stubIndexer() });
+
+    await router(msg('/ask hello'), platform);
+    assert.strictEqual(platform.lastTo('chat1').text, 'solo answer');
+  });
+
+  it('no agents config works as before (backward compatible)', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const llm = mockLLM('classic answer');
+    const router = createMessageRouter(env.config, { llm, indexer: stubIndexer() });
+
+    await router(msg('/ask hello'), platform);
+    assert.strictEqual(platform.lastTo('chat1').text, 'classic answer');
   });
 });
 

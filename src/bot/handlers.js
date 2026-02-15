@@ -9,6 +9,91 @@ const { runCapture } = require('../memory/capture');
 const { PinManager, hashPin } = require('../security/pin');
 const { detectInjection, logInjectionAttempt } = require('../security/injection');
 
+// ---------------------------------------------------------------------------
+// Agent registry + resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Build agent registry from config.agents.
+ * Each agent: { llm, persona, model }. Reuses globalLlm when model matches.
+ * Falls back to single-entry map with no persona if config.agents is missing/invalid.
+ */
+function buildAgentRegistry(config, globalLlm) {
+  const fallback = new Map([['default', { llm: globalLlm, persona: null, model: config.llm?.model }]]);
+
+  if (!config.agents) return fallback;
+
+  if (typeof config.agents !== 'object' || Array.isArray(config.agents)) {
+    console.error('Config error: "agents" must be an object. Falling back to default.');
+    return fallback;
+  }
+
+  const registry = new Map();
+  const globalModel = config.llm?.model;
+
+  for (const [name, agent] of Object.entries(config.agents)) {
+    if (!agent || typeof agent !== 'object') {
+      console.warn(`Agent "${name}" invalid — skipping.`);
+      continue;
+    }
+    if (!agent.persona) {
+      console.warn(`Agent "${name}" missing persona — skipping.`);
+      continue;
+    }
+
+    let agentLlm = globalLlm;
+    if (agent.model && agent.model !== globalModel && globalLlm) {
+      try {
+        agentLlm = createLLMClient({ ...config.llm, model: agent.model });
+      } catch (err) {
+        console.warn(`Agent "${name}" LLM init failed (${err.message}) — using global.`);
+      }
+    }
+
+    registry.set(name, { llm: agentLlm, persona: agent.persona, model: agent.model || globalModel });
+  }
+
+  if (registry.size === 0) {
+    console.warn('No valid agents defined. Falling back to default.');
+    return fallback;
+  }
+
+  return registry;
+}
+
+/**
+ * Resolve which agent handles a message.
+ * Order: @name prefix → per-chat assignment → mode default → first agent.
+ */
+function resolveAgent(text, chatId, config, agentRegistry) {
+  // 1. @name prefix
+  const mentionMatch = text.match(/^@(\S+)\s+([\s\S]*)$/);
+  if (mentionMatch) {
+    const name = mentionMatch[1].toLowerCase();
+    if (agentRegistry.has(name)) {
+      return { agent: agentRegistry.get(name), name, text: mentionMatch[2] };
+    }
+    // Unknown @mention — treat as plain text, fall through
+  }
+
+  // 2. Per-chat assignment
+  const chatAgent = config.chat_agents?.[chatId];
+  if (chatAgent && agentRegistry.has(chatAgent)) {
+    return { agent: agentRegistry.get(chatAgent), name: chatAgent, text };
+  }
+
+  // 3. Mode-based default
+  const mode = getChatMode(config, chatId);
+  const modeDefault = config.defaults?.[mode];
+  if (modeDefault && agentRegistry.has(modeDefault)) {
+    return { agent: agentRegistry.get(modeDefault), name: modeDefault, text };
+  }
+
+  // 4. First agent in registry
+  const firstName = agentRegistry.keys().next().value;
+  return { agent: agentRegistry.get(firstName), name: firstName, text };
+}
+
 /**
  * Check if a user is paired (allowed).
  * Works with both ctx (Telegram) and Message objects.
@@ -53,6 +138,9 @@ function createMessageRouter(config, deps = {}) {
     }
   }
 
+  // Build agent registry
+  const agentRegistry = deps.agentRegistry || buildAgentRegistry(config, llm);
+
   // Owner commands that require PIN auth
   const PIN_PROTECTED = new Set(['exec', 'read', 'index', 'mode']);
 
@@ -77,7 +165,7 @@ function createMessageRouter(config, deps = {}) {
     // Natural language / business routing (set by platform adapter)
     if (msg.routeAs === 'natural' || msg.routeAs === 'business') {
       if (!isPaired(msg, config)) return;
-      await routeAsk(msg, platform, config, indexer, llm, msg.text, memoryManagers, memCfg, escalationRetries);
+      await routeAsk(msg, platform, config, indexer, llm, msg.text, memoryManagers, memCfg, escalationRetries, agentRegistry);
       return;
     }
 
@@ -110,7 +198,7 @@ function createMessageRouter(config, deps = {}) {
       // Re-route the stored command
       msg = stored.msg;
       // Fall through to command handling below with stored command/args
-      await executeCommand(stored.command, stored.args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager, escalationRetries);
+      await executeCommand(stored.command, stored.args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager, escalationRetries, agentRegistry);
       return;
     }
 
@@ -169,11 +257,11 @@ function createMessageRouter(config, deps = {}) {
       }
     }
 
-    await executeCommand(command, args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager, escalationRetries);
+    await executeCommand(command, args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager, escalationRetries, agentRegistry);
   };
 }
 
-async function executeCommand(command, args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager, escalationRetries) {
+async function executeCommand(command, args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager, escalationRetries, agentRegistry) {
     switch (command) {
       case 'status':
         await routeStatus(msg, platform, config);
@@ -200,7 +288,7 @@ async function executeCommand(command, args, msg, platform, config, indexer, llm
         await platform.send(msg.chatId, `Available skills:\n${listSkills()}`);
         break;
       case 'ask':
-        await routeAsk(msg, platform, config, indexer, llm, args, memoryManagers, memCfg, escalationRetries);
+        await routeAsk(msg, platform, config, indexer, llm, args, memoryManagers, memCfg, escalationRetries, agentRegistry);
         break;
       case 'memory':
         await routeMemory(msg, platform, config, memoryManagers);
@@ -212,7 +300,13 @@ async function executeCommand(command, args, msg, platform, config, indexer, llm
         await routeRemember(msg, platform, config, memoryManagers, args);
         break;
       case 'mode':
-        await routeMode(msg, platform, config, args);
+        await routeMode(msg, platform, config, args, agentRegistry);
+        break;
+      case 'agent':
+        await routeAgent(msg, platform, config, args, agentRegistry);
+        break;
+      case 'agents':
+        await routeAgents(msg, platform, agentRegistry);
         break;
       case 'pin':
         await routePinChange(msg, platform, config, pinManager);
@@ -223,7 +317,7 @@ async function executeCommand(command, args, msg, platform, config, indexer, llm
       default:
         // Telegram plain text (no recognized command) → implicit ask
         if (msg.platform === 'telegram' && !msg.text.startsWith('/')) {
-          await routeAsk(msg, platform, config, indexer, llm, msg.text, memoryManagers, memCfg, escalationRetries);
+          await routeAsk(msg, platform, config, indexer, llm, msg.text, memoryManagers, memCfg, escalationRetries, agentRegistry);
         }
         break;
     }
@@ -465,7 +559,7 @@ async function routeDocs(msg, platform, config, indexer) {
   await platform.send(msg.chatId, lines.join('\n') || 'No documents indexed yet.');
 }
 
-async function routeAsk(msg, platform, config, indexer, llm, question, memoryManagers, memCfg, escalationRetries) {
+async function routeAsk(msg, platform, config, indexer, llm, question, memoryManagers, memCfg, escalationRetries, agentRegistry) {
   if (!question) {
     const prefix = msg.platform === 'telegram' ? '/' : '//';
     await platform.send(msg.chatId, `Usage: ${prefix}ask <question>`);
@@ -549,33 +643,51 @@ async function routeAsk(msg, platform, config, indexer, llm, question, memoryMan
       escalationRetries.delete(msg.chatId);
     }
 
+    // Resolve agent (handles @mention, per-chat, mode default, fallback)
+    const resolved = agentRegistry && agentRegistry.size > 0
+      ? resolveAgent(question, msg.chatId, config, agentRegistry)
+      : { agent: { llm, persona: null }, name: 'default', text: question };
+    const agentLlm = resolved.agent.llm || llm;
+    const agentPersona = resolved.agent.persona;
+    const cleanQuestion = resolved.text;
+
     // Build messages array from recent conversation
     const recent = mem ? mem.loadRecent() : [];
     const memoryMd = mem ? mem.loadMemory() : '';
-    const system = buildMemorySystemPrompt(memoryMd, chunks);
+    const system = buildMemorySystemPrompt(memoryMd, chunks, agentPersona);
 
     // Build messages array: recent history (excluding the just-appended user msg if already there)
     // Recent already includes the current user message from appendMessage above
     const messages = recent.map(m => ({ role: m.role, content: m.content }));
 
+    // If @mention stripped the question, update the last message in recent
+    if (cleanQuestion !== question && messages.length > 0) {
+      messages[messages.length - 1] = { role: 'user', content: cleanQuestion };
+    }
+
     // If no recent history (no memory manager), fall back to single-message
     let answer;
     if (messages.length > 0) {
-      answer = await llm.generateWithMessages(messages, { system });
+      answer = await agentLlm.generateWithMessages(messages, { system });
     } else {
-      const ragPrompt = buildRAGPrompt(question, chunks);
-      answer = await llm.generate(ragPrompt.user, { system: ragPrompt.system });
+      const ragPrompt = buildRAGPrompt(cleanQuestion, chunks, agentPersona);
+      answer = await agentLlm.generate(ragPrompt.user, { system: ragPrompt.system });
     }
 
-    await platform.send(msg.chatId, answer);
+    // Prefix with agent name only when multiple agents exist
+    const prefixed = agentRegistry && agentRegistry.size > 1
+      ? `[${resolved.name}] ${answer}`
+      : answer;
 
-    // Record assistant response
+    await platform.send(msg.chatId, prefixed);
+
+    // Record assistant response (without prefix for clean memory)
     if (mem) {
       mem.appendMessage('assistant', answer);
       mem.appendToLog('assistant', answer);
     }
 
-    logAudit({ action: 'ask', user_id: msg.senderId, question, chunks: chunks.length, routeAs: msg.routeAs });
+    logAudit({ action: 'ask', user_id: msg.senderId, question, chunks: chunks.length, routeAs: msg.routeAs, agent: resolved.name });
 
     // Record access for ACT-R activation tracking
     if (chunks.length > 0) {
@@ -631,7 +743,7 @@ async function routeRemember(msg, platform, config, memoryManagers, note) {
 
 const VALID_MODES = ['personal', 'business', 'silent'];
 
-async function routeMode(msg, platform, config, args) {
+async function routeMode(msg, platform, config, args, agentRegistry) {
   // Owner-only (PIN already checked by router for owner commands)
   if (!isOwner(msg.senderId, config)) {
     await platform.send(msg.chatId, 'Owner only command.');
@@ -640,7 +752,16 @@ async function routeMode(msg, platform, config, args) {
 
   const parts = (args || '').trim().split(/\s+/);
   const mode = parts[0] ? parts[0].toLowerCase() : '';
-  const target = parts.slice(1).join(' ');
+
+  // Check if second arg is an agent name (optional)
+  let agentArg = null;
+  let target = '';
+  if (parts.length >= 2 && agentRegistry && agentRegistry.has(parts[1].toLowerCase())) {
+    agentArg = parts[1].toLowerCase();
+    target = parts.slice(2).join(' ');
+  } else {
+    target = parts.slice(1).join(' ');
+  }
 
   const prefix = msg.platform === 'telegram' ? '/' : '//';
 
@@ -658,11 +779,19 @@ async function routeMode(msg, platform, config, args) {
     return;
   }
 
+  // Apply agent assignment if specified
+  if (agentArg) {
+    if (!config.chat_agents) config.chat_agents = {};
+    config.chat_agents[msg.chatId] = agentArg;
+    saveConfig(config);
+  }
+
   // If on Telegram, always set current chat (1:1 with bot)
   if (msg.platform === 'telegram') {
     setChatMode(config, msg.chatId, mode);
-    await platform.send(msg.chatId, `Chat mode set to: ${mode}`);
-    logAudit({ action: 'mode', user_id: msg.senderId, chatId: msg.chatId, mode });
+    const agentNote = agentArg ? `, agent: ${agentArg}` : '';
+    await platform.send(msg.chatId, `Chat mode set to: ${mode}${agentNote}`);
+    logAudit({ action: 'mode', user_id: msg.senderId, chatId: msg.chatId, mode, agent: agentArg });
     return;
   }
 
@@ -752,6 +881,49 @@ async function findBeeperChat(platform, search) {
   return matches.length > 0 ? matches : null;
 }
 
+async function routeAgent(msg, platform, config, args, agentRegistry) {
+  if (!isOwner(msg.senderId, config)) {
+    await platform.send(msg.chatId, 'Owner only command.');
+    return;
+  }
+
+  const name = (args || '').trim().toLowerCase();
+
+  if (!name) {
+    // Show current agent for this chat
+    const current = config.chat_agents?.[msg.chatId];
+    if (current && agentRegistry.has(current)) {
+      await platform.send(msg.chatId, `Current agent: ${current}`);
+    } else {
+      const firstName = agentRegistry.keys().next().value;
+      await platform.send(msg.chatId, `Current agent: ${firstName} (default)`);
+    }
+    return;
+  }
+
+  if (!agentRegistry.has(name)) {
+    const available = [...agentRegistry.keys()].join(', ');
+    await platform.send(msg.chatId, `Unknown agent "${name}". Available: ${available}`);
+    return;
+  }
+
+  if (!config.chat_agents) config.chat_agents = {};
+  config.chat_agents[msg.chatId] = name;
+  saveConfig(config);
+  await platform.send(msg.chatId, `Agent set to: ${name}`);
+  logAudit({ action: 'agent', user_id: msg.senderId, chatId: msg.chatId, agent: name });
+}
+
+async function routeAgents(msg, platform, agentRegistry) {
+  const lines = ['Agents:'];
+  for (const [name, agent] of agentRegistry) {
+    const model = agent.model || 'default';
+    const preview = agent.persona ? agent.persona.slice(0, 60) : '(no persona)';
+    lines.push(`  ${name} [${model}] — ${preview}`);
+  }
+  await platform.send(msg.chatId, lines.join('\n'));
+}
+
 async function routeHelp(msg, platform, config) {
   const prefix = msg.platform === 'telegram' ? '/' : '//';
   const cmds = [
@@ -775,8 +947,11 @@ async function routeHelp(msg, platform, config) {
       `${prefix}read <path> - Read a file or directory (owner)`,
       `${prefix}index <path> <kb|admin> - Index a document (owner)`,
       `${prefix}pin - Change PIN (owner)`,
-      `${prefix}mode <personal|business|silent> - Set chat mode (owner)`,
-      'Send a file to index it (owner, Telegram only)'
+      `${prefix}mode <personal|business|silent> [agent] - Set chat mode (owner)`,
+      `${prefix}agent [name] - Show/set agent for this chat (owner)`,
+      `${prefix}agents - List all agents (owner)`,
+      'Send a file to index it (owner, Telegram only)',
+      'Use @agentname to invoke a specific agent per-message'
     );
   }
   await platform.send(msg.chatId, cmds.join('\n'));
@@ -1039,6 +1214,8 @@ function handleMessage(config) {
 module.exports = {
   // Platform-agnostic
   createMessageRouter,
+  buildAgentRegistry,
+  resolveAgent,
   // Legacy Telegraf handlers
   handleStart,
   handleStatus,
