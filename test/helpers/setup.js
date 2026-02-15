@@ -2,14 +2,20 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { Message } = require('../../src/platforms/message');
+const { setMultisDir } = require('../../src/config');
 
 /**
  * Create an isolated test environment with temp HOME dir.
+ * Redirects saveConfig/loadConfig to the temp directory so tests
+ * never touch the real ~/.multis/config.json.
  */
 function createTestEnv(overrides = {}) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-int-'));
   const multisDir = path.join(tmpDir, '.multis');
   fs.mkdirSync(multisDir, { recursive: true });
+
+  // Redirect config module to use temp dir
+  setMultisDir(multisDir);
 
   const config = {
     pairing_code: 'TEST42',
@@ -27,7 +33,14 @@ function createTestEnv(overrides = {}) {
     allowlist: ['.*'], denylist: [], confirm_patterns: []
   }));
 
-  return { tmpDir, config, cleanup: () => fs.rmSync(tmpDir, { recursive: true, force: true }) };
+  return {
+    tmpDir,
+    config,
+    cleanup: () => {
+      setMultisDir(null); // restore default
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  };
 }
 
 /**

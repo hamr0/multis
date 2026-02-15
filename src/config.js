@@ -2,6 +2,15 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+// MULTIS_HOME env var overrides default ~/.multis (used by tests and multi-instance setups)
+// Getter functions allow tests to override paths at runtime.
+let _multisDir = null;
+function getMultisDir() {
+  return _multisDir || process.env.MULTIS_HOME || path.join(process.env.HOME || process.env.USERPROFILE, '.multis');
+}
+function setMultisDir(dir) { _multisDir = dir; }
+
+// Legacy constants — point to default location. Internal code should use getters.
 const MULTIS_DIR = path.join(process.env.HOME || process.env.USERPROFILE, '.multis');
 const CONFIG_PATH = path.join(MULTIS_DIR, 'config.json');
 const GOVERNANCE_PATH = path.join(MULTIS_DIR, 'governance.json');
@@ -10,20 +19,24 @@ const GOVERNANCE_PATH = path.join(MULTIS_DIR, 'governance.json');
  * Ensure ~/.multis directory exists with default config files
  */
 function ensureMultisDir() {
-  if (!fs.existsSync(MULTIS_DIR)) {
-    fs.mkdirSync(MULTIS_DIR, { recursive: true });
+  const dir = getMultisDir();
+  const configPath = path.join(dir, 'config.json');
+  const govPath = path.join(dir, 'governance.json');
+
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
   }
 
   // Copy default config if not present
-  if (!fs.existsSync(CONFIG_PATH)) {
+  if (!fs.existsSync(configPath)) {
     const templateDir = path.join(__dirname, '..', '.multis-template');
-    fs.copyFileSync(path.join(templateDir, 'config.json'), CONFIG_PATH);
+    fs.copyFileSync(path.join(templateDir, 'config.json'), configPath);
   }
 
   // Copy default governance if not present
-  if (!fs.existsSync(GOVERNANCE_PATH)) {
+  if (!fs.existsSync(govPath)) {
     const templateDir = path.join(__dirname, '..', '.multis-template');
-    fs.copyFileSync(path.join(templateDir, 'governance.json'), GOVERNANCE_PATH);
+    fs.copyFileSync(path.join(templateDir, 'governance.json'), govPath);
   }
 }
 
@@ -63,7 +76,8 @@ function loadConfig() {
   loadEnv();
   ensureMultisDir();
 
-  const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  const configPath = path.join(getMultisDir(), 'config.json');
+  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 
   // Ensure platforms block exists
   if (!config.platforms) config.platforms = {};
@@ -151,7 +165,8 @@ function loadConfig() {
  */
 function saveConfig(config) {
   ensureMultisDir();
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', 'utf8');
+  const configPath = path.join(getMultisDir(), 'config.json');
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8');
 }
 
 /**
@@ -186,6 +201,8 @@ module.exports = {
   isOwner,
   generatePairingCode,
   ensureMultisDir,
+  getMultisDir,
+  setMultisDir,
   MULTIS_DIR,
   CONFIG_PATH
 };
