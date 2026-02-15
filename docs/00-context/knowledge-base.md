@@ -34,7 +34,7 @@ Three per-chat modes: personal (admin, commands), business (auto-respond, custom
 
 ## Bot Commands
 Telegram prefix: `/`. Beeper prefix: `//`. Access levels: anyone, paired, owner, self.
--> docs/04-process/commands.md
+-> docs/01-product/commands.md
 
 ## Configuration
 Runtime config: ~/.multis/config.json. Secrets: .env. Governance: ~/.multis/governance.json.

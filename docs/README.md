@@ -7,9 +7,11 @@
 - [blueprint.md](00-context/blueprint.md) — Master reference: all decisions, flows, architecture
 - [assumptions.md](00-context/assumptions.md) — Constraints, risks, unknowns
 - [system-state.md](00-context/system-state.md) — Architecture and what's currently built
+- [knowledge-base.md](00-context/knowledge-base.md) — Topic index with links to full docs
 
 ### [01-product/](01-product/) — What the Product Must Do
 - [prd.md](01-product/prd.md) — All POCs: completed, planned, findings, designs
+- [commands.md](01-product/commands.md) — Chat and CLI command reference
 
 ### [02-features/](02-features/) — How Features Are Designed
 - [multi-platform.md](02-features/multi-platform.md) — Telegram + Beeper + Matrix strategy
@@ -26,7 +28,6 @@
 ### [04-process/](04-process/) — How to Work With This System
 - [dev-workflow.md](04-process/dev-workflow.md) — Development workflow
 - [definition-of-done.md](04-process/definition-of-done.md) — POC completion criteria
-- [commands.md](04-process/commands.md) — Bot command reference
 
 ### [archive/](archive/) — Previous doc versions
 - [ARCHITECTURE.md](archive/ARCHITECTURE.md) — Original architecture doc (moved to system-state)

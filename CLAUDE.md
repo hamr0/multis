@@ -116,7 +116,7 @@ POC 1-5 done (bot, skills, indexing, RAG, memory). POC 6 next (daemon + CLI + se
 
 ## Deep Reference
 
--> docs/KNOWLEDGE_BASE.md (topic index with links to full docs)
+-> docs/00-context/knowledge-base.md (topic index with links to full docs)
 
 <!-- MEMORY:START -->
 @.claude/memory/MEMORY.md
