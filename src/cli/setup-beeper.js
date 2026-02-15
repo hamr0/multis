@@ -87,6 +87,7 @@ async function oauthPKCE() {
   const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
 
   return new Promise((resolve, reject) => {
+    let timeoutId;
     const server = http.createServer(async (req, res) => {
       if (!req.url.startsWith('/callback')) return;
       const url = new URL(req.url, 'http://127.0.0.1:9876');
@@ -95,6 +96,7 @@ async function oauthPKCE() {
       if (!code) {
         res.writeHead(400);
         res.end('No code received');
+        clearTimeout(timeoutId);
         server.close();
         reject(new Error('No auth code'));
         return;
@@ -115,6 +117,7 @@ async function oauthPKCE() {
 
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end('<h2>Authorized! You can close this tab.</h2>');
+      clearTimeout(timeoutId);
       server.close();
 
       saveToken(tokenData);
@@ -138,7 +141,7 @@ async function oauthPKCE() {
       }
     });
 
-    setTimeout(() => { server.close(); reject(new Error('OAuth timeout (60s)')); }, 60000);
+    timeoutId = setTimeout(() => { server.close(); reject(new Error('OAuth timeout (60s)')); }, 60000);
   });
 }
 

@@ -247,8 +247,13 @@ async function runInit() {
           console.log(`  - ${acc.network || '?'}: ${name}`);
         }
 
-        // Update config
-        beeper.updateConfig();
+        // Apply beeper settings to in-memory config (saved later in step 5)
+        if (!config.platforms) config.platforms = {};
+        if (!config.platforms.beeper) config.platforms.beeper = {};
+        config.platforms.beeper.enabled = true;
+        config.platforms.beeper.url = config.platforms.beeper.url || 'http://localhost:23373';
+        config.platforms.beeper.command_prefix = config.platforms.beeper.command_prefix || '//';
+        config.platforms.beeper.poll_interval = config.platforms.beeper.poll_interval || 3000;
 
         // Warnings
         console.log('\nImportant:');
