@@ -198,7 +198,25 @@ After dogfooding, prepare for others to install.
 
 Only tackle these if dogfooding reveals they matter.
 
-- [ ] Cron/reminders (`/remind <time> <message>`, `/cron <schedule> <action>`)
+### C1. Scheduler + Automation (Tier 2 — ~345 lines)
+
+Full design: `docs/02-features/agent-evolution.md`
+
+- [ ] **Tier 2A: Scheduler** (~210 lines) — `/remind`, `/cron`, `/jobs`, `/cancel`
+  - [ ] `src/scheduler/parser.js` — parse remind/cron syntax into job objects
+  - [ ] `src/scheduler/index.js` — tick loop (60s), persist jobs.json, load on startup
+  - [ ] `src/scheduler/runner.js` — build agent turn, run tool loop, deliver via platform.send
+  - [ ] Handler additions in handlers.js — routeRemind, routeCron, routeJobs, routeCancel
+  - [ ] `cron-parser` dep for 5-field cron expressions
+- [ ] **Tier 2B: Heartbeat** (~65 lines) — periodic awareness, active hours, timezone-aware
+  - [ ] `src/scheduler/heartbeat.js` — interval check, build prompt from checklist, run agent loop
+  - [ ] Config: `heartbeat.enabled`, `interval_minutes`, `active_hours`, `checklist`
+- [ ] **Tier 2C: Hooks** (~70 lines) — event-driven shell scripts (only if dogfooding demands it)
+  - [ ] `src/hooks/runner.js` — discover `~/.multis/hooks/`, match event, spawn with timeout
+  - [ ] Events: `message:business`, `escalation`, `capture`, `index`, `cron:fail`
+
+### C2. Other Features
+
 - [ ] Tier 2 PDF parsing (font-size heading detection)
 - [ ] File upload indexing on Beeper (not just Telegram)
 - [ ] ACT-R activation visible in `/search` results

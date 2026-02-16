@@ -856,30 +856,42 @@ Not needed yet. Current tools (filesystem, shell, knowledge, desktop, Android) c
 
 ---
 
-## 16. Future: Agent Enhancements
+## 16. Agent Evolution
 
-Features that extend the multi-agent system beyond per-chat assignment. All are post-dogfood — documented here for design continuity.
+The agent system evolves in tiers. Tier 1 is done. Tier 2 is next. Tier 3 is only if the product pivots from personal tool to platform.
 
-### Agent Handoffs
+Full design sketch with architecture, schemas, and size estimates: **`docs/02-features/agent-evolution.md`**
 
-Inter-agent protocol: `@billing` mention in an agent's response triggers handoff with context summary. Source agent stops, target takes over the chat. Audit-logged with both agent names and the handoff reason.
+### Tier 1: Agent Tool Loop (DONE)
 
-**Status:** future (post-dogfood)
+LLM decides when to use tools in a multi-round loop. 25+ tools across filesystem, shell, desktop, Android. Multi-agent personas with @mention routing and per-chat assignment.
 
-### Concurrent Tasks
+- `runAgentLoop()` in `handlers.js:586`
+- `src/tools/definitions.js`, `registry.js`, `executor.js`
+- `resolveAgent()` + `config.agents` for multi-persona
 
-Async task queue for long-running operations (large file indexing, batch searches). Tool returns `{ status: 'async', taskId }`, background worker executes, sends result when done. Owner can `/cancel <taskId>`.
+### Tier 2: Scheduling + Automation (Phase C)
 
-**Status:** future
+Three components, ~345 lines total:
 
-### Per-Agent Tool Restrictions
+| Component | What | Size |
+|-----------|------|------|
+| **2A: Scheduler** | `/remind`, `/cron`, `/jobs`, `/cancel` — agent turns at scheduled times | ~210 lines |
+| **2B: Heartbeat** | Periodic awareness check — "anything need attention?" | ~65 lines |
+| **2C: Hooks** | Event-driven shell scripts on escalation, capture, etc. | ~70 lines |
 
-`"allowed_tools": [...]` or `"denied_tools": [...]` in agent config. Missing = all tools (current behavior). A "support" agent could be restricted to `search_docs` and `recall_memory` only.
+Scheduler reuses `runAgentLoop` — jobs are agent turns, not hardcoded scripts. Persistent to `~/.multis/data/cron/jobs.json`. Owner-only. Runs inside daemon process (no separate scheduler).
 
-**Status:** future (~30 lines in tools/registry.js)
+### Tier 3: Multi-Agent Orchestration (not planned)
 
-### Shared Context Across Chats
+Broadcast groups, agent handoffs, parallel execution with result merging. Only relevant if multis becomes multi-tenant. The agent loop + tools + scheduler covers 95% of personal assistant use cases.
 
-All agents for the same user can read `user:<userId>/context.md` — an append-only cross-chat timeline. Memory capture writes to both per-chat `memory.md` and shared context. Useful when multiple agents need the same background info.
+### Other Future Enhancements
 
-**Status:** future (~60 lines in memory/manager.js)
+**Agent Handoffs** — `@billing` mention triggers handoff with context summary. Post-dogfood.
+
+**Concurrent Tasks** — Async task queue for long-running ops. Tool returns `{ status: 'async', taskId }`. Post-dogfood.
+
+**Per-Agent Tool Restrictions** — `"allowed_tools"` / `"denied_tools"` in agent config. ~30 lines in tools/registry.js.
+
+**Shared Context Across Chats** — Cross-chat timeline at `user:<userId>/context.md`. ~60 lines in memory/manager.js.

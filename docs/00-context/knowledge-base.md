@@ -48,6 +48,10 @@ Handler in src/bot/handlers.js, case in createMessageRouter switch, update help 
 Extend LLMProvider in src/llm/base.js, add to client.js factory, add env var to config.js.
 -> docs/04-process/dev-workflow.md (adding providers section)
 
+## Agent Evolution
+Tier 1 (tool loop) done. Tier 2 sketch: scheduler (/remind, /cron), heartbeat (periodic awareness), hooks (event-driven). Tier 3 (multi-agent orchestration) not planned.
+-> docs/02-features/agent-evolution.md
+
 ## Constraints and Risks
 Node.js only, single user, offline except LLM calls. Beeper Desktop API may change.
 -> docs/00-context/assumptions.md
