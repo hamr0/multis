@@ -1,6 +1,6 @@
 # Roadmap: Post-POC
 
-> POC 1-6 complete. All 297 tests passing. Next: dogfood, stabilize, ship.
+> POC 1-6 complete. All 300 tests passing. Next: dogfood, stabilize, ship.
 
 ## What's Built (POC 1-6 Summary)
 
@@ -62,7 +62,8 @@ Start from scratch as if you're a new user. Validates the full install → first
 - [ ] `/help` — shows owner commands (exec, read, index, pin, mode)?
 - [ ] `/exec ls ~` — triggers PIN prompt? Enter PIN → output?
 - [ ] `/exec echo hello` — governance allows it?
-- [ ] `/mode personal` — requires PIN? Sets mode?
+- [ ] `/mode` (no args) — shows current chat mode?
+- [ ] `/mode personal` — sets mode (no PIN needed, mode removed from PIN_PROTECTED)?
 - [ ] `/read ~/.multis/config.json` — shows file content?
 - [ ] Upload a PDF file — auto-indexed? Reports chunk count?
 - [ ] `/index ~/some-real-doc.pdf kb` — indexes with scope?
@@ -93,20 +94,21 @@ Start from scratch as if you're a new user. Validates the full install → first
 - [ ] `node src/cli/setup-beeper.js` — OAuth flow works?
 - [ ] Beeper Desktop running with API enabled?
 - [ ] `node bin/multis.js start` — Beeper connects, shows account count?
-- [ ] Send `//status` from a self-chat — responds?
-- [ ] Send `//help` — shows commands?
-- [ ] Type a question in self-chat (no `//`) — implicit ask works?
-- [ ] `//exec ls ~` — PIN → output?
-- [ ] `//search <term>` — finds docs?
+- [ ] Send `/status` from Note-to-self — responds?
+- [ ] Send `/help` — shows commands?
+- [ ] Type a question in Note-to-self (no `/`) — implicit ask works?
+- [ ] `/exec ls ~` from Note-to-self — PIN → output?
+- [ ] `/search <term>` — finds docs?
+- [ ] `/status` from a friend chat — silently ignored (not routed as command)?
 
 #### Mode tests (Beeper)
 
-- [ ] `//mode business` from self-chat → interactive picker? Pick a chat → set?
-- [ ] `//mode silent John` from self-chat → search by name → set?
-- [ ] `//mode business` in a non-self chat → sets current chat directly?
+- [ ] `/mode` (no args) from Note-to-self → lists all chats with current modes (no PIN)?
+- [ ] `/mode business` from Note-to-self → interactive picker? Pick a chat → set?
+- [ ] `/mode silent John` from Note-to-self → search by name → set?
+- [ ] `/mode business` in a non-self chat → silently ignored (commands restricted to personal chats)?
 - [ ] Send message from contact in business-mode chat → auto-responds?
 - [ ] Send message from friend in silent-mode chat → archived but no response?
-- [ ] `/mode personal` from self-chat → set a chat as personal for second admin?
 
 ### A5. Multi-Agent
 
