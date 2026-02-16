@@ -8,9 +8,7 @@
                                      ╰── your AI, your machine, every chat.
 ```
 
-**A personal and business AI agent that lives in your chat apps** — answering questions from your documents, running commands on your machine, and auto-responding to contacts when you want it to.
-
-Runs locally with persistent memory, governed by allowlists and audit logs.
+**AI agent that lives in your chat apps**. Controls your machine, remembers your conversations, searches your documents — with guardrails so it doesn't go rogue. OpenClaw without the bloat."
 
 ## Why multis?
 
