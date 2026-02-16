@@ -471,14 +471,28 @@ Customers cannot create cron jobs. If a customer requests a follow-up, the bot s
 
 ## 10. Onboarding + Daemon (POC6)
 
-### CLI commands
+### CLI — single entry point
+
+Just type `multis` — interactive menu with numbered options and live status:
 
 ```
-multis init    → guided setup wizard
-multis start   → start daemon (background, PID file)
-multis stop    → graceful shutdown
-multis status  → is it running? show uptime + stats
+multis — personal AI assistant
+
+Status: running (PID 12345)
+
+  1) init      Set up multis (interactive wizard)
+  2) start     Start daemon in background
+  3) stop      Stop running daemon
+  4) status    Check if daemon is running
+  5) doctor    Run diagnostic checks
+  0) exit      Quit this menu
+
+Choose (0-5):
 ```
+
+Direct commands also work: `multis start`, `multis stop`, `multis doctor`, etc.
+
+Installed globally via `~/.local/bin/multis` symlink → works from any directory.
 
 Chat is the primary interface. CLI is just for lifecycle management.
 
