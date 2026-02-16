@@ -29,7 +29,7 @@
 - `/read` — read files and directories
 - `/skills`, `/help` — discovery commands
 - Governance layer: allowlist/denylist in `governance.json` + path restrictions
-- Audit log: append-only JSONL at `~/.multis/audit.log`
+- Audit log: append-only JSONL at `~/.multis/logs/audit.log`
 - Owner model: first paired user becomes owner, `/exec` + `/index` restricted to owner
 
 **Findings:**
@@ -110,7 +110,7 @@ Every chat gets its own isolated profile. No global memory — everything is per
 
 **Storage layout:**
 ```
-~/.multis/memory/chats/<chatId>/
+~/.multis/data/memory/chats/<chatId>/
 ├── profile.json      # mode, preferences, metadata
 ├── recent.json       # rolling window (last N messages)
 ├── memory.md         # LLM-summarized durable notes for THIS chat

@@ -37,7 +37,7 @@ Telegram prefix: `/`. Beeper prefix: `//`. Access levels: anyone, paired, owner,
 -> docs/01-product/commands.md
 
 ## Configuration
-Runtime config: ~/.multis/config.json. Secrets: .env. Governance: ~/.multis/governance.json.
+Runtime config: ~/.multis/config.json. Secrets: .env. Governance: ~/.multis/auth/governance.json.
 -> docs/04-process/dev-workflow.md
 
 ## Adding Commands

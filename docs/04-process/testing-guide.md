@@ -103,7 +103,7 @@ Test fixtures in `test/fixtures/`: `sample.md`, `sample.txt`, `sample.pdf` (Libr
 | Suite | Tests | What it covers |
 |-------|-------|----------------|
 | constructor | 3 | Default URL/poll/prefix, custom config, initial state (empty selfIds/lastSeen) |
-| _loadToken | 3 | Load from ~/.multis/beeper-token.json, missing file → null, malformed JSON → null |
+| _loadToken | 3 | Load from ~/.multis/auth/beeper-token.json, missing file → null, malformed JSON → null |
 | _isSelf | 3 | senderID match, unknown sender, fallback to `sender` field |
 | _getChatMode | 3 | Default personal, config default_mode, per-chat override |
 | send | 1 | Prefixes outgoing messages with `[multis]` |

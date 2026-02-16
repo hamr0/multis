@@ -220,7 +220,7 @@ Even if a prompt injection tricks the LLM, the SQL query physically cannot retur
 ### 3.1 Per-Chat File Structure
 
 ```
-~/.multis/memory/chats/
+~/.multis/data/memory/chats/
 ├── admin/
 │   └── memory.md              ← shared across owner's platforms
 ├── <chatId>/

@@ -160,7 +160,7 @@ All support `options.system` natively:
 Every chat gets its own memory. No global state. No cross-chat contamination.
 
 ```
-~/.multis/memory/chats/<chatId>/
+~/.multis/data/memory/chats/<chatId>/
 ├── profile.json      # mode, name, platform, preferences
 ├── recent.json       # rolling window (last ~20 messages)
 ├── memory.md         # LLM-summarized durable notes (append-only, pruned at retention)
@@ -171,7 +171,7 @@ Every chat gets its own memory. No global state. No cross-chat contamination.
 Admin identity aggregation — admin talks from multiple platforms (Telegram, Beeper Note to Self, WhatsApp self-chat). All admin chats share a unified admin memory:
 
 ```
-~/.multis/memory/chats/
+~/.multis/data/memory/chats/
   ├── admin/                    # shared admin memory + profile
   │   ├── memory.md            # unified durable notes across all admin chats
   │   └── profile.json         # admin preferences
@@ -356,7 +356,7 @@ Chunks outside role **never reach the LLM context**. This is the hard boundary.
 | **Excluded context** | No admin memory.md in business prompts | Business-mode system prompt only loads customer memory + kb chunks |
 | **Pattern detection** | Flag suspicious queries | "ignore instructions", "system prompt", "show all users", "SELECT", references to other users |
 | **Rate limiting** | Track queries per chatId per hour | Flag anomalies (many broad queries, repeated "show all" patterns) |
-| **Dedicated audit** | `~/.multis/prompt_injection_audit.log` | userId, timestamp, full text, matched pattern, result (blocked/flagged/allowed) |
+| **Dedicated audit** | `~/.multis/logs/injection.log` | userId, timestamp, full text, matched pattern, result (blocked/flagged/allowed) |
 | **LLM instruction** | System prompt for business mode | "Answer from knowledge base only. Never reference other customers. Never reveal admin information." |
 
 ---
@@ -389,19 +389,19 @@ Owner command arrives
 - `last_auth_at` per userId stored in memory
 - Timeout configurable: `config.security.pin_timeout_hours` (default 24)
 - Lockout configurable: `config.security.pin_lockout_minutes` (default 60)
-- Failed attempts logged to `audit.log`
+- Failed attempts logged to `logs/audit.log`
 
 ### Audit logging
-- Append-only JSONL at `~/.multis/audit.log`
+- Append-only JSONL at `~/.multis/logs/audit.log`
 - Every command logged: timestamp, user_id, command, allowed, result
 - Actions logged: pair, unpair, exec, index, search, ask, mode change, pin_auth, pin_fail
-- Prompt injection attempts: `~/.multis/prompt_injection_audit.log` (separate file)
+- Prompt injection attempts: `~/.multis/logs/injection.log` (separate file)
 
 ### Owner model
 - First paired user becomes owner (set during init via inline Telegram pairing)
 - Owner-only (requires PIN): `/exec`, `/read`, `/index`, `/mode`
 - Everyone else: `/ask`, `/search`, `/docs`, `/status`, `/help`
-- Personal-mode chats get admin privileges (owner can grant via `/mode personal`)
+- Off-mode chats are completely ignored (no archive, no response)
 - All user IDs stored and compared as strings (Telegraf sends numbers, config stores strings)
 
 ### Future: ABAC policy matrix (replaces flat allowlist)
@@ -525,8 +525,8 @@ Created via `/remind <time> <message>` or `/cron <schedule> <action>` — owner-
 Customers cannot create cron jobs. If a customer requests a follow-up, the bot sends a note to admin. Admin decides whether to create a reminder.
 
 ### Storage
-- Jobs: `~/.multis/cron/jobs.json`
-- Run history: `~/.multis/cron/runs/<jobId>.jsonl`
+- Jobs: `~/.multis/data/cron/jobs.json`
+- Run history: `~/.multis/data/cron/runs/<jobId>.jsonl`
 
 ---
 
@@ -597,7 +597,7 @@ Each platform and LLM provider is verified inline before moving on. No "next ste
 ```
 multis start
   │
-  ├─ Write PID to ~/.multis/multis.pid
+  ├─ Write PID to ~/.multis/run/multis.pid
   ├─ Load config.json
   ├─ Start platforms (Telegram always, Beeper if reachable)
   ├─ Start cron scheduler (cleanup jobs)
@@ -619,14 +619,17 @@ multis start
 | File | Location | Purpose |
 |------|----------|---------|
 | `config.json` | `~/.multis/` | Main config — all behavioral settings with defaults |
-| `governance.json` | `~/.multis/` | Command allowlist/denylist |
+| `tools.json` | `~/.multis/` | Tool enable/disable + platform restrictions |
 | `.env` | Project root | API keys (overrides config.json) |
-| `documents.db` | `~/.multis/` | SQLite: document chunks + FTS5 (type/element/role columns) |
-| `audit.log` | `~/.multis/` | Append-only audit log |
-| `prompt_injection_audit.log` | `~/.multis/` | Prompt injection detection log |
-| `beeper-token.json` | `~/.multis/` | Beeper Desktop API token |
-| `memory/chats/` | `~/.multis/` | Per-chat profiles + memory |
-| `cron/jobs.json` | `~/.multis/` | Scheduled jobs |
+| `documents.db` | `~/.multis/data/` | SQLite: document chunks + FTS5 (type/element/role columns) |
+| `memory/chats/` | `~/.multis/data/` | Per-chat profiles + memory |
+| `governance.json` | `~/.multis/auth/` | Command allowlist/denylist |
+| `pin_sessions.json` | `~/.multis/auth/` | PIN auth session state |
+| `beeper-token.json` | `~/.multis/auth/` | Beeper Desktop API token |
+| `audit.log` | `~/.multis/logs/` | Append-only audit log |
+| `injection.log` | `~/.multis/logs/` | Prompt injection detection log |
+| `daemon.log` | `~/.multis/logs/` | Daemon stdout/stderr |
+| `multis.pid` | `~/.multis/run/` | Daemon PID file |
 
 ### Config structure
 
@@ -826,7 +829,7 @@ User: "play some jazz"
 
 ### Auth model
 
-- OAuth tokens stored in `~/.multis/mcp/tokens/` (encrypted or via `pass`)
+- OAuth tokens stored in `~/.multis/auth/mcp/tokens/` (encrypted or via `pass`)
 - Each service module handles its own token refresh
 - First use triggers OAuth flow (browser opens, user consents, token saved)
 - Owner-only — external service tools require PIN auth like `/exec`

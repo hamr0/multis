@@ -21,7 +21,7 @@ node src/index.js
 # Run token setup
 node src/cli/setup-beeper.js
 
-# Token saved to ~/.multis/beeper-token.json
+# Token saved to ~/.multis/auth/beeper-token.json
 # Enable in config: set platforms.beeper.enabled = true
 ```
 

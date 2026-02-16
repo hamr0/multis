@@ -83,7 +83,7 @@ npm test             # node --test test/**/*.test.js
 | src/skills/executor.js | Shell exec, file read |
 | src/indexer/ | Doc parsing, chunking, SQLite FTS5 store |
 | src/llm/ | LLM providers + RAG prompt builder |
-| ~/.multis/ | Runtime data: config.json, governance.json, multis.db, audit.log |
+| ~/.multis/ | Runtime data: config.json, data/ (db, memory), auth/, logs/, run/ |
 
 ## Key Patterns
 
