@@ -295,6 +295,7 @@ The LLM has a `recall_memory` tool that searches only `memory_summary` chunks (n
 
 - **Scope-filtered**: owner sees all memory scopes; non-owner only sees `user:<chatId>` memories
 - **Type-filtered**: `store.search()` accepts a `types` option that adds `AND c.element_type IN (...)` to the SQL query
+- **Recency fallback**: when FTS query is all stopwords (e.g. "what did we talk about last"), `store.recentByType()` returns the most recent `memory_summary` chunks by `created_at DESC` — same scope/type filtering, no FTS match required
 - **Not owner_only**: customers can recall their own scoped memories too
 
 ---
@@ -352,11 +353,14 @@ Chunks outside scope **never reach the LLM context**. This is the hard boundary.
 
 ## 7. Governance + Security
 
-### Command validation
-- **Allowlist:** Safe commands (ls, cat, grep, find, curl, git, etc.)
-- **Denylist:** Dangerous commands (rm, sudo, dd, mkfs, shutdown)
-- **Confirmation:** Risky commands (mv, cp, git push)
-- **Path restrictions:** Allowed dirs (~/Documents, ~/Downloads) vs denied (/etc, /var)
+### Command validation — flat cross-platform allowlist
+
+One `governance.json` covers all platforms (Linux, macOS, Windows, Android). Unused commands on the wrong OS are harmless — no conditional logic needed. The LLM reads the flat list without complexity overhead.
+
+- **Allowlist:** Safe commands across all OSes — `ls`/`dir`, `cat`/`type`, `grep`/`find`/`where`, `curl`/`wget`, `git`/`npm`/`node`/`python`, media (`playerctl`, `osascript`), clipboard (`xclip`, `pbcopy`, `clip`), screenshots (`grim`, `screencapture`, `snippingtool`), Termux (`termux-*` for Android)
+- **Denylist:** Destructive commands — `rm`/`rmdir`/`del`/`rd`, `sudo`/`su`/`runas`, `dd`/`mkfs`/`format`/`diskpart`, `chmod`/`chown`/`icacls`, `kill`/`killall`/`taskkill`, `shutdown`/`reboot`/`halt`
+- **Confirmation:** Risky commands — `mv`/`cp`/`move`/`copy`/`xcopy`/`robocopy`, `powershell`, `git push`/`git rebase`/`git reset`, `npm publish`
+- **Path restrictions:** Allowed dirs (`~/Documents`, `~/Downloads`, `~/Projects`, `~/Desktop`) vs denied (`/etc`, `/var`, `/usr`, `/System`, `/bin`, `/sbin`, `C:\Windows`, `C:\Program Files`)
 
 ### PIN authentication (POC6)
 
