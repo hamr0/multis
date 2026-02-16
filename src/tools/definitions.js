@@ -53,6 +53,27 @@ const TOOLS = [
     }
   },
   {
+    name: 'send_file',
+    description: 'Send a file to the current chat. Use when the user asks for a file, screenshot, or when output is better as an attachment.',
+    platforms: ['linux', 'macos', 'android'],
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Absolute path to the file to send (~ expands to home)' },
+        caption: { type: 'string', description: 'Optional caption for the file' }
+      },
+      required: ['path']
+    },
+    execute: async ({ path: filePath, caption }, ctx) => {
+      const fs = require('fs');
+      const resolved = (filePath || '').replace(/^~/, process.env.HOME || '');
+      if (!fs.existsSync(resolved)) return `File not found: ${filePath}`;
+      if (!ctx.platform?.sendFile) return 'File sending not supported on this platform.';
+      await ctx.platform.sendFile(ctx.chatId, resolved, caption);
+      return `Sent: ${require('path').basename(resolved)}`;
+    }
+  },
+  {
     name: 'grep_files',
     description: 'Search file contents using grep. Finds lines matching a pattern in files under a directory. Use when the user wants to find text inside files on disk (not indexed documents).',
     platforms: ['linux', 'macos', 'android'],

@@ -732,7 +732,7 @@ async function routeAsk(msg, platform, config, indexer, llm, question, getMem, m
       answer = await runAgentLoop(agentLlm, messages, toolSchemas, userTools, {
         system,
         maxRounds: maxToolRounds,
-        ctx: { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem }
+        ctx: { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform }
       });
     } else {
       answer = await agentLlm.generateWithMessages(messages, { system });

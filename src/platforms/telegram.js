@@ -67,6 +67,13 @@ class TelegramPlatform extends Platform {
     await this.bot.telegram.sendMessage(chatId, text);
   }
 
+  async sendFile(chatId, filePath, caption) {
+    const fs = require('fs');
+    const source = fs.createReadStream(filePath);
+    const filename = require('path').basename(filePath);
+    await this.bot.telegram.sendDocument(chatId, { source, filename }, caption ? { caption } : {});
+  }
+
   /**
    * Handle document uploads - Telegram-specific (downloads file, indexes).
    * Calls the message callback with a special document Message.

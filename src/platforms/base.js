@@ -27,6 +27,16 @@ class Platform {
   }
 
   /**
+   * Send a file to a chat.
+   * @param {string} chatId
+   * @param {string} filePath - absolute path to the file
+   * @param {string} [caption] - optional caption text
+   */
+  async sendFile(chatId, filePath, caption) {
+    throw new Error(`${this.name}: sendFile() not implemented`);
+  }
+
+  /**
    * Register callback for incoming messages.
    * Callback receives Message objects.
    */
