@@ -68,8 +68,9 @@ describe('recall_memory tool', () => {
   it('non-owner only sees their own scoped memories', async () => {
     const ctx = { indexer: { store }, isOwner: false, chatId: 'customer42' };
     const result = await recallTool.execute({ query: 'cat Luna Berlin' }, ctx);
-    assert.strictEqual(result, 'No matching memories found.',
-      'customer should not see admin memory');
+    // FTS returns nothing for this scope, recency fallback returns customer's own memory
+    assert.ok(!result.includes('Luna'), 'customer should not see admin memory about Luna');
+    assert.ok(result.includes('refund'), 'recency fallback should show customer own memory');
   });
 
   it('non-owner can see their own memories', async () => {
@@ -78,8 +79,9 @@ describe('recall_memory tool', () => {
     assert.ok(result.includes('refund policy'), 'customer should see own memory');
   });
 
-  it('returns empty message when no matches', async () => {
-    const ctx = { indexer: { store }, isOwner: true, chatId: 'owner1' };
+  it('returns empty message when no matches at all', async () => {
+    // Use a non-owner scope with zero chunks to get true empty
+    const ctx = { indexer: { store }, isOwner: false, chatId: 'nobody99' };
     const result = await recallTool.execute({ query: 'quantum physics spacetime' }, ctx);
     assert.strictEqual(result, 'No matching memories found.');
   });
@@ -94,5 +96,22 @@ describe('recall_memory tool', () => {
     const ctx = { indexer: { store }, isOwner: true, chatId: 'owner1' };
     const result = await recallTool.execute({ query: 'cat Luna' }, ctx);
     assert.ok(result.includes('2026-02-10'), 'should include the date from createdAt');
+  });
+
+  it('falls back to recent memories when query is all stopwords', async () => {
+    const ctx = { indexer: { store }, isOwner: true, chatId: 'owner1' };
+    // "what did we talk about last" — all stopwords, FTS returns empty
+    const result = await recallTool.execute({ query: 'what did we talk about last' }, ctx);
+    assert.ok(result !== 'No matching memories found.',
+      'should return recent memories instead of empty');
+    assert.ok(result.includes('2026-02-11') || result.includes('2026-02-10'),
+      'should include dated memory entries');
+  });
+
+  it('recency fallback respects scope for non-owner', async () => {
+    const ctx = { indexer: { store }, isOwner: false, chatId: 'customer42' };
+    const result = await recallTool.execute({ query: 'what happened before' }, ctx);
+    assert.ok(result.includes('refund policy'), 'customer should see own recent memory');
+    assert.ok(!result.includes('Luna'), 'customer should not see admin memory');
   });
 });

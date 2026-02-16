@@ -1,5 +1,6 @@
+const path = require('path');
 const { logAudit } = require('../governance/audit');
-const { addAllowedUser, isOwner, saveConfig } = require('../config');
+const { addAllowedUser, isOwner, saveConfig, getMultisDir } = require('../config');
 const { execCommand, readFile, listSkills } = require('../skills/executor');
 const { DocumentIndexer } = require('../indexer/index');
 const { createLLMClient } = require('../llm/client');
@@ -119,8 +120,13 @@ function isPaired(msgOrCtx, config) {
 function createMessageRouter(config, deps = {}) {
   const indexer = deps.indexer || new DocumentIndexer();
   const memoryManagers = deps.memoryManagers || new Map();
+  const _memBaseDir = deps.memoryBaseDir || path.join(getMultisDir(), 'memory', 'chats');
   const pinManager = deps.pinManager || new PinManager(config);
   const escalationRetries = deps.escalationRetries || new Map();
+
+  // Helper: getMemoryManager with baseDir (follows getMultisDir for test isolation)
+  const getMem = (chatId, opts = {}) =>
+    getMemoryManager(memoryManagers, chatId, { ...opts, baseDir: _memBaseDir });
 
   // Memory config defaults
   const memCfg = {
@@ -162,7 +168,7 @@ function createMessageRouter(config, deps = {}) {
 
     // Silent mode: archive to memory, no response
     if (msg.routeAs === 'silent') {
-      const mem = memoryManagers ? getMemoryManager(memoryManagers, msg.chatId, { isAdmin: false }) : null;
+      const mem = getMem(msg.chatId, { isAdmin: false });
       if (mem) {
         const role = msg.isSelf ? 'user' : 'contact';
         mem.appendMessage(role, msg.text);
@@ -174,7 +180,7 @@ function createMessageRouter(config, deps = {}) {
     // Natural language / business routing (set by platform adapter)
     if (msg.routeAs === 'natural' || msg.routeAs === 'business') {
       if (!isPaired(msg, config)) return;
-      await routeAsk(msg, platform, config, indexer, llm, msg.text, memoryManagers, memCfg, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
+      await routeAsk(msg, platform, config, indexer, llm, msg.text, getMem, memCfg, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
       return;
     }
 
@@ -266,11 +272,11 @@ function createMessageRouter(config, deps = {}) {
       }
     }
 
-    await executeCommand(command, args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
+    await executeCommand(command, args, msg, platform, config, indexer, llm, getMem, memCfg, pinManager, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
   };
 }
 
-async function executeCommand(command, args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager, escalationRetries, agentRegistry, toolDeps) {
+async function executeCommand(command, args, msg, platform, config, indexer, llm, getMem, memCfg, pinManager, escalationRetries, agentRegistry, toolDeps) {
     switch (command) {
       case 'status':
         await routeStatus(msg, platform, config);
@@ -297,16 +303,16 @@ async function executeCommand(command, args, msg, platform, config, indexer, llm
         await platform.send(msg.chatId, `Available skills:\n${listSkills()}`);
         break;
       case 'ask':
-        await routeAsk(msg, platform, config, indexer, llm, args, memoryManagers, memCfg, escalationRetries, agentRegistry, toolDeps);
+        await routeAsk(msg, platform, config, indexer, llm, args, getMem, memCfg, escalationRetries, agentRegistry, toolDeps);
         break;
       case 'memory':
-        await routeMemory(msg, platform, config, memoryManagers);
+        await routeMemory(msg, platform, config, getMem);
         break;
       case 'forget':
-        await routeForget(msg, platform, config, memoryManagers);
+        await routeForget(msg, platform, config, getMem);
         break;
       case 'remember':
-        await routeRemember(msg, platform, config, memoryManagers, args);
+        await routeRemember(msg, platform, config, getMem, args);
         break;
       case 'mode':
         await routeMode(msg, platform, config, args, agentRegistry);
@@ -326,7 +332,7 @@ async function executeCommand(command, args, msg, platform, config, indexer, llm
       default:
         // Telegram plain text (no recognized command) → implicit ask
         if (msg.platform === 'telegram' && !msg.text.startsWith('/')) {
-          await routeAsk(msg, platform, config, indexer, llm, msg.text, memoryManagers, memCfg, escalationRetries, agentRegistry, toolDeps);
+          await routeAsk(msg, platform, config, indexer, llm, msg.text, getMem, memCfg, escalationRetries, agentRegistry, toolDeps);
         }
         break;
     }
@@ -604,7 +610,7 @@ async function runAgentLoop(llm, messages, toolSchemas, tools, opts = {}) {
   return finalResponse || '(max tool rounds reached)';
 }
 
-async function routeAsk(msg, platform, config, indexer, llm, question, memoryManagers, memCfg, escalationRetries, agentRegistry, toolDeps = {}) {
+async function routeAsk(msg, platform, config, indexer, llm, question, getMem, memCfg, escalationRetries, agentRegistry, toolDeps = {}) {
   if (!question) {
     const prefix = msg.platform === 'telegram' ? '/' : '//';
     await platform.send(msg.chatId, `Usage: ${prefix}ask <question>`);
@@ -633,7 +639,7 @@ async function routeAsk(msg, platform, config, indexer, llm, question, memoryMan
     }
   }
 
-  const mem = memoryManagers ? getMemoryManager(memoryManagers, msg.chatId, { isAdmin: admin }) : null;
+  const mem = getMem ? getMem(msg.chatId, { isAdmin: admin }) : null;
 
   try {
     // Record user message
@@ -770,8 +776,8 @@ async function routeAsk(msg, platform, config, indexer, llm, question, memoryMan
   }
 }
 
-async function routeMemory(msg, platform, config, memoryManagers) {
-  const mem = getMemoryManager(memoryManagers, msg.chatId, { isAdmin: isOwner(msg.senderId, config) });
+async function routeMemory(msg, platform, config, getMem) {
+  const mem = getMem(msg.chatId, { isAdmin: isOwner(msg.senderId, config) });
   const memory = mem.loadMemory();
   if (!memory.trim()) {
     await platform.send(msg.chatId, 'No memory notes for this chat yet.');
@@ -780,20 +786,20 @@ async function routeMemory(msg, platform, config, memoryManagers) {
   await platform.send(msg.chatId, `Memory notes:\n\n${memory}`);
 }
 
-async function routeForget(msg, platform, config, memoryManagers) {
-  const mem = getMemoryManager(memoryManagers, msg.chatId, { isAdmin: isOwner(msg.senderId, config) });
+async function routeForget(msg, platform, config, getMem) {
+  const mem = getMem(msg.chatId, { isAdmin: isOwner(msg.senderId, config) });
   mem.clearMemory();
   await platform.send(msg.chatId, 'Memory cleared for this chat.');
   logAudit({ action: 'forget', user_id: msg.senderId, chatId: msg.chatId });
 }
 
-async function routeRemember(msg, platform, config, memoryManagers, note) {
+async function routeRemember(msg, platform, config, getMem, note) {
   if (!note) {
     const prefix = msg.platform === 'telegram' ? '/' : '//';
     await platform.send(msg.chatId, `Usage: ${prefix}remember <note>`);
     return;
   }
-  const mem = getMemoryManager(memoryManagers, msg.chatId, { isAdmin: isOwner(msg.senderId, config) });
+  const mem = getMem(msg.chatId, { isAdmin: isOwner(msg.senderId, config) });
   mem.appendMemory(note);
   await platform.send(msg.chatId, 'Noted.');
   logAudit({ action: 'remember', user_id: msg.senderId, chatId: msg.chatId, note });

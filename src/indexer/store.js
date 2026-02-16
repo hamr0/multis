@@ -249,6 +249,53 @@ class DocumentStore {
   }
 
   /**
+   * Get most recent chunks by type, without FTS matching.
+   * Used as fallback when search query is all stopwords.
+   */
+  recentByType(limit = 5, options = {}) {
+    const { scopes, types } = options;
+    let scopeClause = '';
+    let typeClause = '';
+    const params = [];
+    if (scopes && scopes.length > 0) {
+      const placeholders = scopes.map(() => '?').join(', ');
+      scopeClause = `AND scope IN (${placeholders})`;
+      params.push(...scopes);
+    }
+    if (types && types.length > 0) {
+      const tp = types.map(() => '?').join(', ');
+      typeClause = `AND element_type IN (${tp})`;
+      params.push(...types);
+    }
+    params.push(limit);
+    const rows = this.db.prepare(`
+      SELECT * FROM chunks
+      WHERE 1=1 ${scopeClause} ${typeClause}
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(...params);
+
+    return rows.map(row => ({
+      chunkId: row.chunk_id,
+      filePath: row.file_path,
+      pageStart: row.page_start,
+      pageEnd: row.page_end,
+      elementType: row.element_type,
+      name: row.name,
+      content: row.content,
+      parentChunkId: row.parent_chunk_id,
+      sectionPath: JSON.parse(row.section_path || '[]'),
+      sectionLevel: row.section_level,
+      documentType: row.document_type,
+      metadata: JSON.parse(row.metadata || '{}'),
+      scope: row.scope,
+      activation: row.activation,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+  }
+
+  /**
    * Get chunk by ID
    */
   getChunk(chunkId) {

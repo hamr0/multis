@@ -33,9 +33,13 @@ function createTestEnv(overrides = {}) {
     allowlist: ['.*'], denylist: [], confirm_patterns: []
   }));
 
+  // Memory base dir for test isolation (prevents leaking into real ~/.multis/memory/)
+  const memoryBaseDir = path.join(multisDir, 'memory', 'chats');
+
   return {
     tmpDir,
     config,
+    memoryBaseDir,
     cleanup: () => {
       setMultisDir(null); // restore default
       fs.rmSync(tmpDir, { recursive: true, force: true });

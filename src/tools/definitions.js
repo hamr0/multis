@@ -89,15 +89,18 @@ const TOOLS = [
     execute: async ({ query }, ctx) => {
       if (!ctx.indexer) return 'Memory search not available.';
       const scopes = ctx.isOwner ? undefined : [`user:${ctx.chatId}`];
-      const results = ctx.indexer.store.search(query, 5, {
-        scopes,
-        types: ['memory_summary']
-      });
+      const searchOpts = { scopes, types: ['memory_summary'] };
+      // Try FTS search first; if empty (e.g. all stopwords), fall back to recent
+      let results = ctx.indexer.store.search(query, 5, searchOpts);
+      if (results.length === 0) {
+        results = ctx.indexer.store.recentByType(5, searchOpts);
+      }
       if (results.length === 0) return 'No matching memories found.';
-      return results.map((r, i) => {
+      const fmt = (r, i) => {
         const date = r.createdAt?.slice(0, 10) || 'unknown date';
         return `[${i + 1}] ${date}: ${r.content.slice(0, 500)}`;
-      }).join('\n\n');
+      };
+      return results.map(fmt).join('\n\n');
     }
   },
   {
