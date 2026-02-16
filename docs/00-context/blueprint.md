@@ -850,3 +850,33 @@ For services without APIs, Playwright connects to the user's running Chrome:
 ### Status: future (post-POC7)
 
 Not needed yet. Current tools (filesystem, shell, knowledge, desktop, Android) cover personal use. External services are the next expansion when the core is stable.
+
+---
+
+## 16. Future: Agent Enhancements
+
+Features that extend the multi-agent system beyond per-chat assignment. All are post-dogfood — documented here for design continuity.
+
+### Agent Handoffs
+
+Inter-agent protocol: `@billing` mention in an agent's response triggers handoff with context summary. Source agent stops, target takes over the chat. Audit-logged with both agent names and the handoff reason.
+
+**Status:** future (post-dogfood)
+
+### Concurrent Tasks
+
+Async task queue for long-running operations (large file indexing, batch searches). Tool returns `{ status: 'async', taskId }`, background worker executes, sends result when done. Owner can `/cancel <taskId>`.
+
+**Status:** future
+
+### Per-Agent Tool Restrictions
+
+`"allowed_tools": [...]` or `"denied_tools": [...]` in agent config. Missing = all tools (current behavior). A "support" agent could be restricted to `search_docs` and `recall_memory` only.
+
+**Status:** future (~30 lines in tools/registry.js)
+
+### Shared Context Across Chats
+
+All agents for the same user can read `user:<userId>/context.md` — an append-only cross-chat timeline. Memory capture writes to both per-chat `memory.md` and shared context. Useful when multiple agents need the same background info.
+
+**Status:** future (~60 lines in memory/manager.js)

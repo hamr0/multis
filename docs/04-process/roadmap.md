@@ -63,7 +63,7 @@ Start from scratch as if you're a new user. Validates the full install → first
 - [ ] `/exec ls ~` — triggers PIN prompt? Enter PIN → output?
 - [ ] `/exec echo hello` — governance allows it?
 - [ ] `/mode` (no args) — shows current chat mode?
-- [ ] `/mode personal` — sets mode (no PIN needed, mode removed from PIN_PROTECTED)?
+- [ ] `/mode off` — sets mode to off (no PIN needed, mode removed from PIN_PROTECTED)?
 - [ ] `/read ~/.multis/config.json` — shows file content?
 - [ ] Upload a PDF file — auto-indexed? Reports chunk count?
 - [ ] `/index ~/some-real-doc.pdf kb` — indexes with scope?
@@ -106,6 +106,7 @@ Start from scratch as if you're a new user. Validates the full install → first
 - [ ] `/mode` (no args) from Note-to-self → lists all chats with current modes (no PIN)?
 - [ ] `/mode business` from Note-to-self → interactive picker? Pick a chat → set?
 - [ ] `/mode silent John` from Note-to-self → search by name → set?
+- [ ] `/mode off` → sets chat to off (completely ignored)?
 - [ ] `/mode business` in a non-self chat → silently ignored (commands restricted to personal chats)?
 - [ ] Send message from contact in business-mode chat → auto-responds?
 - [ ] Send message from friend in silent-mode chat → archived but no response?
@@ -121,7 +122,8 @@ Start from scratch as if you're a new user. Validates the full install → first
 - [ ] Send plain message — responds as coder (sticky)?
 - [ ] `/agent` (no args) — shows current agent?
 - [ ] `/agent assistant` — switches back?
-- [ ] `/mode personal coder` — sets both mode and agent?
+- [ ] `/mode business coder` — sets both mode and agent?
+- [ ] `/mode business sales Alice` from Note-to-self → agent assigned to Alice's chat (not Note-to-self)?
 - [ ] `@nonexistent hello` — treated as plain text, default agent responds?
 - [ ] Remove `agents` from config.json — bot starts normally, no crash?
 - [ ] Malform `agents` (e.g. `"agents": 123`) — bot starts with warning?
@@ -150,7 +152,7 @@ Start from scratch as if you're a new user. Validates the full install → first
 - [ ] `/remember my wife's name is Sarah` → saved to memory.md?
 - [ ] New session: "what's my wife's name?" → recall_memory finds it?
 - [ ] "What did we talk about last?" → recency fallback works (not empty)?
-- [ ] Check `~/.multis/memory/chats/<id>/log/` — daily logs exist?
+- [ ] Check `~/.multis/data/memory/chats/<id>/log/` — daily logs exist?
 - [ ] Logs older than 30 days cleaned on startup? (create a fake old log to test)
 - [ ] Admin memory chunks survive past 90 days? (365-day retention)
 
@@ -163,6 +165,8 @@ Keep a running list here as you test. Each entry: what happened, expected vs act
 | 1 | LLM | Bot hallucinated "reminder set" — no reminder system exists | High | Fixed (guardrail added) |
 | 2 | Memory | Bot said "no saved memories" despite having them | Medium | Fixed (recall_memory recency fallback) |
 | 3 | Files | Bot said "no permission" for find_files — governance blocking find | Medium | Fixed (find_files tool added) |
+| 4 | Mode | "personal" mode name confusing — sounded like "my chat" not "ignored" | Low | Fixed (renamed to "off") |
+| 5 | Agent | `/mode business sales Alice` from Note-to-self assigned agent to Note-to-self, not Alice | Medium | Fixed (agent deferred to target resolution) |
 |   |      |       |          |        |
 
 ---
