@@ -64,8 +64,9 @@ async function main() {
     const store = new DocumentStore();
     const logDays = config.memory?.log_retention_days || 30;
     const memDays = config.memory?.retention_days || 90;
+    const adminDays = config.memory?.admin_retention_days || 365;
     const logResult = cleanupLogs(logDays);
-    const chunksPruned = pruneMemoryChunks(store, memDays);
+    const chunksPruned = pruneMemoryChunks(store, memDays, adminDays);
     if (logResult.deleted > 0 || chunksPruned > 0) {
       console.log(`Cleanup: ${logResult.deleted} old logs, ${chunksPruned} old chunks removed`);
     }
@@ -80,7 +81,7 @@ async function main() {
     try {
       const store = new DocumentStore();
       cleanupLogs(config.memory?.log_retention_days || 30);
-      pruneMemoryChunks(store, config.memory?.retention_days || 90);
+      pruneMemoryChunks(store, config.memory?.retention_days || 90, config.memory?.admin_retention_days || 365);
       store.close();
     } catch (err) {
       console.warn(`Scheduled cleanup error: ${err.message}`);

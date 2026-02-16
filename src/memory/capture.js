@@ -23,7 +23,7 @@ Rules:
  */
 async function runCapture(chatId, mem, llm, indexer, options = {}) {
   const keepLast = options.keepLast || 5;
-  const scope = options.scope || 'kb';
+  const role = options.role || options.scope || 'public';
   const maxSections = options.maxSections || 12;
 
   try {
@@ -58,15 +58,15 @@ async function runCapture(chatId, mem, llm, indexer, options = {}) {
           filePath: `memory/chats/${chatId}`,
           pageStart: 0,
           pageEnd: 0,
-          elementType: 'memory_summary',
+          element: 'chat',
           name: `Memory capture ${now}`,
           content: summary,
           parentChunkId: null,
           sectionPath: [chatId],
           sectionLevel: 0,
-          documentType: 'conversation',
+          type: 'conv',
           metadata: { chatId },
-          scope,
+          role,
           createdAt: now,
           updatedAt: now
         });

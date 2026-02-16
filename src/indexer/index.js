@@ -45,9 +45,9 @@ class DocumentIndexer {
     // Chunk (split large sections)
     const processed = this.chunker.process(rawChunks);
 
-    // Set scope on each chunk
+    // Set role on each chunk
     for (const chunk of processed) {
-      chunk.scope = scope;
+      chunk.role = scope;
     }
 
     // Store

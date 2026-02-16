@@ -76,12 +76,12 @@ async function _chunksFromOutline(pdf, outline, pageTexts, absPath) {
         filePath: absPath,
         pageStart: startPage,
         pageEnd: endPage,
-        elementType: 'section',
+        element: 'pdf',
         name: entry.title,
         content: sectionText,
         sectionPath,
         sectionLevel: entry.level,
-        documentType: 'pdf'
+        type: 'kb'
       }));
     }
   }
@@ -154,12 +154,12 @@ function _chunksFromPages(pageTexts, absPath, filePath) {
         filePath: absPath,
         pageStart: 1,
         pageEnd: numPages,
-        elementType: 'section',
+        element: 'pdf',
         name: fileName,
         content: fullText,
         sectionPath: [fileName],
         sectionLevel: 1,
-        documentType: 'pdf'
+        type: 'kb'
       }));
     }
     return chunks;
@@ -174,12 +174,12 @@ function _chunksFromPages(pageTexts, absPath, filePath) {
       filePath: absPath,
       pageStart: i + 1,
       pageEnd: i + 1,
-      elementType: 'paragraph',
+      element: 'pdf',
       name: `Page ${i + 1}`,
       content: pageText,
       sectionPath: [fileName, `Page ${i + 1}`],
       sectionLevel: 1,
-      documentType: 'pdf'
+      type: 'kb'
     }));
   }
 
@@ -219,12 +219,12 @@ async function parseDOCX(filePath) {
         if (cleanContent) {
           chunks.push(new DocChunk({
             filePath: absPath,
-            elementType: currentLevel > 0 ? 'section' : 'paragraph',
+            element: 'docx',
             name: currentName,
             content: cleanContent,
             sectionPath: sectionStack.map(s => s.name).concat(currentLevel > 0 ? [] : [currentName]),
             sectionLevel: currentLevel,
-            documentType: 'docx'
+            type: 'kb'
           }));
         }
       }
@@ -253,12 +253,12 @@ async function parseDOCX(filePath) {
     if (cleanContent) {
       chunks.push(new DocChunk({
         filePath: absPath,
-        elementType: currentLevel > 0 ? 'section' : 'paragraph',
+        element: 'docx',
         name: currentName,
         content: cleanContent,
         sectionPath: sectionStack.map(s => s.name),
         sectionLevel: currentLevel,
-        documentType: 'docx'
+        type: 'kb'
       }));
     }
   }
@@ -269,12 +269,12 @@ async function parseDOCX(filePath) {
     if (cleanContent) {
       chunks.push(new DocChunk({
         filePath: absPath,
-        elementType: 'paragraph',
+        element: 'docx',
         name: path.basename(filePath),
         content: cleanContent,
         sectionPath: [path.basename(filePath)],
         sectionLevel: 0,
-        documentType: 'docx'
+        type: 'kb'
       }));
     }
   }
@@ -305,12 +305,12 @@ function parseMD(filePath) {
       if (currentContent.trim()) {
         chunks.push(new DocChunk({
           filePath: absPath,
-          elementType: currentLevel > 0 ? 'section' : 'paragraph',
+          element: 'md',
           name: currentName,
           content: currentContent.trim(),
           sectionPath: sectionStack.map(s => s.name),
           sectionLevel: currentLevel,
-          documentType: 'md'
+          type: 'kb'
         }));
       }
 
@@ -334,24 +334,24 @@ function parseMD(filePath) {
   if (currentContent.trim()) {
     chunks.push(new DocChunk({
       filePath: absPath,
-      elementType: currentLevel > 0 ? 'section' : 'paragraph',
+      element: 'md',
       name: currentName,
       content: currentContent.trim(),
       sectionPath: sectionStack.map(s => s.name),
       sectionLevel: currentLevel,
-      documentType: 'md'
+      type: 'kb'
     }));
   }
 
   if (chunks.length === 0 && content.trim()) {
     chunks.push(new DocChunk({
       filePath: absPath,
-      elementType: 'paragraph',
+      element: 'md',
       name: path.basename(filePath),
       content: content.trim(),
       sectionPath: [path.basename(filePath)],
       sectionLevel: 0,
-      documentType: 'md'
+      type: 'kb'
     }));
   }
 
@@ -369,12 +369,12 @@ function parseTXT(filePath) {
 
   return [new DocChunk({
     filePath: absPath,
-    elementType: 'paragraph',
+    element: 'txt',
     name: path.basename(filePath),
     content: content.trim(),
     sectionPath: [path.basename(filePath)],
     sectionLevel: 0,
-    documentType: 'txt'
+    type: 'kb'
   })];
 }
 

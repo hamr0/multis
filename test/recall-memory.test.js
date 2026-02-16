@@ -21,27 +21,27 @@ describe('recall_memory tool', () => {
     // Memory summary chunks
     store.saveChunk({
       chunkId: 'mem-1', filePath: 'memory/chats/owner1', pageStart: 0, pageEnd: 0,
-      elementType: 'memory_summary', name: 'Memory capture',
+      element: 'chat', name: 'Memory capture',
       content: 'User mentioned their cat is named Luna and they live in Berlin',
       parentChunkId: null, sectionPath: ['owner1'], sectionLevel: 0,
-      documentType: 'conversation', metadata: {}, scope: 'admin',
+      type: 'conv', metadata: {}, role: 'admin',
       createdAt: '2026-02-10T12:00:00Z', updatedAt: now
     });
     store.saveChunk({
       chunkId: 'mem-2', filePath: 'memory/chats/customer42', pageStart: 0, pageEnd: 0,
-      elementType: 'memory_summary', name: 'Memory capture',
+      element: 'chat', name: 'Memory capture',
       content: 'Customer asked about refund policy for their order',
       parentChunkId: null, sectionPath: ['customer42'], sectionLevel: 0,
-      documentType: 'conversation', metadata: {}, scope: 'user:customer42',
+      type: 'conv', metadata: {}, role: 'user:customer42',
       createdAt: '2026-02-11T08:00:00Z', updatedAt: now
     });
     // A document chunk (should NOT appear in recall_memory results)
     store.saveChunk({
       chunkId: 'doc-1', filePath: '/docs/pets.pdf', pageStart: 1, pageEnd: 1,
-      elementType: 'paragraph', name: 'Pet Care Guide',
+      element: 'pdf', name: 'Pet Care Guide',
       content: 'Cats need regular veterinary checkups and a balanced diet with Luna brand food',
       parentChunkId: null, sectionPath: ['Pet Care'], sectionLevel: 0,
-      documentType: 'pdf', metadata: {}, scope: 'kb',
+      type: 'kb', metadata: {}, role: 'public',
       createdAt: now, updatedAt: now
     });
   });
@@ -51,7 +51,7 @@ describe('recall_memory tool', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('returns only memory_summary chunks, not documents', async () => {
+  it('returns only conv chunks, not documents', async () => {
     const ctx = { indexer: { store }, isOwner: true, chatId: 'owner1' };
     const result = await recallTool.execute({ query: 'cat Luna' }, ctx);
     assert.ok(result.includes('cat is named Luna'), 'should find memory about Luna');
@@ -59,7 +59,7 @@ describe('recall_memory tool', () => {
     assert.ok(!result.includes('Luna brand food'), 'should not include doc content');
   });
 
-  it('owner can see all memory scopes', async () => {
+  it('owner can see all memory roles', async () => {
     const ctx = { indexer: { store }, isOwner: true, chatId: 'owner1' };
     const result = await recallTool.execute({ query: 'refund order' }, ctx);
     assert.ok(result.includes('refund policy'), 'owner should see customer memory');
@@ -80,7 +80,6 @@ describe('recall_memory tool', () => {
   });
 
   it('returns empty message when no matches at all', async () => {
-    // Use a non-owner scope with zero chunks to get true empty
     const ctx = { indexer: { store }, isOwner: false, chatId: 'nobody99' };
     const result = await recallTool.execute({ query: 'quantum physics spacetime' }, ctx);
     assert.strictEqual(result, 'No matching memories found.');
@@ -100,7 +99,6 @@ describe('recall_memory tool', () => {
 
   it('falls back to recent memories when query is all stopwords', async () => {
     const ctx = { indexer: { store }, isOwner: true, chatId: 'owner1' };
-    // "what did we talk about last" — all stopwords, FTS returns empty
     const result = await recallTool.execute({ query: 'what did we talk about last' }, ctx);
     assert.ok(result !== 'No matching memories found.',
       'should return recent memories instead of empty');
@@ -108,7 +106,7 @@ describe('recall_memory tool', () => {
       'should include dated memory entries');
   });
 
-  it('recency fallback respects scope for non-owner', async () => {
+  it('recency fallback respects role for non-owner', async () => {
     const ctx = { indexer: { store }, isOwner: false, chatId: 'customer42' };
     const result = await recallTool.execute({ query: 'what happened before' }, ctx);
     assert.ok(result.includes('refund policy'), 'customer should see own recent memory');

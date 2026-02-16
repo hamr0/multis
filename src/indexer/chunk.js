@@ -10,15 +10,15 @@ class DocChunk {
     filePath,
     pageStart = 0,
     pageEnd = 0,
-    elementType = 'paragraph',  // toc_entry, section, paragraph, table
+    element = 'txt',             // pdf, docx, md, txt, chat
     name = '',
     content = '',
     parentChunkId = null,
     sectionPath = [],           // breadcrumb array: ["Chapter 1", "Section 1.2"]
     sectionLevel = 0,           // heading depth 1-5, 0 = body
-    documentType = 'unknown',   // pdf, docx, md, txt
+    type = 'kb',                // kb, conv
     metadata = {},
-    scope = 'kb',               // kb, admin, user:<chatId>
+    role = 'public',            // public, admin, user:<chatId>
     createdAt = null,
     updatedAt = null
   }) {
@@ -26,15 +26,15 @@ class DocChunk {
     this.filePath = filePath;
     this.pageStart = pageStart;
     this.pageEnd = pageEnd;
-    this.elementType = elementType;
+    this.element = element;
     this.name = name;
     this.content = content;
     this.parentChunkId = parentChunkId;
     this.sectionPath = sectionPath;
     this.sectionLevel = sectionLevel;
-    this.documentType = documentType;
+    this.type = type;
     this.metadata = metadata;
-    this.scope = scope;
+    this.role = role;
     this.createdAt = createdAt || new Date().toISOString();
     this.updatedAt = updatedAt || new Date().toISOString();
   }
@@ -53,15 +53,15 @@ class DocChunk {
       file_path: this.filePath,
       page_start: this.pageStart,
       page_end: this.pageEnd,
-      element_type: this.elementType,
+      element: this.element,
       name: this.name,
       content: this.content,
       parent_chunk_id: this.parentChunkId,
       section_path: this.sectionPath,
       section_level: this.sectionLevel,
-      document_type: this.documentType,
+      type: this.type,
       metadata: this.metadata,
-      scope: this.scope,
+      role: this.role,
       created_at: this.createdAt,
       updated_at: this.updatedAt
     };

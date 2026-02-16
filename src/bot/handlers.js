@@ -496,34 +496,36 @@ async function routeIndex(msg, platform, config, indexer, args) {
 
   if (!args) {
     const prefix = msg.platform === 'telegram' ? '/' : '//';
-    await platform.send(msg.chatId, `Usage: ${prefix}index <path> <kb|admin>`);
+    await platform.send(msg.chatId, `Usage: ${prefix}index <path> <public|admin>`);
     return;
   }
 
-  // Parse: last token may be scope (kb or admin)
+  // Parse: last token may be role (public, kb, or admin)
   const parts = args.trim().split(/\s+/);
-  const validScopes = ['kb', 'admin'];
-  let scope = null;
+  const validRoles = ['public', 'kb', 'admin'];
+  let role = null;
   let filePath;
 
-  if (parts.length >= 2 && validScopes.includes(parts[parts.length - 1].toLowerCase())) {
-    scope = parts.pop().toLowerCase();
+  if (parts.length >= 2 && validRoles.includes(parts[parts.length - 1].toLowerCase())) {
+    role = parts.pop().toLowerCase();
+    // Accept old 'kb' as alias for 'public'
+    if (role === 'kb') role = 'public';
     filePath = parts.join(' ');
   } else {
     filePath = parts.join(' ');
   }
 
-  if (!scope) {
-    await platform.send(msg.chatId, 'Please specify scope: kb (public knowledge base) or admin (owner-only).\nExample: /index ~/doc.pdf kb');
+  if (!role) {
+    await platform.send(msg.chatId, 'Please specify role: public (knowledge base) or admin (owner-only).\nExample: /index ~/doc.pdf public');
     return;
   }
 
   const expanded = filePath.replace(/^~/, process.env.HOME || process.env.USERPROFILE);
 
   try {
-    await platform.send(msg.chatId, `Indexing: ${filePath} (scope: ${scope})...`);
-    const count = await indexer.indexFile(expanded, scope);
-    await platform.send(msg.chatId, `Indexed ${count} chunks from ${filePath} [${scope}]`);
+    await platform.send(msg.chatId, `Indexing: ${filePath} (role: ${role})...`);
+    const count = await indexer.indexFile(expanded, role);
+    await platform.send(msg.chatId, `Indexed ${count} chunks from ${filePath} [${role}]`);
   } catch (err) {
     await platform.send(msg.chatId, `Index error: ${err.message}`);
   }
@@ -537,8 +539,8 @@ async function routeSearch(msg, platform, config, indexer, query) {
   }
 
   const admin = isOwner(msg.senderId, config);
-  const scopes = admin ? undefined : ['kb', `user:${msg.chatId}`];
-  const results = indexer.search(query, 5, { scopes });
+  const roles = admin ? undefined : ['public', `user:${msg.chatId}`];
+  const results = indexer.search(query, 5, { roles });
 
   if (results.length === 0) {
     await platform.send(msg.chatId, 'No results found.');
@@ -548,7 +550,7 @@ async function routeSearch(msg, platform, config, indexer, query) {
   const formatted = results.map((r, i) => {
     const path = r.sectionPath.join(' > ') || r.name;
     const preview = r.content.slice(0, 200).replace(/\n/g, ' ');
-    return `${i + 1}. [${r.documentType}] ${path}\n${preview}...`;
+    return `${i + 1}. [${r.element}] ${path}\n${preview}...`;
   });
 
   await platform.send(msg.chatId, formatted.join('\n\n'));
@@ -649,8 +651,8 @@ async function routeAsk(msg, platform, config, indexer, llm, question, getMem, m
     }
 
     // Search for relevant documents (scoped)
-    const scopes = admin ? undefined : ['kb', `user:${msg.chatId}`];
-    const chunks = indexer.search(question, 5, { scopes });
+    const roles = admin ? undefined : ['public', `user:${msg.chatId}`];
+    const chunks = indexer.search(question, 5, { roles });
 
     // Business escalation for non-admin chats
     if (msg.routeAs === 'business' && !admin && escalationRetries) {
@@ -762,10 +764,10 @@ async function routeAsk(msg, platform, config, indexer, llm, question, getMem, m
 
     // Fire-and-forget capture if threshold reached
     if (mem && memCfg && mem.shouldCapture(memCfg.capture_threshold)) {
-      const captureScope = admin ? 'admin' : `user:${msg.chatId}`;
+      const captureRole = admin ? 'admin' : `user:${msg.chatId}`;
       runCapture(msg.chatId, mem, llm, indexer, {
         keepLast: 5,
-        scope: captureScope,
+        role: captureRole,
         maxSections: memCfg.memory_max_sections
       }).catch(err => {
         console.error(`[capture] Background error: ${err.message}`);
@@ -1009,7 +1011,7 @@ async function routeHelp(msg, platform, config) {
     cmds.splice(1, 0,
       `${prefix}exec <cmd> - Run a shell command (owner)`,
       `${prefix}read <path> - Read a file or directory (owner)`,
-      `${prefix}index <path> <kb|admin> - Index a document (owner)`,
+      `${prefix}index <path> <public|admin> - Index a document (owner)`,
       `${prefix}pin - Change PIN (owner)`,
       `${prefix}mode <personal|business|silent> [agent] - Set chat mode (owner)`,
       `${prefix}agent [name] - Show/set agent for this chat (owner)`,
@@ -1240,7 +1242,7 @@ function handleSearch(config, indexer) {
     const formatted = results.map((r, i) => {
       const p = r.sectionPath.join(' > ') || r.name;
       const preview = r.content.slice(0, 200).replace(/\n/g, ' ');
-      return `${i + 1}. [${r.documentType}] ${p}\n${preview}...`;
+      return `${i + 1}. [${r.element}] ${p}\n${preview}...`;
     });
     ctx.reply(formatted.join('\n\n'));
     logAudit({ action: 'search', user_id: ctx.from.id, query, results: results.length });

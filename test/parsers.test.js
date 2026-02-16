@@ -60,7 +60,7 @@ describe('parseMD', () => {
     // All chunks should be DocChunk instances
     for (const c of chunks) {
       assert.ok(c instanceof DocChunk);
-      assert.strictEqual(c.documentType, 'md');
+      assert.strictEqual(c.type, 'kb');
     }
   });
 
@@ -114,7 +114,7 @@ describe('parseTXT', () => {
   it('returns single chunk for text file', async () => {
     const chunks = await parseTXT(path.join(FIXTURES, 'sample.txt'));
     assert.strictEqual(chunks.length, 1);
-    assert.strictEqual(chunks[0].documentType, 'txt');
+    assert.strictEqual(chunks[0].type, 'kb');
     assert.match(chunks[0].content, /versatile components/);
   });
 
@@ -123,9 +123,9 @@ describe('parseTXT', () => {
     assert.strictEqual(chunks.length, 0);
   });
 
-  it('sets elementType to paragraph', async () => {
+  it('sets element to txt', async () => {
     const chunks = await parseTXT(path.join(FIXTURES, 'sample.txt'));
-    assert.strictEqual(chunks[0].elementType, 'paragraph');
+    assert.strictEqual(chunks[0].element, 'txt');
     assert.strictEqual(chunks[0].sectionLevel, 0);
   });
 });
@@ -141,7 +141,7 @@ describe('parsePDF', () => {
   it('parses PDF and extracts text', async () => {
     const chunks = await parsePDF(pdfPath);
     assert.ok(chunks.length > 0, 'should extract at least one chunk');
-    assert.strictEqual(chunks[0].documentType, 'pdf');
+    assert.strictEqual(chunks[0].type, 'kb');
 
     const allText = chunks.map(c => c.content).join(' ');
     assert.match(allText, /widgets/i);
@@ -187,7 +187,7 @@ describe('parseDOCX', () => {
 
     const chunks = await parseDOCX(docxPath);
     assert.ok(chunks.length > 0, 'should extract chunks');
-    assert.strictEqual(chunks[0].documentType, 'docx');
+    assert.strictEqual(chunks[0].type, 'kb');
 
     const allText = chunks.map(c => c.content).join(' ');
     assert.match(allText, /widgets/i);

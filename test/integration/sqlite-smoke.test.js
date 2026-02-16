@@ -8,7 +8,7 @@ const { DocumentIndexer } = require('../../src/indexer/index');
 const { DocChunk } = require('../../src/indexer/chunk');
 
 /**
- * SQLite smoke tests — real DB, real FTS5, real scope filtering.
+ * SQLite smoke tests — real DB, real FTS5, real role filtering.
  * Catches schema drift between migrations and queries.
  */
 
@@ -32,8 +32,9 @@ describe('SQLite smoke: store layer', () => {
       name: 'intro',
       content: 'Widgets are mechanical devices used in factories',
       sectionPath: ['Manual', 'Introduction'],
-      documentType: 'txt',
-      scope: 'kb'
+      element: 'txt',
+      type: 'kb',
+      role: 'public'
     });
     store.saveChunk(chunk);
 
@@ -49,30 +50,31 @@ describe('SQLite smoke: store layer', () => {
     assert.match(results[0].content, /Widgets/i);
   });
 
-  it('scope filtering excludes out-of-scope chunks', () => {
+  it('role filtering excludes out-of-scope chunks', () => {
     // Add an admin-scoped chunk
     const adminChunk = new DocChunk({
       filePath: '/tmp/admin.txt',
       name: 'secrets',
       content: 'Widgets secret internal pricing formula',
       sectionPath: ['Admin', 'Pricing'],
-      documentType: 'txt',
-      scope: 'admin'
+      element: 'txt',
+      type: 'kb',
+      role: 'admin'
     });
     store.saveChunk(adminChunk);
 
-    // Non-admin search should only find kb chunks
-    const kbResults = store.search('widgets', 10, { scopes: ['kb'] });
-    assert.ok(kbResults.length > 0);
-    for (const r of kbResults) {
-      assert.strictEqual(r.scope, 'kb', `expected kb scope, got ${r.scope}`);
+    // Non-admin search should only find public chunks
+    const publicResults = store.search('widgets', 10, { roles: ['public'] });
+    assert.ok(publicResults.length > 0);
+    for (const r of publicResults) {
+      assert.strictEqual(r.role, 'public', `expected public role, got ${r.role}`);
     }
 
-    // Admin search (no scope filter) finds both
+    // Admin search (no role filter) finds both
     const allResults = store.search('widgets', 10);
-    const scopes = new Set(allResults.map(r => r.scope));
-    assert.ok(scopes.has('kb'));
-    assert.ok(scopes.has('admin'));
+    const roles = new Set(allResults.map(r => r.role));
+    assert.ok(roles.has('public'));
+    assert.ok(roles.has('admin'));
   });
 
   it('user-scoped chunks are isolated between users', () => {
@@ -81,36 +83,38 @@ describe('SQLite smoke: store layer', () => {
       name: 'noteA',
       content: 'Customer Alice prefers blue widgets',
       sectionPath: ['Notes'],
-      documentType: 'txt',
-      scope: 'user:alice_chat'
+      element: 'txt',
+      type: 'kb',
+      role: 'user:alice_chat'
     });
     const chunkB = new DocChunk({
       filePath: '/tmp/userB.txt',
       name: 'noteB',
       content: 'Customer Bob prefers red widgets',
       sectionPath: ['Notes'],
-      documentType: 'txt',
-      scope: 'user:bob_chat'
+      element: 'txt',
+      type: 'kb',
+      role: 'user:bob_chat'
     });
     store.saveChunks([chunkA, chunkB]);
 
     // Alice's search shouldn't see Bob's data
-    const aliceResults = store.search('widgets', 10, { scopes: ['kb', 'user:alice_chat'] });
+    const aliceResults = store.search('widgets', 10, { roles: ['public', 'user:alice_chat'] });
     for (const r of aliceResults) {
-      assert.ok(r.scope === 'kb' || r.scope === 'user:alice_chat',
-        `Alice should not see scope ${r.scope}`);
+      assert.ok(r.role === 'public' || r.role === 'user:alice_chat',
+        `Alice should not see role ${r.role}`);
     }
 
     // Bob's search shouldn't see Alice's data
-    const bobResults = store.search('widgets', 10, { scopes: ['kb', 'user:bob_chat'] });
+    const bobResults = store.search('widgets', 10, { roles: ['public', 'user:bob_chat'] });
     for (const r of bobResults) {
-      assert.ok(r.scope === 'kb' || r.scope === 'user:bob_chat',
-        `Bob should not see scope ${r.scope}`);
+      assert.ok(r.role === 'public' || r.role === 'user:bob_chat',
+        `Bob should not see role ${r.role}`);
     }
   });
 
   it('ACT-R activation updates on access', () => {
-    const results = store.search('widgets', 1, { scopes: ['kb'] });
+    const results = store.search('widgets', 1, { roles: ['public'] });
     assert.ok(results.length > 0);
     const chunkId = results[0].chunkId;
 
@@ -128,7 +132,7 @@ describe('SQLite smoke: store layer', () => {
   it('getStats reflects stored chunks', () => {
     const stats = store.getStats();
     assert.ok(stats.totalChunks >= 3);
-    assert.ok(stats.byType.txt >= 3);
+    assert.ok(stats.byType.kb >= 3);
   });
 
   it('deleteByFile removes chunks and FTS entries', () => {
@@ -137,8 +141,9 @@ describe('SQLite smoke: store layer', () => {
       name: 'ephemeral',
       content: 'Ephemeral zygomorphic content for deletion test',
       sectionPath: ['Temp'],
-      documentType: 'txt',
-      scope: 'kb'
+      element: 'txt',
+      type: 'kb',
+      role: 'public'
     });
     store.saveChunk(chunk);
 
@@ -203,14 +208,14 @@ describe('SQLite smoke: indexer with real files', () => {
   });
 
   it('indexes a markdown file with correct chunk count', async () => {
-    const count = await indexer.indexFile(path.join(tmpDir, 'guide.md'), 'kb');
+    const count = await indexer.indexFile(path.join(tmpDir, 'guide.md'), 'public');
     assert.ok(count > 0, `expected chunks, got ${count}`);
 
     const stats = indexer.getStats();
     assert.ok(stats.totalChunks > 0);
   });
 
-  it('indexes a text file as admin scope', async () => {
+  it('indexes a text file as admin role', async () => {
     const count = await indexer.indexFile(path.join(tmpDir, 'faq.txt'), 'admin');
     assert.ok(count > 0);
   });
@@ -223,11 +228,11 @@ describe('SQLite smoke: indexer with real files', () => {
     assert.match(texts, /red button|reset/i);
   });
 
-  it('scoped search excludes admin content from kb-only query', () => {
-    const results = indexer.search('warranty', 5, { scopes: ['kb'] });
-    // FAQ was indexed as admin, so kb-only search should not find warranty info
+  it('scoped search excludes admin content from public-only query', () => {
+    const results = indexer.search('warranty', 5, { roles: ['public'] });
+    // FAQ was indexed as admin, so public-only search should not find warranty info
     for (const r of results) {
-      assert.strictEqual(r.scope, 'kb', `expected kb scope, got ${r.scope}`);
+      assert.strictEqual(r.role, 'public', `expected public role, got ${r.role}`);
     }
   });
 
@@ -235,7 +240,7 @@ describe('SQLite smoke: indexer with real files', () => {
     const countBefore = indexer.getStats().totalChunks;
 
     // Re-index the same file
-    await indexer.indexFile(path.join(tmpDir, 'guide.md'), 'kb');
+    await indexer.indexFile(path.join(tmpDir, 'guide.md'), 'public');
     const countAfter = indexer.getStats().totalChunks;
 
     // Should not double — old chunks deleted first
@@ -245,7 +250,7 @@ describe('SQLite smoke: indexer with real files', () => {
   it('indexBuffer works for uploaded files', async () => {
     const content = 'Special uploaded document about quantum widgets and photon alignment.';
     const buffer = Buffer.from(content);
-    const count = await indexer.indexBuffer(buffer, 'upload.txt', 'kb');
+    const count = await indexer.indexBuffer(buffer, 'upload.txt', 'public');
     assert.ok(count > 0);
 
     const results = indexer.search('quantum photon', 5);

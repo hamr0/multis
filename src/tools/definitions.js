@@ -128,8 +128,8 @@ const TOOLS = [
     },
     execute: async ({ query }, ctx) => {
       if (!ctx.indexer) return 'Document indexer not available.';
-      const scopes = ctx.isOwner ? undefined : ['kb', `user:${ctx.chatId}`];
-      const results = ctx.indexer.search(query, 5, { scopes });
+      const roles = ctx.isOwner ? undefined : ['public', `user:${ctx.chatId}`];
+      const results = ctx.indexer.search(query, 5, { roles });
       if (results.length === 0) return 'No matching documents found.';
       return results.map((r, i) => {
         const path = r.sectionPath?.join(' > ') || r.name;
@@ -151,8 +151,8 @@ const TOOLS = [
     },
     execute: async ({ query }, ctx) => {
       if (!ctx.indexer) return 'Memory search not available.';
-      const scopes = ctx.isOwner ? undefined : [`user:${ctx.chatId}`];
-      const searchOpts = { scopes, types: ['memory_summary'] };
+      const roles = ctx.isOwner ? undefined : [`user:${ctx.chatId}`];
+      const searchOpts = { roles, types: ['conv'] };
       // Try FTS search first; if empty (e.g. all stopwords), fall back to recent
       let results = ctx.indexer.store.search(query, 5, searchOpts);
       if (results.length === 0) {

@@ -43,14 +43,15 @@ class DocumentStore {
         file_path TEXT NOT NULL,
         page_start INTEGER DEFAULT 0,
         page_end INTEGER DEFAULT 0,
-        element_type TEXT DEFAULT 'paragraph',
+        element_type TEXT DEFAULT 'txt',
         name TEXT DEFAULT '',
         content TEXT DEFAULT '',
         parent_chunk_id TEXT,
         section_path TEXT DEFAULT '[]',
         section_level INTEGER DEFAULT 0,
-        document_type TEXT DEFAULT 'unknown',
+        type TEXT DEFAULT 'kb',
         metadata TEXT DEFAULT '{}',
+        role TEXT DEFAULT 'public',
         -- Activation columns for ACT-R (POC5)
         activation REAL DEFAULT 0.0,
         access_count INTEGER DEFAULT 0,
@@ -61,8 +62,9 @@ class DocumentStore {
       );
 
       CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_path);
-      CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(element_type);
-      CREATE INDEX IF NOT EXISTS idx_chunks_doc_type ON chunks(document_type);
+      CREATE INDEX IF NOT EXISTS idx_chunks_element ON chunks(element_type);
+      CREATE INDEX IF NOT EXISTS idx_chunks_type_v2 ON chunks(type);
+      CREATE INDEX IF NOT EXISTS idx_chunks_role ON chunks(role);
       CREATE INDEX IF NOT EXISTS idx_chunks_activation ON chunks(activation DESC);
 
       -- FTS5 virtual table for full-text search (BM25)
@@ -106,13 +108,20 @@ class DocumentStore {
       CREATE INDEX IF NOT EXISTS idx_access_chunk ON access_history(chunk_id);
     `);
 
-    // Migration: add scope column if missing
+    // Migration: add type/role columns if missing (existing DBs have document_type/scope)
     try {
-      this.db.prepare('SELECT scope FROM chunks LIMIT 0').get();
+      this.db.prepare('SELECT type FROM chunks LIMIT 0').get();
     } catch {
       this.db.exec(`
-        ALTER TABLE chunks ADD COLUMN scope TEXT DEFAULT 'kb';
-        CREATE INDEX IF NOT EXISTS idx_chunks_scope ON chunks(scope);
+        ALTER TABLE chunks ADD COLUMN type TEXT DEFAULT 'kb';
+        ALTER TABLE chunks ADD COLUMN role TEXT DEFAULT 'public';
+        UPDATE chunks SET type = 'conv' WHERE document_type = 'conversation';
+        UPDATE chunks SET role = 'public' WHERE scope = 'kb';
+        UPDATE chunks SET role = scope WHERE scope != 'kb';
+        UPDATE chunks SET element_type = 'chat' WHERE document_type = 'conversation';
+        UPDATE chunks SET element_type = document_type WHERE document_type IN ('pdf','docx','md','txt');
+        CREATE INDEX IF NOT EXISTS idx_chunks_type_v2 ON chunks(type);
+        CREATE INDEX IF NOT EXISTS idx_chunks_role ON chunks(role);
       `);
     }
   }
@@ -124,8 +133,8 @@ class DocumentStore {
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO chunks
         (chunk_id, file_path, page_start, page_end, element_type, name, content,
-         parent_chunk_id, section_path, section_level, document_type, metadata,
-         scope, created_at, updated_at)
+         parent_chunk_id, section_path, section_level, type, metadata,
+         role, created_at, updated_at)
       VALUES
         (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
@@ -135,15 +144,15 @@ class DocumentStore {
       chunk.filePath,
       chunk.pageStart,
       chunk.pageEnd,
-      chunk.elementType,
+      chunk.element,
       chunk.name,
       chunk.content,
       chunk.parentChunkId,
       JSON.stringify(chunk.sectionPath),
       chunk.sectionLevel,
-      chunk.documentType,
+      chunk.type,
       JSON.stringify(chunk.metadata),
-      chunk.scope || 'kb',
+      chunk.role || 'public',
       chunk.createdAt,
       chunk.updatedAt
     );
@@ -166,7 +175,7 @@ class DocumentStore {
    * Fetches 3x candidates, computes blended score, returns top `limit`.
    * @param {string} query - Search query
    * @param {number} limit - Max results
-   * @param {Object} options - { scopes: string[], decay: number }
+   * @param {Object} options - { roles: string[], decay: number, types: string[] }
    * @returns {Array} - Chunks sorted by blended relevance
    */
   search(query, limit = 10, options = {}) {
@@ -187,19 +196,21 @@ class DocumentStore {
 
     const ftsQuery = terms.join(' OR ');
 
-    // Build scope and type filters if provided
-    const { scopes, decay, types } = options;
-    let scopeClause = '';
+    // Build role and type filters if provided
+    const { roles, scopes, decay, types } = options;
+    // Support both 'roles' (new) and 'scopes' (backward compat)
+    const effectiveRoles = roles || scopes;
+    let roleClause = '';
     let typeClause = '';
     const params = [ftsQuery];
-    if (scopes && scopes.length > 0) {
-      const placeholders = scopes.map(() => '?').join(', ');
-      scopeClause = `AND c.scope IN (${placeholders})`;
-      params.push(...scopes);
+    if (effectiveRoles && effectiveRoles.length > 0) {
+      const placeholders = effectiveRoles.map(() => '?').join(', ');
+      roleClause = `AND c.role IN (${placeholders})`;
+      params.push(...effectiveRoles);
     }
     if (types && types.length > 0) {
       const tp = types.map(() => '?').join(', ');
-      typeClause = `AND c.element_type IN (${tp})`;
+      typeClause = `AND c.type IN (${tp})`;
       params.push(...types);
     }
     // Fetch 3x candidates for activation re-ranking
@@ -211,7 +222,7 @@ class DocumentStore {
       FROM chunks_fts fts
       JOIN chunks c ON fts.chunk_id = c.chunk_id
       WHERE chunks_fts MATCH ?
-      ${scopeClause}
+      ${roleClause}
       ${typeClause}
       ORDER BY rank
       LIMIT ?
@@ -233,15 +244,15 @@ class DocumentStore {
         filePath: row.file_path,
         pageStart: row.page_start,
         pageEnd: row.page_end,
-        elementType: row.element_type,
+        element: row.element_type,
         name: row.name,
         content: row.content,
         parentChunkId: row.parent_chunk_id,
         sectionPath: safeParseArray(row.section_path),
         sectionLevel: row.section_level,
-        documentType: row.document_type,
+        type: row.type,
         metadata: JSON.parse(row.metadata || '{}'),
-        scope: row.scope,
+        role: row.role,
         activation: act,
         bm25: bm25Score,
         rank: blended,
@@ -260,24 +271,25 @@ class DocumentStore {
    * Used as fallback when search query is all stopwords.
    */
   recentByType(limit = 5, options = {}) {
-    const { scopes, types } = options;
-    let scopeClause = '';
+    const { roles, scopes, types } = options;
+    const effectiveRoles = roles || scopes;
+    let roleClause = '';
     let typeClause = '';
     const params = [];
-    if (scopes && scopes.length > 0) {
-      const placeholders = scopes.map(() => '?').join(', ');
-      scopeClause = `AND scope IN (${placeholders})`;
-      params.push(...scopes);
+    if (effectiveRoles && effectiveRoles.length > 0) {
+      const placeholders = effectiveRoles.map(() => '?').join(', ');
+      roleClause = `AND role IN (${placeholders})`;
+      params.push(...effectiveRoles);
     }
     if (types && types.length > 0) {
       const tp = types.map(() => '?').join(', ');
-      typeClause = `AND element_type IN (${tp})`;
+      typeClause = `AND type IN (${tp})`;
       params.push(...types);
     }
     params.push(limit);
     const rows = this.db.prepare(`
       SELECT * FROM chunks
-      WHERE 1=1 ${scopeClause} ${typeClause}
+      WHERE 1=1 ${roleClause} ${typeClause}
       ORDER BY created_at DESC
       LIMIT ?
     `).all(...params);
@@ -287,15 +299,15 @@ class DocumentStore {
       filePath: row.file_path,
       pageStart: row.page_start,
       pageEnd: row.page_end,
-      elementType: row.element_type,
+      element: row.element_type,
       name: row.name,
       content: row.content,
       parentChunkId: row.parent_chunk_id,
       sectionPath: safeParseArray(row.section_path),
       sectionLevel: row.section_level,
-      documentType: row.document_type,
+      type: row.type,
       metadata: JSON.parse(row.metadata || '{}'),
-      scope: row.scope,
+      role: row.role,
       activation: row.activation,
       createdAt: row.created_at,
       updatedAt: row.updated_at
@@ -314,7 +326,7 @@ class DocumentStore {
       name: row.name,
       content: row.content,
       sectionPath: safeParseArray(row.section_path),
-      documentType: row.document_type,
+      type: row.type,
       activation: row.activation
     };
   }
@@ -332,14 +344,14 @@ class DocumentStore {
   getStats() {
     const total = this.db.prepare('SELECT COUNT(*) as count FROM chunks').get();
     const byType = this.db.prepare(
-      'SELECT document_type, COUNT(*) as count FROM chunks GROUP BY document_type'
+      'SELECT type, COUNT(*) as count FROM chunks GROUP BY type'
     ).all();
     const files = this.db.prepare(
       'SELECT DISTINCT file_path FROM chunks'
     ).all();
     return {
       totalChunks: total.count,
-      byType: Object.fromEntries(byType.map(r => [r.document_type, r.count])),
+      byType: Object.fromEntries(byType.map(r => [r.type, r.count])),
       indexedFiles: files.length
     };
   }

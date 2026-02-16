@@ -44,20 +44,29 @@ function cleanupLogs(maxDays = 30) {
 
 /**
  * Delete old conversation memory chunks from the store.
+ * Admin-scoped chunks get longer retention (default 365 days).
  * @param {import('../indexer/store').DocumentStore} store
- * @param {number} maxDays
+ * @param {number} maxDays - retention for non-admin chunks (default 90)
+ * @param {number} [adminMaxDays] - retention for admin chunks (default 365)
  * @returns {number} - Number of chunks deleted
  */
-function pruneMemoryChunks(store, maxDays = 90) {
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - maxDays);
-  const cutoffStr = cutoff.toISOString();
+function pruneMemoryChunks(store, maxDays = 90, adminMaxDays = 365) {
+  const userCutoff = new Date();
+  userCutoff.setDate(userCutoff.getDate() - maxDays);
+  const adminCutoff = new Date();
+  adminCutoff.setDate(adminCutoff.getDate() - adminMaxDays);
 
-  const result = store.db.prepare(
-    "DELETE FROM chunks WHERE document_type = 'conversation' AND created_at < ?"
-  ).run(cutoffStr);
+  // Delete non-admin conversation chunks older than maxDays
+  const userResult = store.db.prepare(
+    "DELETE FROM chunks WHERE type = 'conv' AND role != 'admin' AND created_at < ?"
+  ).run(userCutoff.toISOString());
 
-  return result.changes;
+  // Delete admin conversation chunks older than adminMaxDays
+  const adminResult = store.db.prepare(
+    "DELETE FROM chunks WHERE type = 'conv' AND role = 'admin' AND created_at < ?"
+  ).run(adminCutoff.toISOString());
+
+  return userResult.changes + adminResult.changes;
 }
 
 module.exports = { cleanupLogs, pruneMemoryChunks };

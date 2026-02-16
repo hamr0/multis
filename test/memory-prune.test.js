@@ -207,13 +207,13 @@ describe('runCapture — indexes summary, not raw messages', () => {
 
     await runCapture('testchat', mem, mockLlm, mockIndexer, {
       keepLast: 5,
-      scope: 'user:testchat',
+      role: 'user:testchat',
       maxSections: 3
     });
 
     // Verify a chunk was stored
     const rows = store.db.prepare(
-      "SELECT * FROM chunks WHERE document_type = 'conversation'"
+      "SELECT * FROM chunks WHERE type = 'conv'"
     ).all();
     assert.ok(rows.length >= 1, 'Should have stored at least 1 conversation chunk');
 
@@ -222,11 +222,11 @@ describe('runCapture — indexes summary, not raw messages', () => {
     assert.ok(chunk.content.includes('User asked 10 questions'), 'chunk should contain summary');
     assert.ok(!chunk.content.includes('Question 0'), 'chunk should NOT contain raw messages');
 
-    // Verify scope
-    assert.strictEqual(chunk.scope, 'user:testchat');
+    // Verify role
+    assert.strictEqual(chunk.role, 'user:testchat');
 
     // Verify element_type
-    assert.strictEqual(chunk.element_type, 'memory_summary');
+    assert.strictEqual(chunk.element_type, 'chat');
 
     // Verify recent was trimmed
     const remaining = mem.loadRecent();
@@ -260,7 +260,7 @@ describe('runCapture — indexes summary, not raw messages', () => {
     await runCapture('skipchat', mem, mockLlm, mockIndexer, { keepLast: 1 });
 
     const rows = store.db.prepare(
-      "SELECT * FROM chunks WHERE document_type = 'conversation'"
+      "SELECT * FROM chunks WHERE type = 'conv'"
     ).all();
     assert.strictEqual(rows.length, 0, 'Should not index when nothing notable');
 

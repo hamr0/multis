@@ -130,9 +130,9 @@ describe('RAG pipeline', () => {
 
     await router(msg('/ask test question', { senderId: 'user2', chatId: 'chat2' }), platform);
 
-    // Verify search was called with scopes
+    // Verify search was called with roles
     const call = indexer.searchCalls[0];
-    assert.deepStrictEqual(call.opts.scopes, ['kb', 'user:chat2']);
+    assert.deepStrictEqual(call.opts.roles, ['public', 'user:chat2']);
   });
 
   it('admin search has no scope restriction', async () => {
@@ -145,7 +145,7 @@ describe('RAG pipeline', () => {
     await router(msg('/ask admin question'), platform);
 
     const call = indexer.searchCalls[0];
-    assert.strictEqual(call.opts.scopes, undefined);
+    assert.strictEqual(call.opts.roles, undefined);
   });
 });
 
@@ -428,28 +428,28 @@ describe('Owner commands', () => {
     assert.match(platform.sent[0].text, /Usage/);
   });
 
-  it('/index without scope asks for scope', async () => {
+  it('/index without role asks for role', async () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();
     const indexer = stubIndexer();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
     await router(msg('/index ~/some_file.pdf'), platform);
-    assert.match(platform.lastTo('chat1').text, /specify scope/i);
+    assert.match(platform.lastTo('chat1').text, /specify role/i);
   });
 
-  it('/index with scope calls indexer', async () => {
+  it('/index with role calls indexer', async () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();
     let indexedPath = null;
-    let indexedScope = null;
+    let indexedRole = null;
     const indexer = stubIndexer();
-    indexer.indexFile = async (p, scope) => { indexedPath = p; indexedScope = scope; return 5; };
+    indexer.indexFile = async (p, role) => { indexedPath = p; indexedRole = role; return 5; };
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
-    await router(msg('/index /tmp/test.pdf kb'), platform);
+    await router(msg('/index /tmp/test.pdf public'), platform);
     assert.strictEqual(indexedPath, '/tmp/test.pdf');
-    assert.strictEqual(indexedScope, 'kb');
+    assert.strictEqual(indexedRole, 'public');
     assert.match(platform.lastTo('chat1').text, /Indexed 5 chunks/);
   });
 
@@ -491,7 +491,7 @@ describe('Search with results', () => {
 
     await router(msg('/search test', { senderId: 'user2', chatId: 'chat2' }), platform);
     const call = indexer.searchCalls[0];
-    assert.deepStrictEqual(call.opts.scopes, ['kb', 'user:chat2']);
+    assert.deepStrictEqual(call.opts.roles, ['public', 'user:chat2']);
   });
 });
 

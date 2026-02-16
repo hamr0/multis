@@ -2,21 +2,21 @@ const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 const { DocumentStore } = require('../src/indexer/store');
 
-function makeChunk(id, content, scope = 'kb') {
+function makeChunk(id, content, role = 'public') {
   return {
     chunkId: id,
     filePath: '/test/doc.pdf',
     pageStart: 1,
     pageEnd: 1,
-    elementType: 'paragraph',
+    element: 'pdf',
     name: `chunk ${id}`,
     content,
     parentChunkId: null,
     sectionPath: [],
     sectionLevel: 0,
-    documentType: 'pdf',
+    type: 'kb',
     metadata: {},
-    scope,
+    role,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
