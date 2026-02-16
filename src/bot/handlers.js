@@ -208,9 +208,15 @@ function createMessageRouter(config, deps = {}) {
       if (idx >= 0 && idx < pending.matches.length) {
         const chat = pending.matches[idx];
         setChatMode(config, chat.id, pending.mode);
+        if (pending.agent) {
+          if (!config.chat_agents) config.chat_agents = {};
+          config.chat_agents[chat.id] = pending.agent;
+          saveConfig(config);
+        }
         delete config._pendingMode[msg.senderId];
-        await platform.send(msg.chatId, `${chat.title || chat.id} set to: ${pending.mode}`);
-        logAudit({ action: 'mode', user_id: msg.senderId, chatId: chat.id, mode: pending.mode });
+        const agentNote = pending.agent ? `, agent: ${pending.agent}` : '';
+        await platform.send(msg.chatId, `${chat.title || chat.id} set to: ${pending.mode}${agentNote}`);
+        logAudit({ action: 'mode', user_id: msg.senderId, chatId: chat.id, mode: pending.mode, agent: pending.agent });
       } else {
         await platform.send(msg.chatId, `Invalid choice. Pick 1-${pending.matches.length}.`);
       }
@@ -858,16 +864,19 @@ async function routeMode(msg, platform, config, args, agentRegistry) {
     target = parts.slice(1).join(' ');
   }
 
-  // Apply agent assignment if specified
-  if (agentArg) {
-    if (!config.chat_agents) config.chat_agents = {};
-    config.chat_agents[msg.chatId] = agentArg;
-    saveConfig(config);
+  // Helper: assign agent to the resolved target chat (not the command source)
+  function assignAgent(chatId) {
+    if (agentArg) {
+      if (!config.chat_agents) config.chat_agents = {};
+      config.chat_agents[chatId] = agentArg;
+      saveConfig(config);
+    }
   }
 
   // If on Telegram, always set current chat (1:1 with bot)
   if (msg.platform === 'telegram') {
     setChatMode(config, msg.chatId, mode);
+    assignAgent(msg.chatId);
     const agentNote = agentArg ? `, agent: ${agentArg}` : '';
     await platform.send(msg.chatId, `Chat mode set to: ${mode}${agentNote}`);
     logAudit({ action: 'mode', user_id: msg.senderId, chatId: msg.chatId, mode, agent: agentArg });
@@ -883,16 +892,18 @@ async function routeMode(msg, platform, config, args, agentRegistry) {
     }
     if (match.length > 1) {
       const list = match.map((c, i) => `  ${i + 1}) ${c.title || c.name || c.id}`).join('\n');
-      // Store pending mode selection
+      // Store pending mode selection (include agent for deferred assignment)
       if (!config._pendingMode) config._pendingMode = {};
-      config._pendingMode[msg.senderId] = { mode, matches: match };
+      config._pendingMode[msg.senderId] = { mode, matches: match, agent: agentArg };
       await platform.send(msg.chatId, `Multiple matches:\n${list}\n\nReply with a number:`);
       return;
     }
     const chat = match[0];
     setChatMode(config, chat.id, mode);
-    await platform.send(msg.chatId, `${chat.title || chat.id} set to: ${mode}`);
-    logAudit({ action: 'mode', user_id: msg.senderId, chatId: chat.id, mode, target });
+    assignAgent(chat.id);
+    const agentNote = agentArg ? `, agent: ${agentArg}` : '';
+    await platform.send(msg.chatId, `${chat.title || chat.id} set to: ${mode}${agentNote}`);
+    logAudit({ action: 'mode', user_id: msg.senderId, chatId: chat.id, mode, target, agent: agentArg });
     return;
   }
 
@@ -909,17 +920,19 @@ async function routeMode(msg, platform, config, args, agentRegistry) {
       const currentMode = getChatMode(config, c.id);
       return `  ${i + 1}) ${c.title || c.name || c.id} [${currentMode}]`;
     }).join('\n');
-    // Store pending mode selection
+    // Store pending mode selection (include agent for deferred assignment)
     if (!config._pendingMode) config._pendingMode = {};
-    config._pendingMode[msg.senderId] = { mode, matches: chats };
+    config._pendingMode[msg.senderId] = { mode, matches: chats, agent: agentArg };
     await platform.send(msg.chatId, `Pick a chat to set to ${mode}:\n${list}\n\nReply with a number:`);
     return;
   }
 
   // Beeper: no target, not self-chat — set current chat
   setChatMode(config, msg.chatId, mode);
-  await platform.send(msg.chatId, `Chat mode set to: ${mode}`);
-  logAudit({ action: 'mode', user_id: msg.senderId, chatId: msg.chatId, mode });
+  assignAgent(msg.chatId);
+  const agentNote = agentArg ? `, agent: ${agentArg}` : '';
+  await platform.send(msg.chatId, `Chat mode set to: ${mode}${agentNote}`);
+  logAudit({ action: 'mode', user_id: msg.senderId, chatId: msg.chatId, mode, agent: agentArg });
 }
 
 function setChatMode(config, chatId, mode) {
