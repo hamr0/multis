@@ -394,6 +394,57 @@ Owner command arrives
 - Personal-mode chats get admin privileges (owner can grant via `/mode personal`)
 - All user IDs stored and compared as strings (Telegraf sends numbers, config stores strings)
 
+### Future: ABAC policy matrix (replaces flat allowlist)
+
+The current flat allowlist/denylist works for 2 roles (owner vs not-owner). When more roles or context-dependent rules are needed, upgrade to Attribute-Based Access Control — a policy matrix evaluated across multiple dimensions:
+
+```
+role × action × resource × context → allow | deny | confirm
+```
+
+#### Policy table format
+
+```json
+{
+  "policies": [
+    { "role": "owner",    "action": "exec",   "path": "~/Projects/*", "decision": "allow" },
+    { "role": "owner",    "action": "exec",   "path": "/etc/*",       "decision": "deny" },
+    { "role": "owner",    "action": "rm",     "path": "*",            "decision": "confirm" },
+    { "role": "operator", "action": "read",   "path": "~/Documents/*","decision": "allow" },
+    { "role": "operator", "action": "exec",   "path": "*",            "decision": "deny" },
+    { "role": "customer", "action": "ask",    "path": "*",            "decision": "allow" },
+    { "role": "customer", "action": "exec",   "path": "*",            "decision": "deny" },
+    { "role": "*",        "action": "*",      "path": "*",            "decision": "deny" }
+  ]
+}
+```
+
+First match wins. Last rule is default-deny. Wildcards for catch-all.
+
+#### When to upgrade from flat allowlist
+
+- Multiple admin tiers (owner vs operator vs viewer)
+- Per-customer permission overrides
+- Context-dependent rules (time of day, platform, chat mode)
+- External service tools (Section 15) with per-service permissions
+
+#### Layered injection detection (same principle)
+
+Independent detection layers, each scoring independently, combined into a final decision:
+
+| Layer | Detects | Method |
+|-------|---------|--------|
+| Pattern match | "ignore instructions", "system prompt", "SELECT" | Regex |
+| Scope violation | Query references other users or admin data | SQL + string check |
+| Anomaly | Unusual query volume/breadth per chatId | Rate counter |
+| Semantic | Adversarial intent in natural language | LLM judge call |
+
+Combined score → allow / flag / block. Each layer is independent — one failing doesn't bypass the others.
+
+#### Status: future (when flat lists stop being enough)
+
+Current 2-role model with flat allowlist is correct for now. ABAC is the upgrade path when roles multiply or external service tools (Section 15) need per-service permissions.
+
 ---
 
 ## 8. Business Mode Escalation
@@ -717,3 +768,75 @@ Never reveal internal processes or admin information.
 ### Key difference from openclaw
 
 One config, all chats. openclaw needs separate API integrations per channel. multis talks to Telegram + Beeper bridges + Matrix — all networks through one setup. Per-chat profiles keep everything isolated without multi-tenant complexity.
+
+---
+
+## 15. Future: External Service Tools
+
+### Vision
+
+The agent can interact with external services (Gmail, Spotify, Calendar, etc.) as tools — same pattern as existing agent tools but reaching outside the local machine.
+
+### Architecture: single MCP, namespaced tools
+
+One process, not one-per-service. Each service is a module that registers its tools:
+
+```
+~/.multis/mcp/services/
+  gmail.js       → gmail:send, gmail:search, gmail:read
+  spotify.js     → spotify:play, spotify:pause, spotify:search, spotify:queue
+  calendar.js    → calendar:add, calendar:list, calendar:next
+  browser.js     → browser:open, browser:click, browser:read_page
+```
+
+All loaded by a single MCP server process. Adding a service = drop a file, register tools. No new processes, no config changes beyond enabling the service.
+
+### Three integration tiers
+
+| Tier | Method | When to use | Example |
+|------|--------|-------------|---------|
+| **API-first** | OAuth token + REST calls | Service has a good API | Gmail, Spotify, Calendar, GitHub, Notion |
+| **Browser fallback** | Playwright via `--remote-debugging-port=9222` | No API, or API is limited | Niche web apps, sites without public APIs |
+| **Termux/shell** | `termux-api` commands via existing `/exec` | Android device control | SMS, contacts, camera, TTS, location |
+
+### How it works
+
+The LLM is the smart layer. Tools are dumb executors.
+
+```
+User: "text mom I'll be late"
+  → LLM reasons: need contact lookup, then SMS
+  → Tool call: contacts:search("mom") → returns number
+  → Tool call: sms:send(number, "I'll be late")
+
+User: "play some jazz"
+  → Tool call: spotify:search("jazz playlist")
+  → Tool call: spotify:play(playlist_uri)
+```
+
+### Auth model
+
+- OAuth tokens stored in `~/.multis/mcp/tokens/` (encrypted or via `pass`)
+- Each service module handles its own token refresh
+- First use triggers OAuth flow (browser opens, user consents, token saved)
+- Owner-only — external service tools require PIN auth like `/exec`
+
+### Browser automation (escape hatch)
+
+For services without APIs, Playwright connects to the user's running Chrome:
+
+- Chrome launched with `--remote-debugging-port=9222`
+- Agent can open tabs, navigate, click, fill forms — using existing login sessions
+- Generic tools: `browser:open`, `browser:click`, `browser:read_page`, `browser:fill`
+- Fragile by nature — use only when API tier is not available
+
+### Governance
+
+- External service tools follow the same allowlist/denylist pattern as shell commands
+- All calls audit-logged: service, action, input, user, timestamp
+- Destructive actions (send email, delete, post) require confirmation or are denylist-only
+- Read-only actions (search, list, read) are allowlist-safe
+
+### Status: future (post-POC7)
+
+Not needed yet. Current tools (filesystem, shell, knowledge, desktop, Android) cover personal use. External services are the next expansion when the core is stable.
