@@ -33,10 +33,10 @@ User fills in what they have in `~/.multis/config.json`. Telegram is always avai
 
 ```
 Platform (base.js)
-  ├── start(), stop(), send(chatId, text), onMessage(callback)
+  ├── start(), stop(), send(chatId, text), sendFile(chatId, filePath, caption), onMessage(callback)
   │
-  ├── TelegramPlatform  — Telegraf wrapper, / prefix
-  ├── BeeperPlatform    — polls localhost:23373, // prefix
+  ├── TelegramPlatform  — Telegraf wrapper, / prefix, sendFile via sendDocument()
+  ├── BeeperPlatform    — polls localhost:23373, // prefix (sendFile not yet supported)
   └── MatrixPlatform    — (future) Matrix SDK client
 ```
 
@@ -360,7 +360,7 @@ One `governance.json` covers all platforms (Linux, macOS, Windows, Android). Unu
 - **Allowlist:** Safe commands across all OSes — `ls`/`dir`, `cat`/`type`, `grep`/`find`/`where`, `curl`/`wget`, `git`/`npm`/`node`/`python`, media (`playerctl`, `osascript`), clipboard (`xclip`, `pbcopy`, `clip`), screenshots (`grim`, `screencapture`, `snippingtool`), Termux (`termux-*` for Android)
 - **Denylist:** Destructive commands — `rm`/`rmdir`/`del`/`rd`, `sudo`/`su`/`runas`, `dd`/`mkfs`/`format`/`diskpart`, `chmod`/`chown`/`icacls`, `kill`/`killall`/`taskkill`, `shutdown`/`reboot`/`halt`
 - **Confirmation:** Risky commands — `mv`/`cp`/`move`/`copy`/`xcopy`/`robocopy`, `powershell`, `git push`/`git rebase`/`git reset`, `npm publish`
-- **Path restrictions:** Allowed dirs (`~/Documents`, `~/Downloads`, `~/Projects`, `~/Desktop`) vs denied (`/etc`, `/var`, `/usr`, `/System`, `/bin`, `/sbin`, `C:\Windows`, `C:\Program Files`)
+- **Path restrictions:** Allowed dirs (`~/Documents`, `~/Downloads`, `~/Projects`, `~/PycharmProjects`, `~/Desktop`) vs denied (`/etc`, `/var`, `/usr`, `/System`, `/bin`, `/sbin`, `C:\Windows`, `C:\Program Files`)
 
 ### PIN authentication (POC6)
 
@@ -609,7 +609,36 @@ All behavioral settings are configurable. Sane defaults applied when missing.
 
 ---
 
-## 12. Skills
+## 12. Agent Tools
+
+The LLM agent has access to tools via a tool-calling loop. Tools are defined in `src/tools/definitions.js`, filtered by platform and owner status via `src/tools/registry.js`, executed via `src/tools/executor.js`.
+
+### Tool categories
+
+| Category | Tools | Platforms |
+|----------|-------|-----------|
+| **Filesystem** | `read_file`, `grep_files`, `find_files`, `send_file` | all |
+| **Shell** | `exec` | all |
+| **Knowledge** | `search_docs`, `recall_memory`, `remember` | all |
+| **Desktop** | `open_url`, `media_control`, `notify`, `clipboard`, `screenshot`, `brightness`, `wifi`, `system_info` | linux, macos |
+| **Android** | `phone_call`, `sms_send`, `sms_list`, `contacts`, `location`, `camera`, `tts`, `torch`, `vibrate`, `volume`, `battery` | android |
+
+### File tools
+
+- **`read_file`** — read file or list directory, path-validated via governance
+- **`grep_files`** — `grep -rn` wrapper, searches file contents by pattern in a directory
+- **`find_files`** — `find -name` wrapper (maxdepth 5), locates files by name/glob
+- **`send_file`** — sends a file as attachment to the chat. Telegram uses `sendDocument()`. Beeper not yet supported (graceful fallback). Path governance applies
+
+### Governance integration
+
+- `exec`, `grep_files`, `find_files` go through `isCommandAllowed()` allowlist
+- `read_file`, `send_file` go through `isPathAllowed()` path restrictions
+- All tool calls are audit-logged with tool name, input, user, status
+
+---
+
+## 13. Skills
 
 ### What skills are
 
@@ -654,7 +683,7 @@ Never reveal internal processes or admin information.
 
 ---
 
-## 13. What We Borrowed and Changed
+## 14. What We Borrowed and Changed
 
 | Source | What | Our version |
 |--------|------|-------------|
