@@ -53,7 +53,7 @@ class TelegramPlatform extends Platform {
       logAudit({ action: 'error', platform: 'telegram', error: err.message });
     });
 
-    this.bot.launch().catch(err => {
+    this.bot.launch({ dropPendingUpdates: true }).catch(err => {
       console.error('Telegram: launch error:', err.message);
     });
     console.log('Telegram: bot started');

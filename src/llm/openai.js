@@ -50,6 +50,50 @@ class OpenAIProvider extends LLMProvider {
     return response;
   }
 
+  async generateWithToolsAndMessages(messages, tools, options = {}) {
+    const msgs = options.system
+      ? [{ role: 'system', content: options.system }, ...messages]
+      : [...messages];
+
+    return await this._makeRequest({
+      model: this.model,
+      max_tokens: options.maxTokens || 2048,
+      temperature: options.temperature || 0.7,
+      tools: tools.map(t => ({
+        type: 'function',
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.inputSchema
+        }
+      })),
+      messages: msgs
+    });
+  }
+
+  parseToolResponse(response) {
+    const msg = response.choices?.[0]?.message;
+    if (!msg) return { text: '', toolCalls: [] };
+
+    const text = msg.content || '';
+    const toolCalls = (msg.tool_calls || []).map(tc => ({
+      id: tc.id,
+      name: tc.function.name,
+      input: JSON.parse(tc.function.arguments || '{}')
+    }));
+
+    return { text, toolCalls };
+  }
+
+  formatToolResult(toolCallId, result) {
+    return { role: 'tool', tool_call_id: toolCallId, content: result };
+  }
+
+  formatAssistantMessage(response) {
+    const msg = response.choices?.[0]?.message;
+    return msg || { role: 'assistant', content: '' };
+  }
+
   async generateWithMessages(messages, options = {}) {
     const msgs = options.system
       ? [{ role: 'system', content: options.system }, ...messages]

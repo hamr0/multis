@@ -55,10 +55,24 @@ async function runInit() {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const ask = (q) => new Promise(resolve => rl.question(q, resolve));
 
-  // Track what was set up for the summary
-  const summary = { telegram: null, beeper: null, llm: null, pin: false };
+  // ANSI colors
+  const c = {
+    bold:    (s) => `\x1b[1m${s}\x1b[0m`,
+    green:   (s) => `\x1b[32m${s}\x1b[0m`,
+    yellow:  (s) => `\x1b[33m${s}\x1b[0m`,
+    cyan:    (s) => `\x1b[36m${s}\x1b[0m`,
+    dim:     (s) => `\x1b[2m${s}\x1b[0m`,
+    ok:      (s) => `\x1b[32m✓\x1b[0m ${s}`,
+    warn:    (s) => `\x1b[33m!\x1b[0m ${s}`,
+    fail:    (s) => `\x1b[31m✗\x1b[0m ${s}`,
+  };
+  const step = (n, total, title) => console.log(`\n${c.bold(`Step ${n}/${total}`)}  ${c.cyan(title)}\n`);
 
-  console.log('multis init — interactive setup\n');
+  // Track what was set up for the summary
+  const summary = { telegram: null, beeper: null, beeperAccounts: [], llm: null, pin: false };
+  const TOTAL_STEPS = 4;
+
+  console.log(c.bold('\nmultis init') + ' — interactive setup\n');
 
   // Ensure directory
   if (!fs.existsSync(MULTIS_DIR)) {
@@ -70,14 +84,16 @@ async function runInit() {
   const templatePath = path.join(__dirname, '..', '.multis-template', 'config.json');
   if (fs.existsSync(CONFIG_PATH)) {
     config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
-    console.log('Existing config found. Updating...\n');
+    console.log(c.dim('Existing config found — updating.\n'));
   } else if (fs.existsSync(templatePath)) {
     config = JSON.parse(fs.readFileSync(templatePath, 'utf-8'));
   }
 
   // -----------------------------------------------------------------------
-  // Step 1: Platform selection
+  // Step 1: Platform + Mode
   // -----------------------------------------------------------------------
+  step(1, TOTAL_STEPS, 'Platform & Mode');
+
   console.log('Which platform will you use?');
   console.log('  1) Telegram  — chat via your own Telegram bot');
   console.log('  2) Beeper    — use Beeper Desktop (no API keys needed)');
@@ -89,9 +105,6 @@ async function runInit() {
 
   if (!config.platforms) config.platforms = {};
 
-  // -----------------------------------------------------------------------
-  // Step 1b: Bot mode (personal or business)
-  // -----------------------------------------------------------------------
   console.log('\nHow will you use this bot?');
   console.log('  1) Personal  — your private assistant, all chats silent by default');
   console.log('  2) Business  — customer support, all chats auto-respond by default');
@@ -99,48 +112,46 @@ async function runInit() {
   config.bot_mode = modeChoice === '2' ? 'business' : 'personal';
   summary.botMode = config.bot_mode;
 
+  const platformNames = [useTelegram && 'Telegram', useBeeper && 'Beeper'].filter(Boolean).join(' + ');
+  console.log(c.ok(`${platformNames}, ${config.bot_mode} mode`));
+
   // -----------------------------------------------------------------------
-  // Step 2a: Telegram setup
+  // Step 2: Platform connections
   // -----------------------------------------------------------------------
+  step(2, TOTAL_STEPS, 'Connect Platforms');
+
   if (useTelegram) {
-    console.log('\n--- Telegram Setup ---\n');
-    console.log('To use Telegram, you need to create a bot:');
-    console.log('  1. Open Telegram and search for @BotFather');
-    console.log('  2. Send /newbot');
-    console.log('  3. Pick a display name (e.g. "My Assistant")');
-    console.log('  4. Pick a username ending in "bot" (e.g. "my_assistant_bot")');
-    console.log('  5. BotFather will reply with a token — copy it\n');
+    console.log(c.bold('Telegram\n'));
+    console.log('Create a bot via @BotFather on Telegram:');
+    console.log(c.dim('  1. Search @BotFather → /newbot → pick name → copy token\n'));
 
     let token = '';
     let botUsername = '';
     while (!botUsername) {
       const currentToken = config.telegram_bot_token || config.platforms?.telegram?.bot_token || '';
-      token = (await ask(`Paste your bot token${currentToken ? ` [${currentToken.slice(0, 8)}...]` : ''}: `)).trim();
+      token = (await ask(`Bot token${currentToken ? ` [${currentToken.slice(0, 8)}...]` : ''}: `)).trim();
       if (!token && currentToken) token = currentToken;
 
       if (!token) {
-        console.log('  Token required for Telegram. Try again.\n');
+        console.log(c.warn('Token required for Telegram. Try again.\n'));
         continue;
       }
 
-      // Validate format
       if (!/^\d+:[A-Za-z0-9_-]+$/.test(token)) {
-        console.log('  Invalid token format (expected digits:alphanumeric). Try again.\n');
+        console.log(c.warn('Invalid format (expected digits:alphanumeric). Try again.\n'));
         continue;
       }
 
-      // Verify with Telegram API
-      console.log('  Verifying token...');
+      console.log('Verifying token...');
       try {
         const { Telegraf } = require('telegraf');
         const testBot = new Telegraf(token);
         const me = await testBot.telegram.getMe();
         botUsername = me.username;
-        console.log(`  Token verified — bot is @${botUsername}\n`);
+        console.log(c.ok(`Bot verified: @${botUsername}\n`));
 
-        // Try inline pairing: wait for /start
-        console.log(`  Now open Telegram and send /start to @${botUsername}`);
-        console.log('  Waiting up to 60 seconds...\n');
+        console.log(`Now send ${c.bold('/start')} to @${botUsername} in Telegram`);
+        console.log(c.dim('Waiting up to 60 seconds...\n'));
 
         const paired = await new Promise((resolve) => {
           const timeout = setTimeout(() => {
@@ -168,24 +179,23 @@ async function runInit() {
           if (!config.allowed_users.includes(paired.userId)) {
             config.allowed_users.push(paired.userId);
           }
-          console.log(`  Paired as owner! (@${paired.username})\n`);
-          summary.telegram = `connected (@${botUsername}), paired as owner`;
+          console.log(c.ok(`Paired as owner (@${paired.username})`));
+          summary.telegram = { bot: `@${botUsername}`, owner: `@${paired.username}` };
         } else {
-          console.log('  No /start received within 60s. You can pair later via /start <code>.\n');
-          summary.telegram = `connected (@${botUsername}), not yet paired`;
+          console.log(c.warn('No /start received. You can pair later via /start <code>.'));
+          summary.telegram = { bot: `@${botUsername}`, owner: null };
         }
       } catch (err) {
-        console.log(`  Token verification failed: ${err.message}`);
-        const retry = (await ask('  Try a different token? (Y/n): ')).trim().toLowerCase();
+        console.log(c.fail(`Verification failed: ${err.message}`));
+        const retry = (await ask('Try a different token? (Y/n): ')).trim().toLowerCase();
         if (retry === 'n') {
-          summary.telegram = 'token not verified';
+          summary.telegram = { bot: null, owner: null, error: 'token not verified' };
           break;
         }
         continue;
       }
     }
 
-    // Save Telegram config
     config.telegram_bot_token = token;
     if (!config.platforms.telegram) config.platforms.telegram = {};
     config.platforms.telegram.bot_token = token;
@@ -195,59 +205,52 @@ async function runInit() {
     config.platforms.telegram.enabled = false;
   }
 
-  // -----------------------------------------------------------------------
-  // Step 2b: Beeper setup
-  // -----------------------------------------------------------------------
   if (useBeeper) {
-    console.log('\n--- Beeper Setup ---\n');
+    console.log(`\n${c.bold('Beeper')}\n`);
     try {
       const beeper = require('../src/cli/setup-beeper');
 
-      // Check Desktop API
       console.log('Checking Beeper Desktop API...');
       let reachable = await beeper.checkDesktop();
 
       if (!reachable) {
-        console.log('  Not reachable at localhost:23373');
-        console.log('  Make sure Beeper Desktop is open and the API is enabled:');
-        console.log('    Settings > Developers > toggle on\n');
+        console.log(c.warn('Not reachable at localhost:23373'));
+        console.log(c.dim('  Make sure Beeper Desktop is open'));
+        console.log(c.dim('  Settings > Developers > toggle on\n'));
         await ask('Press Enter to retry...');
         reachable = await beeper.checkDesktop();
       }
 
       if (reachable) {
-        console.log('  Desktop API is reachable.\n');
+        console.log(c.ok('Desktop API reachable'));
 
         // OAuth
-        console.log('Authenticating...');
         let token = null;
         const saved = beeper.loadToken();
         if (saved?.access_token) {
           try {
             await beeper.api(saved.access_token, 'GET', '/v1/accounts');
             token = saved.access_token;
-            console.log('  Using existing token.');
           } catch {
-            console.log('  Saved token expired, re-authenticating...');
+            console.log(c.dim('Saved token expired, re-authenticating...'));
           }
         }
 
         if (!token) {
-          console.log('  Starting OAuth PKCE flow...');
+          console.log('Starting OAuth PKCE flow...');
           token = await beeper.oauthPKCE();
-          console.log('  Authenticated!');
         }
+        console.log(c.ok('Authenticated'));
 
         // List accounts
-        console.log('\nConnected accounts:');
         const accounts = await beeper.api(token, 'GET', '/v1/accounts');
         const list = Array.isArray(accounts) ? accounts : accounts.items || [];
         for (const acc of list) {
           const name = acc.user?.displayText || acc.user?.id || acc.accountID || '?';
-          console.log(`  - ${acc.network || '?'}: ${name}`);
+          const network = acc.network || '?';
+          summary.beeperAccounts.push(`${network}: ${name}`);
         }
 
-        // Apply beeper settings to in-memory config (saved later in step 5)
         if (!config.platforms) config.platforms = {};
         if (!config.platforms.beeper) config.platforms.beeper = {};
         config.platforms.beeper.enabled = true;
@@ -255,19 +258,16 @@ async function runInit() {
         config.platforms.beeper.command_prefix = config.platforms.beeper.command_prefix || '//';
         config.platforms.beeper.poll_interval = config.platforms.beeper.poll_interval || 3000;
 
-        // Warnings
-        console.log('\nImportant:');
-        console.log('  - Beeper Desktop must be running for multis to work');
-        console.log('  - Save your recovery key: Settings > Security > Recovery Key');
-        console.log('  - Unlike Telegram, multis stops when Beeper Desktop is closed\n');
+        summary.beeper = 'connected';
 
-        summary.beeper = `connected (${list.length} account${list.length !== 1 ? 's' : ''})`;
+        console.log(c.ok(`${list.length} account${list.length !== 1 ? 's' : ''} connected`));
+        console.log(c.dim('  Note: Beeper Desktop must be running for multis to work'));
       } else {
-        console.log('  Still not reachable. Skipping Beeper for now.\n');
-        summary.beeper = 'not reachable (skipped)';
+        console.log(c.fail('Still not reachable. Skipping Beeper.'));
+        summary.beeper = 'skipped';
       }
     } catch (err) {
-      console.log(`  Beeper setup error: ${err.message}\n`);
+      console.log(c.fail(`Beeper setup error: ${err.message}`));
       summary.beeper = `error: ${err.message}`;
     }
   } else {
@@ -278,11 +278,12 @@ async function runInit() {
   // -----------------------------------------------------------------------
   // Step 3: LLM provider
   // -----------------------------------------------------------------------
-  console.log('--- LLM Setup ---\n');
+  step(3, TOTAL_STEPS, 'LLM Provider');
+
   console.log('Which LLM provider?');
   console.log('  1) Anthropic (Claude)');
   console.log('  2) OpenAI (GPT)');
-  console.log('  3) OpenAI-compatible (OpenRouter, Together, Groq, GLM, etc.)');
+  console.log('  3) OpenAI-compatible (OpenRouter, Together, Groq, etc.)');
   console.log('  4) Ollama (local, free, no API key)');
   const llmChoice = (await ask('\nChoose (1/2/3/4) [1]: ')).trim() || '1';
 
@@ -300,20 +301,20 @@ async function runInit() {
       while (!verified) {
         const key = (await ask(`Anthropic API key${currentKey ? ' [configured]' : ''}: `)).trim();
         if (key) config.llm.apiKey = key;
-        else if (!currentKey) { console.log('  API key required.\n'); continue; }
+        else if (!currentKey) { console.log(c.warn('API key required.')); continue; }
 
-        console.log('  Verifying...');
+        console.log('Verifying...');
         try {
           await verifyLLM(config.llm);
-          console.log('  Verified!\n');
+          console.log(c.ok(`Anthropic verified (${config.llm.model})`));
           verified = true;
         } catch (err) {
-          console.log(`  Verification failed: ${err.message}`);
-          const retry = (await ask('  Try again? (Y/n): ')).trim().toLowerCase();
+          console.log(c.fail(`Verification failed: ${err.message}`));
+          const retry = (await ask('Try again? (Y/n): ')).trim().toLowerCase();
           if (retry === 'n') break;
         }
       }
-      summary.llm = `Anthropic (${config.llm.model})${verified ? ' — verified' : ''}`;
+      summary.llm = { provider: 'Anthropic', model: config.llm.model, verified };
       break;
     }
 
@@ -328,20 +329,20 @@ async function runInit() {
       while (!verified) {
         const key = (await ask(`OpenAI API key${currentKey ? ' [configured]' : ''}: `)).trim();
         if (key) config.llm.apiKey = key;
-        else if (!currentKey) { console.log('  API key required.\n'); continue; }
+        else if (!currentKey) { console.log(c.warn('API key required.')); continue; }
 
-        console.log('  Verifying...');
+        console.log('Verifying...');
         try {
           await verifyLLM(config.llm);
-          console.log('  Verified!\n');
+          console.log(c.ok(`OpenAI verified (${config.llm.model})`));
           verified = true;
         } catch (err) {
-          console.log(`  Verification failed: ${err.message}`);
-          const retry = (await ask('  Try again? (Y/n): ')).trim().toLowerCase();
+          console.log(c.fail(`Verification failed: ${err.message}`));
+          const retry = (await ask('Try again? (Y/n): ')).trim().toLowerCase();
           if (retry === 'n') break;
         }
       }
-      summary.llm = `OpenAI (${config.llm.model})${verified ? ' — verified' : ''}`;
+      summary.llm = { provider: 'OpenAI', model: config.llm.model, verified };
       break;
     }
 
@@ -358,24 +359,23 @@ async function runInit() {
       while (!verified) {
         const key = (await ask('API key: ')).trim();
         if (key) config.llm.apiKey = key;
-        else { console.log('  API key required.\n'); continue; }
+        else { console.log(c.warn('API key required.')); continue; }
 
-        console.log('  Verifying...');
+        console.log('Verifying...');
         try {
           await verifyLLM(config.llm);
-          console.log('  Verified!\n');
+          console.log(c.ok(`Verified (${config.llm.model})`));
           verified = true;
         } catch (err) {
-          console.log(`  Verification failed: ${err.message}`);
-          const retry = (await ask('  Try again? (Y/n): ')).trim().toLowerCase();
+          console.log(c.fail(`Verification failed: ${err.message}`));
+          const retry = (await ask('Try again? (Y/n): ')).trim().toLowerCase();
           if (retry === 'n') break;
         }
       }
 
-      // Extract display name from baseUrl
       let displayName = 'OpenAI-compatible';
       try { displayName = new URL(baseUrl).hostname.replace('www.', ''); } catch { /* */ }
-      summary.llm = `${displayName} (${config.llm.model})${verified ? ' — verified' : ''}`;
+      summary.llm = { provider: displayName, model: config.llm.model, verified };
       break;
     }
 
@@ -386,42 +386,46 @@ async function runInit() {
       config.llm.baseUrl = defaults.baseUrl;
       config.llm.apiKey = '';
 
-      console.log('  Checking Ollama at localhost:11434...');
+      console.log('Checking Ollama at localhost:11434...');
+      let ollamaOk = false;
       try {
         await fetch('http://localhost:11434/api/tags', { signal: AbortSignal.timeout(3000) });
-        console.log('  Ollama is running!\n');
-        summary.llm = `Ollama (${config.llm.model}) — verified`;
+        console.log(c.ok('Ollama is running'));
+        ollamaOk = true;
       } catch {
-        console.log('  Ollama not reachable. Install from https://ollama.com');
-        console.log('  Config saved — start Ollama before running multis.\n');
-        summary.llm = `Ollama (${config.llm.model}) — not running`;
+        console.log(c.fail('Ollama not reachable — install from https://ollama.com'));
+        console.log(c.dim('Config saved. Start Ollama before running multis.'));
       }
+      summary.llm = { provider: 'Ollama', model: config.llm.model, verified: ollamaOk };
       break;
     }
 
     default:
-      console.log('  Invalid choice, defaulting to Anthropic.\n');
+      console.log(c.warn('Invalid choice, defaulting to Anthropic.'));
       config.llm.provider = 'anthropic';
       config.llm.model = LLM_DEFAULTS.anthropic.model;
-      summary.llm = 'Anthropic (default)';
+      summary.llm = { provider: 'Anthropic', model: config.llm.model, verified: false };
   }
 
   // -----------------------------------------------------------------------
-  // Step 4: PIN
+  // Step 4: Security
   // -----------------------------------------------------------------------
-  console.log('--- Security ---\n');
+  step(4, TOTAL_STEPS, 'Security');
+
   const pinChoice = (await ask('Set a PIN for sensitive commands like /exec? (4-6 digits, Enter to skip): ')).trim();
   if (pinChoice && /^\d{4,6}$/.test(pinChoice)) {
     if (!config.security) config.security = {};
     config.security.pin_hash = crypto.createHash('sha256').update(pinChoice).digest('hex');
-    console.log('  PIN set.\n');
+    console.log(c.ok('PIN set'));
     summary.pin = true;
   } else if (pinChoice) {
-    console.log('  Invalid PIN (must be 4-6 digits). Skipping.\n');
+    console.log(c.warn('Invalid PIN (must be 4-6 digits). Skipping.'));
+  } else {
+    console.log(c.dim('No PIN set (optional).'));
   }
 
   // -----------------------------------------------------------------------
-  // Step 5: Save + Summary
+  // Save + Summary
   // -----------------------------------------------------------------------
 
   // Ensure pairing code
@@ -440,19 +444,67 @@ async function runInit() {
     fs.copyFileSync(govTemplate, govPath);
   }
 
-  console.log(`Config saved to ${CONFIG_PATH}\n`);
-  console.log(`  Mode:      ${summary.botMode}`);
-  if (summary.telegram) console.log(`  Telegram:  ${summary.telegram}`);
-  if (summary.beeper) console.log(`  Beeper:    ${summary.beeper}`);
-  if (summary.llm) console.log(`  LLM:       ${summary.llm}`);
-  console.log(`  PIN:       ${summary.pin ? 'set' : 'not set'}`);
+  // Copy tools template if not present
+  const toolsPath = path.join(MULTIS_DIR, 'tools.json');
+  const toolsTemplate = path.join(__dirname, '..', '.multis-template', 'tools.json');
+  if (!fs.existsSync(toolsPath) && fs.existsSync(toolsTemplate)) {
+    fs.copyFileSync(toolsTemplate, toolsPath);
+  }
+
+  // --- Final summary ---
+  console.log(`\n${c.bold('Setup Complete')}\n`);
+
+  const rows = [];
+  rows.push(['Mode', config.bot_mode]);
+
+  // Telegram
+  if (summary.telegram) {
+    if (summary.telegram.error) {
+      rows.push(['Telegram', c.yellow(summary.telegram.error)]);
+    } else {
+      let tgVal = summary.telegram.bot || 'not configured';
+      if (summary.telegram.owner) tgVal += ` ${c.dim('owner:')} ${summary.telegram.owner}`;
+      else tgVal += ` ${c.dim('(not yet paired)')}`;
+      rows.push(['Telegram', tgVal]);
+    }
+  }
+
+  // Beeper + accounts
+  if (summary.beeper) {
+    rows.push(['Beeper', summary.beeper]);
+    for (const acc of summary.beeperAccounts) {
+      rows.push(['', c.dim(acc)]);
+    }
+  }
+
+  // LLM
+  if (summary.llm) {
+    const llmStatus = summary.llm.verified ? c.green('verified') : c.yellow('not verified');
+    rows.push(['LLM', `${summary.llm.provider} (${summary.llm.model}) — ${llmStatus}`]);
+  }
+
+  // PIN
+  rows.push(['PIN', summary.pin ? 'set' : c.dim('not set')]);
+
+  // Config location
+  rows.push(['Config', c.dim(CONFIG_PATH)]);
+
+  // Print aligned
+  const maxLabel = Math.max(...rows.map(r => r[0].length));
+  for (const [label, value] of rows) {
+    if (label) {
+      console.log(`  ${label.padEnd(maxLabel + 2)}${value}`);
+    } else {
+      console.log(`  ${''.padEnd(maxLabel + 2)}${value}`);
+    }
+  }
 
   if (!config.owner_id) {
-    console.log(`\n  Pairing code: ${config.pairing_code}`);
+    console.log(`\n  Pairing code: ${c.bold(config.pairing_code)}`);
     console.log('  Send /start <code> to your bot to pair as owner.');
   }
 
-  console.log('\nRun: multis start');
+  console.log(`\nRun ${c.bold('multis start')} to launch.`);
 
   rl.close();
 }
@@ -492,6 +544,7 @@ function runStart() {
     env: { ...process.env }
   });
 
+  fs.writeFileSync(PID_PATH, String(child.pid));
   child.unref();
   console.log(`multis started (PID ${child.pid}).`);
   console.log(`Log: ${logPath}`);
@@ -727,6 +780,20 @@ async function runDoctor() {
     if (!fs.existsSync(govPath)) return { ok: false, detail: 'governance.json not found' };
     const gov = JSON.parse(fs.readFileSync(govPath, 'utf-8'));
     return { ok: true, detail: `allowlist: ${gov.allowlist?.length || 0}, denylist: ${gov.denylist?.length || 0}` };
+  });
+
+  // Tools config
+  check('Tools config', () => {
+    const toolsPath = path.join(MULTIS_DIR, 'tools.json');
+    if (!fs.existsSync(toolsPath)) return { ok: true, detail: 'not found (will use defaults)' };
+    try {
+      const tools = JSON.parse(fs.readFileSync(toolsPath, 'utf-8'));
+      const entries = Object.entries(tools.tools || {});
+      const enabled = entries.filter(([, v]) => v.enabled !== false).length;
+      return { ok: true, detail: `${enabled}/${entries.length} tools enabled` };
+    } catch (err) {
+      return { ok: false, detail: `parse error: ${err.message}` };
+    }
   });
 
   // Print results

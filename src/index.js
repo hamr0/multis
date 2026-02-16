@@ -101,6 +101,18 @@ async function main() {
 
   process.once('SIGINT', () => shutdown('SIGINT'));
   process.once('SIGTERM', () => shutdown('SIGTERM'));
+
+  // Catch unhandled errors so daemon doesn't die silently
+  process.on('unhandledRejection', (err) => {
+    console.error('Unhandled rejection:', err?.message || err);
+    logAudit({ action: 'unhandled_rejection', error: String(err?.message || err) });
+  });
+  process.on('uncaughtException', (err) => {
+    console.error('Uncaught exception:', err?.message || err);
+    logAudit({ action: 'uncaught_exception', error: String(err?.message || err) });
+    // uncaughtException: process state may be corrupt, exit after logging
+    process.exit(1);
+  });
 }
 
 main().catch(err => {

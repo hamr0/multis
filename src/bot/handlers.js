@@ -8,6 +8,9 @@ const { getMemoryManager } = require('../memory/manager');
 const { runCapture } = require('../memory/capture');
 const { PinManager, hashPin } = require('../security/pin');
 const { detectInjection, logInjectionAttempt } = require('../security/injection');
+const { buildToolRegistry, getToolsForUser, toLLMSchemas, loadToolsConfig } = require('../tools/registry');
+const { executeTool } = require('../tools/executor');
+const { getPlatform } = require('../tools/platform');
 
 // ---------------------------------------------------------------------------
 // Agent registry + resolution
@@ -141,6 +144,12 @@ function createMessageRouter(config, deps = {}) {
   // Build agent registry
   const agentRegistry = deps.agentRegistry || buildAgentRegistry(config, llm);
 
+  // Build tool registry (platform-filtered, config-filtered)
+  const toolsConfig = deps.toolsConfig || loadToolsConfig();
+  const allTools = deps.tools || buildToolRegistry(toolsConfig);
+  const runtimePlatform = deps.runtimePlatform || getPlatform();
+  const maxToolRounds = config.llm?.max_tool_rounds || 5;
+
   // Owner commands that require PIN auth
   const PIN_PROTECTED = new Set(['exec', 'read', 'index', 'mode']);
 
@@ -165,7 +174,7 @@ function createMessageRouter(config, deps = {}) {
     // Natural language / business routing (set by platform adapter)
     if (msg.routeAs === 'natural' || msg.routeAs === 'business') {
       if (!isPaired(msg, config)) return;
-      await routeAsk(msg, platform, config, indexer, llm, msg.text, memoryManagers, memCfg, escalationRetries, agentRegistry);
+      await routeAsk(msg, platform, config, indexer, llm, msg.text, memoryManagers, memCfg, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
       return;
     }
 
@@ -198,7 +207,7 @@ function createMessageRouter(config, deps = {}) {
       // Re-route the stored command
       msg = stored.msg;
       // Fall through to command handling below with stored command/args
-      await executeCommand(stored.command, stored.args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager, escalationRetries, agentRegistry);
+      await executeCommand(stored.command, stored.args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
       return;
     }
 
@@ -257,11 +266,11 @@ function createMessageRouter(config, deps = {}) {
       }
     }
 
-    await executeCommand(command, args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager, escalationRetries, agentRegistry);
+    await executeCommand(command, args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
   };
 }
 
-async function executeCommand(command, args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager, escalationRetries, agentRegistry) {
+async function executeCommand(command, args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager, escalationRetries, agentRegistry, toolDeps) {
     switch (command) {
       case 'status':
         await routeStatus(msg, platform, config);
@@ -288,7 +297,7 @@ async function executeCommand(command, args, msg, platform, config, indexer, llm
         await platform.send(msg.chatId, `Available skills:\n${listSkills()}`);
         break;
       case 'ask':
-        await routeAsk(msg, platform, config, indexer, llm, args, memoryManagers, memCfg, escalationRetries, agentRegistry);
+        await routeAsk(msg, platform, config, indexer, llm, args, memoryManagers, memCfg, escalationRetries, agentRegistry, toolDeps);
         break;
       case 'memory':
         await routeMemory(msg, platform, config, memoryManagers);
@@ -317,7 +326,7 @@ async function executeCommand(command, args, msg, platform, config, indexer, llm
       default:
         // Telegram plain text (no recognized command) → implicit ask
         if (msg.platform === 'telegram' && !msg.text.startsWith('/')) {
-          await routeAsk(msg, platform, config, indexer, llm, msg.text, memoryManagers, memCfg, escalationRetries, agentRegistry);
+          await routeAsk(msg, platform, config, indexer, llm, msg.text, memoryManagers, memCfg, escalationRetries, agentRegistry, toolDeps);
         }
         break;
     }
@@ -559,7 +568,43 @@ async function routeDocs(msg, platform, config, indexer) {
   await platform.send(msg.chatId, lines.join('\n') || 'No documents indexed yet.');
 }
 
-async function routeAsk(msg, platform, config, indexer, llm, question, memoryManagers, memCfg, escalationRetries, agentRegistry) {
+/**
+ * Agent loop — calls LLM with tools, executes tool calls, feeds results back.
+ * Loops until LLM returns text-only or max rounds reached.
+ * @returns {Promise<string>} — final text answer
+ */
+async function runAgentLoop(llm, messages, toolSchemas, tools, opts = {}) {
+  const { system, maxRounds = 5, ctx } = opts;
+  const loopMessages = [...messages];
+
+  for (let round = 0; round < maxRounds; round++) {
+    const response = await llm.generateWithToolsAndMessages(loopMessages, toolSchemas, { system });
+    const parsed = llm.parseToolResponse(response);
+
+    // No tool calls — return the text
+    if (!parsed.toolCalls || parsed.toolCalls.length === 0) {
+      return parsed.text || '(no response)';
+    }
+
+    // Add assistant message to conversation
+    loopMessages.push(llm.formatAssistantMessage(response));
+
+    // Execute each tool call and feed results back
+    for (const tc of parsed.toolCalls) {
+      const result = await executeTool(tc, tools, ctx);
+      loopMessages.push(llm.formatToolResult(tc.id, result));
+    }
+
+    // If the LLM also returned text alongside tool calls, we continue
+    // to let it process the tool results
+  }
+
+  // Max rounds reached — do one final text-only call
+  const finalResponse = await llm.generateWithMessages(loopMessages, { system });
+  return finalResponse || '(max tool rounds reached)';
+}
+
+async function routeAsk(msg, platform, config, indexer, llm, question, memoryManagers, memCfg, escalationRetries, agentRegistry, toolDeps = {}) {
   if (!question) {
     const prefix = msg.platform === 'telegram' ? '/' : '//';
     await platform.send(msg.chatId, `Usage: ${prefix}ask <question>`);
@@ -666,12 +711,25 @@ async function routeAsk(msg, platform, config, indexer, llm, question, memoryMan
     }
 
     // If no recent history (no memory manager), fall back to single-message
+    if (messages.length === 0) {
+      messages.push({ role: 'user', content: cleanQuestion });
+    }
+
+    // --- Agent loop with tool calling ---
+    const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5 } = toolDeps;
+    const userTools = getToolsForUser(allTools, admin, tCfg);
+    const toolSchemas = toLLMSchemas(userTools);
+    const hasTools = toolSchemas.length > 0 && agentLlm.generateWithToolsAndMessages;
+
     let answer;
-    if (messages.length > 0) {
-      answer = await agentLlm.generateWithMessages(messages, { system });
+    if (hasTools) {
+      answer = await runAgentLoop(agentLlm, messages, toolSchemas, userTools, {
+        system,
+        maxRounds: maxToolRounds,
+        ctx: { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem }
+      });
     } else {
-      const ragPrompt = buildRAGPrompt(cleanQuestion, chunks, agentPersona);
-      answer = await agentLlm.generate(ragPrompt.user, { system: ragPrompt.system });
+      answer = await agentLlm.generateWithMessages(messages, { system });
     }
 
     // Prefix with agent name only when multiple agents exist

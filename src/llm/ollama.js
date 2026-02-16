@@ -32,13 +32,11 @@ class OllamaProvider extends LLMProvider {
   }
 
   async generateWithTools(prompt, tools, options = {}) {
-    // Ollama doesn't natively support tool calling yet
-    // We can implement a simple version by prompting the model
     const toolsDescription = tools.map(t =>
       `Tool: ${t.name}\nDescription: ${t.description}\nParameters: ${JSON.stringify(t.inputSchema)}`
     ).join('\n\n');
 
-    const systemPrompt = `You have access to these tools:\n\n${toolsDescription}\n\nTo use a tool, respond with JSON in this format: {"tool": "tool_name", "parameters": {...}}`;
+    const systemPrompt = `You have access to these tools:\n\n${toolsDescription}\n\nTo use a tool, respond with JSON in this format: {"tool": "tool_name", "parameters": {...}}\nIf you don't need a tool, respond normally with text.`;
 
     const response = await this.generate(prompt, {
       ...options,
@@ -46,6 +44,62 @@ class OllamaProvider extends LLMProvider {
     });
 
     return { content: response };
+  }
+
+  async generateWithToolsAndMessages(messages, tools, options = {}) {
+    const toolsDescription = tools.map(t =>
+      `Tool: ${t.name}\nDescription: ${t.description}\nParameters: ${JSON.stringify(t.inputSchema)}`
+    ).join('\n\n');
+
+    const toolSystem = `You have access to these tools:\n\n${toolsDescription}\n\nTo use a tool, respond ONLY with JSON: {"tool": "tool_name", "parameters": {...}}\nIf you don't need a tool, respond normally with text.`;
+
+    const system = options.system ? `${options.system}\n\n${toolSystem}` : toolSystem;
+
+    const body = {
+      model: this.model,
+      messages: [{ role: 'system', content: system }, ...messages],
+      stream: false,
+      options: {
+        temperature: options.temperature || 0.7,
+        num_predict: options.maxTokens || 2048
+      }
+    };
+
+    const response = await this._makeChatRequest(body);
+    return response;
+  }
+
+  parseToolResponse(response) {
+    const content = response.message?.content || response.content || '';
+
+    // Try to extract JSON tool call from response
+    try {
+      const jsonMatch = content.match(/\{[\s\S]*"tool"\s*:\s*"[^"]+[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        if (parsed.tool) {
+          return {
+            text: '',
+            toolCalls: [{
+              id: `ollama-${Date.now()}`,
+              name: parsed.tool,
+              input: parsed.parameters || {}
+            }]
+          };
+        }
+      }
+    } catch { /* not JSON, treat as text */ }
+
+    return { text: content, toolCalls: [] };
+  }
+
+  formatToolResult(toolCallId, result) {
+    return { role: 'user', content: `Tool result for ${toolCallId}:\n${result}` };
+  }
+
+  formatAssistantMessage(response) {
+    const content = response.message?.content || response.content || '';
+    return { role: 'assistant', content };
   }
 
   async generateWithMessages(messages, options = {}) {

@@ -38,6 +38,16 @@ function ensureMultisDir() {
     const templateDir = path.join(__dirname, '..', '.multis-template');
     fs.copyFileSync(path.join(templateDir, 'governance.json'), govPath);
   }
+
+  // Copy default tools config if not present
+  const toolsPath = path.join(dir, 'tools.json');
+  if (!fs.existsSync(toolsPath)) {
+    const templateDir = path.join(__dirname, '..', '.multis-template');
+    const toolsTemplate = path.join(templateDir, 'tools.json');
+    if (fs.existsSync(toolsTemplate)) {
+      fs.copyFileSync(toolsTemplate, toolsPath);
+    }
+  }
 }
 
 /**
@@ -84,26 +94,28 @@ function loadConfig() {
   if (!config.platforms.telegram) config.platforms.telegram = { enabled: true };
   if (!config.platforms.beeper) config.platforms.beeper = { enabled: false };
 
-  // .env overrides
-  if (process.env.TELEGRAM_BOT_TOKEN) {
+  // .env fills gaps — config.json (set by init) is source of truth
+  if (process.env.TELEGRAM_BOT_TOKEN && !config.telegram_bot_token) {
     config.telegram_bot_token = process.env.TELEGRAM_BOT_TOKEN;
   }
-  if (process.env.PAIRING_CODE) {
+  if (process.env.PAIRING_CODE && !config.pairing_code) {
     config.pairing_code = process.env.PAIRING_CODE;
   }
-  if (process.env.LLM_PROVIDER) {
+  if (process.env.LLM_PROVIDER && !config.llm.provider) {
     config.llm.provider = process.env.LLM_PROVIDER;
   }
-  // Set API key based on active provider
-  const provider = config.llm.provider;
-  if (provider === 'anthropic' && process.env.ANTHROPIC_API_KEY) {
-    config.llm.apiKey = process.env.ANTHROPIC_API_KEY;
-  } else if (provider === 'openai' && process.env.OPENAI_API_KEY) {
-    config.llm.apiKey = process.env.OPENAI_API_KEY;
-  } else if (provider === 'gemini' && process.env.GEMINI_API_KEY) {
-    config.llm.apiKey = process.env.GEMINI_API_KEY;
+  // Set API key from env only if config.json doesn't have one
+  if (!config.llm.apiKey) {
+    const provider = config.llm.provider;
+    if (provider === 'anthropic' && process.env.ANTHROPIC_API_KEY) {
+      config.llm.apiKey = process.env.ANTHROPIC_API_KEY;
+    } else if (provider === 'openai' && process.env.OPENAI_API_KEY) {
+      config.llm.apiKey = process.env.OPENAI_API_KEY;
+    } else if (provider === 'gemini' && process.env.GEMINI_API_KEY) {
+      config.llm.apiKey = process.env.GEMINI_API_KEY;
+    }
   }
-  if (process.env.LLM_MODEL) {
+  if (process.env.LLM_MODEL && !config.llm.model) {
     config.llm.model = process.env.LLM_MODEL;
   }
 

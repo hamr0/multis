@@ -44,6 +44,50 @@ class AnthropicProvider extends LLMProvider {
     return response;
   }
 
+  async generateWithToolsAndMessages(messages, tools, options = {}) {
+    const body = {
+      model: this.model,
+      max_tokens: options.maxTokens || 2048,
+      temperature: options.temperature || 0.7,
+      tools: tools.map(t => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.inputSchema
+      })),
+      messages
+    };
+
+    if (options.system) {
+      body.system = options.system;
+    }
+
+    return await this._makeRequest(body);
+  }
+
+  parseToolResponse(response) {
+    const text = (response.content || [])
+      .filter(b => b.type === 'text')
+      .map(b => b.text)
+      .join('');
+
+    const toolCalls = (response.content || [])
+      .filter(b => b.type === 'tool_use')
+      .map(b => ({ id: b.id, name: b.name, input: b.input }));
+
+    return { text, toolCalls };
+  }
+
+  formatToolResult(toolCallId, result) {
+    return {
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: toolCallId, content: result }]
+    };
+  }
+
+  formatAssistantMessage(response) {
+    return { role: 'assistant', content: response.content };
+  }
+
   async generateWithMessages(messages, options = {}) {
     const body = {
       model: this.model,
