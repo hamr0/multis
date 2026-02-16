@@ -23,14 +23,15 @@ if (command) {
 
 function runCommand(cmd) {
   switch (cmd) {
-    case 'init':   runInit(); break;
-    case 'start':  runStart(); break;
-    case 'stop':   runStop(); break;
-    case 'status': runStatus(); break;
-    case 'doctor': runDoctor(); break;
+    case 'init':    runInit(); break;
+    case 'start':   runStart(); break;
+    case 'stop':    runStop(); break;
+    case 'restart': runRestart(); break;
+    case 'status':  runStatus(); break;
+    case 'doctor':  runDoctor(); break;
     default:
       console.log(`\x1b[31mUnknown command: ${cmd}\x1b[0m\n`);
-      console.log('Usage: multis <init|start|stop|status|doctor>');
+      console.log('Usage: multis <init|start|stop|restart|status|doctor>');
       console.log('   or: multis  (interactive menu)');
       process.exit(1);
   }
@@ -63,14 +64,15 @@ async function runMenu() {
   console.log('  1) init      Set up multis (interactive wizard)');
   console.log('  2) start     Start daemon in background');
   console.log('  3) stop      Stop running daemon');
-  console.log('  4) status    Check if daemon is running');
-  console.log('  5) doctor    Run diagnostic checks');
+  console.log('  4) restart   Stop + start (or just start if not running)');
+  console.log('  5) status    Check if daemon is running');
+  console.log('  6) doctor    Run diagnostic checks');
   console.log('  0) exit      Quit this menu\n');
 
-  const choice = (await ask('Choose (0-5): ')).trim();
+  const choice = (await ask('Choose (0-6): ')).trim();
   rl.close();
 
-  const commands = { '1': 'init', '2': 'start', '3': 'stop', '4': 'status', '5': 'doctor' };
+  const commands = { '1': 'init', '2': 'start', '3': 'stop', '4': 'restart', '5': 'status', '6': 'doctor' };
   if (choice === '0' || choice === '') {
     console.log('Bye.');
     process.exit(0);
@@ -617,6 +619,30 @@ function runStop() {
 
   // Clean up PID file
   try { fs.unlinkSync(PID_PATH); } catch { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
+// restart
+// ---------------------------------------------------------------------------
+function runRestart() {
+  if (isRunning()) {
+    const pid = parseInt(fs.readFileSync(PID_PATH, 'utf-8').trim(), 10);
+    try {
+      process.kill(pid, 'SIGTERM');
+      console.log(`Stopped PID ${pid}.`);
+    } catch (err) {
+      if (err.code !== 'ESRCH') {
+        console.error(`Error stopping: ${err.message}`);
+      }
+    }
+    try { fs.unlinkSync(PID_PATH); } catch { /* ignore */ }
+    // Brief pause to let the process exit and release the Telegram polling connection
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
+    wait(1000).then(() => runStart());
+    return;
+  }
+  // Not running — just start
+  runStart();
 }
 
 // ---------------------------------------------------------------------------

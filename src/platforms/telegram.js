@@ -21,12 +21,12 @@ class TelegramPlatform extends Platform {
 
   async start() {
     // Wire up raw message handler that converts to Message objects
-    this.bot.on('message', (ctx) => {
+    this.bot.on('message', async (ctx) => {
       if (!this._messageCallback) return;
 
       // Handle document uploads separately
       if (ctx.message.document) {
-        this._handleDocument(ctx);
+        await this._handleDocument(ctx);
         return;
       }
 
@@ -45,7 +45,7 @@ class TelegramPlatform extends Platform {
         raw: ctx,
       });
 
-      this._messageCallback(msg, this);
+      await this._messageCallback(msg, this);
     });
 
     this.bot.catch((err, ctx) => {

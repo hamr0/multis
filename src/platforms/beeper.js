@@ -22,7 +22,8 @@ class BeeperPlatform extends Platform {
     this.token = null;
     this.selfIds = new Set(); // account user IDs to detect self-messages
     this._pollTimer = null;
-    this._lastSeen = {}; // chatId -> last message ID (numeric) we processed
+    this._seen = new Set(); // message IDs we've already processed or seeded
+    this._processing = new Set(); // message IDs currently being handled (dedup guard)
     this._initialized = false; // first poll seeds _lastSeen without processing
     this._personalChats = new Set(); // chatIds that are self/note-to-self chats
   }
@@ -85,11 +86,12 @@ class BeeperPlatform extends Platform {
           this._personalChats.add(chatId);
         }
 
-        const msgData = await this._api('GET', `/v1/chats/${encodeURIComponent(chatId)}/messages?limit=1`);
+        // Seed with limit=5 to match poll window — prevents reprocessing after restart
+        const msgData = await this._api('GET', `/v1/chats/${encodeURIComponent(chatId)}/messages?limit=5`);
         const messages = msgData.items || [];
-        if (messages.length > 0) {
-          const id = messages[0].id || messages[0].messageID;
-          if (id) this._lastSeen[chatId] = Number(id);
+        for (const m of messages) {
+          const id = String(m.id || m.messageID || '');
+          if (id) this._seen.add(id);
         }
       }
       if (this._personalChats.size > 0) {
@@ -116,15 +118,15 @@ class BeeperPlatform extends Platform {
         // Messages are newest-first; process in reverse (oldest-first) for correct ordering
         for (let i = messages.length - 1; i >= 0; i--) {
           const msg = messages[i];
-          const msgId = Number(msg.id || msg.messageID);
+          const msgId = String(msg.id || msg.messageID || '');
           if (!msgId) continue;
 
-          // Skip already-seen messages
-          const lastSeen = this._lastSeen[chatId] || 0;
-          if (msgId <= lastSeen) continue;
+          // Skip already-seen or currently-processing messages
+          if (this._seen.has(msgId)) continue;
+          if (this._processing.has(msgId)) continue;
 
-          // Update last seen
-          this._lastSeen[chatId] = msgId;
+          // Mark as seen
+          this._seen.add(msgId);
 
           const isSelf = this._isSelf(msg);
           const text = msg.text || '';
@@ -162,6 +164,7 @@ class BeeperPlatform extends Platform {
 
           if (shouldProcess) {
             console.log(`Beeper: ${routeAs || 'command'} from ${chat.title || chatId}: ${text.slice(0, 80)}`);
+            this._processing.add(msgId);
 
             const normalized = new Message({
               id: msgId,
@@ -180,9 +183,17 @@ class BeeperPlatform extends Platform {
               await this._messageCallback(normalized, this);
             } catch (err) {
               console.error(`Beeper: handler error — ${err.message}`);
+            } finally {
+              this._processing.delete(msgId);
             }
           }
         }
+      }
+
+      // Cap seen set to prevent unbounded growth (keep last 500)
+      if (this._seen.size > 500) {
+        const arr = [...this._seen];
+        this._seen = new Set(arr.slice(-250));
       }
 
       // Clear poll error flag on success

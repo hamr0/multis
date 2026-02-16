@@ -200,9 +200,12 @@ function addAllowedUser(userId) {
 }
 
 /**
- * Check if a user is the owner
+ * Check if a user is the owner.
+ * Accepts optional msg object — Beeper self-messages are always owner
+ * (senderId is platform-specific, won't match Telegram owner_id).
  */
-function isOwner(userId, config) {
+function isOwner(userId, config, msg) {
+  if (msg && msg.isSelf) return true;
   return String(config.owner_id) === String(userId);
 }
 

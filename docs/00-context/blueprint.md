@@ -223,8 +223,8 @@ Message arrives → append to recent.json + daily log
                      ├─ 2. APPEND new timestamped section to memory.md
                      │
                      ├─ 3. INDEX that same summary as ONE chunk in FTS5
-                     │      scope=admin (admin chat) or scope=user:<chatId> (customer)
-                     │      element_type='memory_summary', document_type='conversation'
+                     │      role=admin (admin chat) or role=user:<chatId> (customer)
+                     │      type='conv', element='chat'
                      │
                      ├─ 4. PRUNE memory.md — keep only last N sections (default 12)
                      │      Dropped sections already indexed in step 3, nothing lost
@@ -232,7 +232,7 @@ Message arrives → append to recent.json + daily log
                      └─ 5. Trim recent.json to last 5
 ```
 
-**memory.md = hot scratchpad.** Small, recent, always fresh. When the LLM needs older context, the `recall_memory` tool searches FTS for `memory_summary` chunks from the 90-day indexed archive. This keeps system prompts lean while preserving full history.
+**memory.md = hot scratchpad.** Small, recent, always fresh. When the LLM needs older context, the `recall_memory` tool searches FTS for `type='conv'` chunks from the 90-day indexed archive. This keeps system prompts lean while preserving full history.
 
 ### Retention and cleanup
 
@@ -291,58 +291,67 @@ Messages:
 
 ### recall_memory tool
 
-The LLM has a `recall_memory` tool that searches only `memory_summary` chunks (not documents). Used when the user references something discussed before ("do you remember...", "my wife's name", "what did I say about..."). The system prompt nudges the LLM to use it for older memories not visible in the current memory.md section.
+The LLM has a `recall_memory` tool that searches only `type='conv'` chunks (not documents). Used when the user references something discussed before ("do you remember...", "my wife's name", "what did I say about..."). The system prompt nudges the LLM to use it for older memories not visible in the current memory.md section.
 
-- **Scope-filtered**: owner sees all memory scopes; non-owner only sees `user:<chatId>` memories
-- **Type-filtered**: `store.search()` accepts a `types` option that adds `AND c.element_type IN (...)` to the SQL query
-- **Recency fallback**: when FTS query is all stopwords (e.g. "what did we talk about last"), `store.recentByType()` returns the most recent `memory_summary` chunks by `created_at DESC` — same scope/type filtering, no FTS match required
+- **Role-filtered**: owner sees all roles; non-owner only sees `role='user:<chatId>'` memories
+- **Type-filtered**: `store.search()` accepts a `types` option that adds `AND c.type IN (...)` to the SQL query
+- **Recency fallback**: when FTS query is all stopwords (e.g. "what did we talk about last"), `store.recentByType()` returns the most recent `type='conv'` chunks by `created_at DESC` — same role/type filtering, no FTS match required
 - **Not owner_only**: customers can recall their own scoped memories too
 
 ---
 
 ## 6. Data Isolation + Chunk Scoping
 
-### Scope model
+### Schema: type / element / role
 
-Every chunk in the FTS index has a `scope` column that controls who can see it:
+Every chunk has three orthogonal fields:
 
-| Scope | Meaning | Who can query | Auto-labeled by |
-|-------|---------|---------------|-----------------|
-| `kb` | Public knowledge base | Everyone | `/index <path> kb` |
+| Field | Values | Purpose |
+|-------|--------|---------|
+| `type` | `kb`, `conv` | Chunk category — documents vs conversation summaries |
+| `element` | `pdf`, `docx`, `md`, `txt`, `chat` | Source format |
+| `role` | `public`, `admin`, `user:<chatId>` | Access control |
+
+### Role model
+
+Every chunk in the FTS index has a `role` column that controls who can see it:
+
+| Role | Meaning | Who can query | Auto-labeled by |
+|------|---------|---------------|-----------------|
+| `public` | Public knowledge base | Everyone | `/index <path> public` |
 | `admin` | Admin-only documents + admin conversation summaries | Admin only | `/index <path> admin`, admin capture |
 | `user:<chatId>` | That specific customer's conversation summaries | That customer + admin | Customer capture (automatic) |
 
-### Indexing with explicit scope
+### Indexing with explicit role
 
 ```
-/index <path>           → bot asks: "Label as kb or admin?"
-/index <path> kb        → indexed as scope=kb (public knowledge)
-/index <path> admin     → indexed as scope=admin (owner only)
-Customer capture fires  → auto-labeled scope=user:<chatId>
-Admin capture fires     → auto-labeled scope=admin
+/index <path>            → bot asks: "Label as public or admin?"
+/index <path> public     → type=kb, element=<auto>, role=public
+/index <path> admin      → type=kb, element=<auto>, role=admin
+Customer capture fires   → type=conv, element=chat, role=user:<chatId>
+Admin capture fires      → type=conv, element=chat, role=admin
 ```
 
-No silent defaults on manual indexing. Admin always declares intent. Customers never choose.
+No silent defaults on manual indexing. Admin always declares intent. Customers never choose. Old `kb` accepted as alias for `public`.
 
-### Hard scope filtering (SQL-level)
+### Hard role filtering (SQL-level)
 
-Search function takes caller context and applies scope filter at the database level:
+Search function takes caller context and applies role filter at the database level:
 
 ```sql
--- Customer query: only sees kb + their own history
-WHERE scope IN ('kb', 'user:<their_chatId>')
+-- Customer query: only sees public + their own history
+WHERE role IN ('public', 'user:<their_chatId>')
 
--- Admin query: sees everything
-WHERE scope IN ('kb', 'admin', 'user:*')  -- or no scope filter
+-- Admin query: sees everything (no role filter)
 ```
 
-Chunks outside scope **never reach the LLM context**. This is the hard boundary.
+Chunks outside role **never reach the LLM context**. This is the hard boundary.
 
 ### Prompt injection defense
 
 | Layer | What | How |
 |-------|------|-----|
-| **Hard scope** | SQL WHERE clause | Chunks from other users never in LLM context |
+| **Hard role filter** | SQL WHERE clause | Chunks from other users never in LLM context |
 | **Excluded context** | No admin memory.md in business prompts | Business-mode system prompt only loads customer memory + kb chunks |
 | **Pattern detection** | Flag suspicious queries | "ignore instructions", "system prompt", "show all users", "SELECT", references to other users |
 | **Rate limiting** | Track queries per chatId per hour | Flag anomalies (many broad queries, repeated "show all" patterns) |
@@ -455,7 +464,7 @@ Current 2-role model with flat allowlist is correct for now. ABAC is the upgrade
 Customer asks a question
   │
   ├─ Tier 1: Knowledge Base (automatic)
-  │   Search scope=kb chunks via FTS5
+  │   Search role=public chunks via FTS5
   │   If confident answer found → respond with citation
   │
   ├─ Tier 2: Allowed URLs (automatic)
@@ -611,7 +620,7 @@ multis start
 | `config.json` | `~/.multis/` | Main config — all behavioral settings with defaults |
 | `governance.json` | `~/.multis/` | Command allowlist/denylist |
 | `.env` | Project root | API keys (overrides config.json) |
-| `documents.db` | `~/.multis/` | SQLite: document chunks + FTS5 (with scope column) |
+| `documents.db` | `~/.multis/` | SQLite: document chunks + FTS5 (type/element/role columns) |
 | `audit.log` | `~/.multis/` | Append-only audit log |
 | `prompt_injection_audit.log` | `~/.multis/` | Prompt injection detection log |
 | `beeper-token.json` | `~/.multis/` | Beeper Desktop API token |
@@ -713,7 +722,7 @@ Markdown files in `skills/` that define capabilities and policy. Skills are the 
 
 1. **Governance skills**: `shell.md`, `files.md` — what commands are allowed/denied
 2. **LLM skills**: `capture.md` — instructions for LLM extraction
-3. **Policy skills** (POC6+): `customer-support.md` — define scope, allowed actions, memory rules per role
+3. **Policy skills** (POC6+): `customer-support.md` — define role, allowed actions, memory rules per role
 
 ### Policy skill format
 
@@ -721,7 +730,7 @@ Markdown files in `skills/` that define capabilities and policy. Skills are the 
 ---
 name: customer-support
 description: Handle customer queries from business-mode chats
-scope: kb + user:$chatId
+roles: public + user:$chatId
 escalation: true
 allowed_urls: from config
 actions: none

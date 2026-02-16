@@ -63,8 +63,6 @@ class DocumentStore {
 
       CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_path);
       CREATE INDEX IF NOT EXISTS idx_chunks_element ON chunks(element_type);
-      CREATE INDEX IF NOT EXISTS idx_chunks_type_v2 ON chunks(type);
-      CREATE INDEX IF NOT EXISTS idx_chunks_role ON chunks(role);
       CREATE INDEX IF NOT EXISTS idx_chunks_activation ON chunks(activation DESC);
 
       -- FTS5 virtual table for full-text search (BM25)
@@ -120,10 +118,14 @@ class DocumentStore {
         UPDATE chunks SET role = scope WHERE scope != 'kb';
         UPDATE chunks SET element_type = 'chat' WHERE document_type = 'conversation';
         UPDATE chunks SET element_type = document_type WHERE document_type IN ('pdf','docx','md','txt');
-        CREATE INDEX IF NOT EXISTS idx_chunks_type_v2 ON chunks(type);
-        CREATE INDEX IF NOT EXISTS idx_chunks_role ON chunks(role);
       `);
     }
+
+    // Ensure indexes on type/role exist (after migration or on fresh DBs)
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_chunks_type_v2 ON chunks(type);
+      CREATE INDEX IF NOT EXISTS idx_chunks_role ON chunks(role);
+    `);
   }
 
   /**

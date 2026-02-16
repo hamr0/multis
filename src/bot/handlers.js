@@ -259,7 +259,7 @@ function createMessageRouter(config, deps = {}) {
     }
 
     // PIN check for protected owner commands
-    if (PIN_PROTECTED.has(command) && isOwner(msg.senderId, config)) {
+    if (PIN_PROTECTED.has(command) && isOwner(msg.senderId, config, msg)) {
       const authNeeded = pinManager.needsAuth(msg.senderId);
       if (authNeeded === 'locked') {
         await platform.send(msg.chatId, 'Account locked due to failed PIN attempts. Try again later.');
@@ -339,7 +339,7 @@ async function executeCommand(command, args, msg, platform, config, indexer, llm
 }
 
 async function routePinChange(msg, platform, config, pinManager) {
-  if (!isOwner(msg.senderId, config)) {
+  if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only command.');
     return;
   }
@@ -418,7 +418,7 @@ async function routeStart(msg, platform, config, code) {
 }
 
 async function routeStatus(msg, platform, config) {
-  const owner = isOwner(msg.senderId, config);
+  const owner = isOwner(msg.senderId, config, msg);
   const info = [
     'multis bot v0.1.0',
     `Platform: ${msg.platform}`,
@@ -441,7 +441,7 @@ async function routeUnpair(msg, platform, config) {
 }
 
 async function routeExec(msg, platform, config, command) {
-  if (!isOwner(msg.senderId, config)) {
+  if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only command.');
     return;
   }
@@ -467,7 +467,7 @@ async function routeExec(msg, platform, config, command) {
 }
 
 async function routeRead(msg, platform, config, filePath) {
-  if (!isOwner(msg.senderId, config)) {
+  if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only command.');
     return;
   }
@@ -489,7 +489,7 @@ async function routeRead(msg, platform, config, filePath) {
 }
 
 async function routeIndex(msg, platform, config, indexer, args) {
-  if (!isOwner(msg.senderId, config)) {
+  if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only command.');
     return;
   }
@@ -538,7 +538,7 @@ async function routeSearch(msg, platform, config, indexer, query) {
     return;
   }
 
-  const admin = isOwner(msg.senderId, config);
+  const admin = isOwner(msg.senderId, config, msg);
   const roles = admin ? undefined : ['public', `user:${msg.chatId}`];
   const results = indexer.search(query, 5, { roles });
 
@@ -624,7 +624,7 @@ async function routeAsk(msg, platform, config, indexer, llm, question, getMem, m
     return;
   }
 
-  const admin = isOwner(msg.senderId, config);
+  const admin = isOwner(msg.senderId, config, msg);
 
   // Prompt injection detection for non-admin chats
   if (!admin && config.security?.prompt_injection_detection) {
@@ -779,7 +779,7 @@ async function routeAsk(msg, platform, config, indexer, llm, question, getMem, m
 }
 
 async function routeMemory(msg, platform, config, getMem) {
-  const mem = getMem(msg.chatId, { isAdmin: isOwner(msg.senderId, config) });
+  const mem = getMem(msg.chatId, { isAdmin: isOwner(msg.senderId, config, msg) });
   const memory = mem.loadMemory();
   if (!memory.trim()) {
     await platform.send(msg.chatId, 'No memory notes for this chat yet.');
@@ -789,7 +789,7 @@ async function routeMemory(msg, platform, config, getMem) {
 }
 
 async function routeForget(msg, platform, config, getMem) {
-  const mem = getMem(msg.chatId, { isAdmin: isOwner(msg.senderId, config) });
+  const mem = getMem(msg.chatId, { isAdmin: isOwner(msg.senderId, config, msg) });
   mem.clearMemory();
   await platform.send(msg.chatId, 'Memory cleared for this chat.');
   logAudit({ action: 'forget', user_id: msg.senderId, chatId: msg.chatId });
@@ -801,7 +801,7 @@ async function routeRemember(msg, platform, config, getMem, note) {
     await platform.send(msg.chatId, `Usage: ${prefix}remember <note>`);
     return;
   }
-  const mem = getMem(msg.chatId, { isAdmin: isOwner(msg.senderId, config) });
+  const mem = getMem(msg.chatId, { isAdmin: isOwner(msg.senderId, config, msg) });
   mem.appendMemory(note);
   await platform.send(msg.chatId, 'Noted.');
   logAudit({ action: 'remember', user_id: msg.senderId, chatId: msg.chatId, note });
@@ -811,7 +811,7 @@ const VALID_MODES = ['personal', 'business', 'silent'];
 
 async function routeMode(msg, platform, config, args, agentRegistry) {
   // Owner-only (PIN already checked by router for owner commands)
-  if (!isOwner(msg.senderId, config)) {
+  if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only command.');
     return;
   }
@@ -948,7 +948,7 @@ async function findBeeperChat(platform, search) {
 }
 
 async function routeAgent(msg, platform, config, args, agentRegistry) {
-  if (!isOwner(msg.senderId, config)) {
+  if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only command.');
     return;
   }
@@ -1007,7 +1007,7 @@ async function routeHelp(msg, platform, config) {
     '',
     'Plain text messages are treated as questions.'
   ];
-  if (isOwner(msg.senderId, config)) {
+  if (isOwner(msg.senderId, config, msg)) {
     cmds.splice(1, 0,
       `${prefix}exec <cmd> - Run a shell command (owner)`,
       `${prefix}read <path> - Read a file or directory (owner)`,
@@ -1025,7 +1025,7 @@ async function routeHelp(msg, platform, config) {
 
 async function handleDocumentUpload(msg, platform, config, indexer) {
   if (!isPaired(msg, config)) return;
-  if (!isOwner(msg.senderId, config)) {
+  if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only. Documents not accepted from non-owners.');
     return;
   }

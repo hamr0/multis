@@ -79,11 +79,11 @@ describe('BeeperPlatform', () => {
       assert.strictEqual(bp.commandPrefix, '!!');
     });
 
-    it('initializes empty selfIds and lastSeen', () => {
+    it('initializes empty selfIds and seen set', () => {
       const { BeeperPlatform } = loadBeeper();
       const bp = new BeeperPlatform(makeConfig());
       assert.strictEqual(bp.selfIds.size, 0);
-      assert.deepStrictEqual(bp._lastSeen, {});
+      assert.strictEqual(bp._seen.size, 0);
       assert.strictEqual(bp._initialized, false);
     });
   });
@@ -267,7 +267,7 @@ describe('BeeperPlatform', () => {
   // -------------------------------------------------------------------------
 
   describe('_seedLastSeen', () => {
-    it('seeds lastSeen from latest message IDs', async () => {
+    it('seeds seen set from latest message IDs', async () => {
       const { BeeperPlatform } = loadBeeper();
       const bp = new BeeperPlatform(makeConfig());
 
@@ -288,8 +288,8 @@ describe('BeeperPlatform', () => {
       };
 
       await bp._seedLastSeen();
-      assert.strictEqual(bp._lastSeen['chatA'], 100);
-      assert.strictEqual(bp._lastSeen['chatB'], 200);
+      assert.ok(bp._seen.has('100'));
+      assert.ok(bp._seen.has('200'));
     });
 
     it('detects personal/self chats (single + <=1 participant)', async () => {
@@ -318,7 +318,7 @@ describe('BeeperPlatform', () => {
       const bp = new BeeperPlatform(makeConfig());
       bp._api = async () => { throw new Error('network down'); };
       await bp._seedLastSeen(); // should not throw
-      assert.deepStrictEqual(bp._lastSeen, {});
+      assert.strictEqual(bp._seen.size, 0);
     });
   });
 
@@ -436,7 +436,7 @@ describe('BeeperPlatform', () => {
 
     it('skips already-seen messages (dedup)', async () => {
       const bp = makeBp(loadBeeper);
-      bp._lastSeen['c1'] = 10;
+      bp._seen.add('10');
       const received = [];
       bp.onMessage(async (msg) => received.push(msg));
 
@@ -449,9 +449,9 @@ describe('BeeperPlatform', () => {
       assert.strictEqual(received.length, 0);
     });
 
-    it('processes only new messages after lastSeen', async () => {
+    it('processes only new messages, skips seen', async () => {
       const bp = makeBp(loadBeeper);
-      bp._lastSeen['c1'] = 5;
+      bp._seen.add('4');
       const received = [];
       bp.onMessage(async (msg) => received.push(msg));
 
@@ -470,10 +470,10 @@ describe('BeeperPlatform', () => {
       assert.strictEqual(received.length, 2);
       assert.strictEqual(received[0].text, '//older');
       assert.strictEqual(received[1].text, '//newer');
-      assert.strictEqual(bp._lastSeen['c1'], 8);
+      assert.ok(bp._seen.has('8'));
     });
 
-    it('updates lastSeen after processing', async () => {
+    it('adds processed message IDs to seen set', async () => {
       const bp = makeBp(loadBeeper);
       const received = [];
       bp.onMessage(async (msg) => received.push(msg));
@@ -484,7 +484,7 @@ describe('BeeperPlatform', () => {
       );
 
       await bp._poll();
-      assert.strictEqual(bp._lastSeen['c1'], 42);
+      assert.ok(bp._seen.has('42'));
     });
 
     it('creates normalized Message with correct fields', async () => {
@@ -499,7 +499,7 @@ describe('BeeperPlatform', () => {
 
       await bp._poll();
       const m = received[0];
-      assert.strictEqual(m.id, 10);
+      assert.strictEqual(m.id, '10');
       assert.strictEqual(m.platform, 'beeper');
       assert.strictEqual(m.chatId, 'c1');
       assert.strictEqual(m.chatName, 'Work Chat');
@@ -519,7 +519,7 @@ describe('BeeperPlatform', () => {
 
       // Should not throw
       await bp._poll();
-      assert.strictEqual(bp._lastSeen['c1'], 10);
+      assert.ok(bp._seen.has('10'));
     });
 
     it('handles poll API errors gracefully', async () => {
