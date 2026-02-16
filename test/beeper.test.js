@@ -12,6 +12,9 @@ function tmpHome() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'beeper-test-'));
   const multisDir = path.join(dir, '.multis');
   fs.mkdirSync(multisDir, { recursive: true });
+  for (const sub of ['data', 'auth', 'logs', 'run']) {
+    fs.mkdirSync(path.join(multisDir, sub), { recursive: true });
+  }
   return { dir, multisDir, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
 }
 
@@ -93,10 +96,10 @@ describe('BeeperPlatform', () => {
   // -------------------------------------------------------------------------
 
   describe('_loadToken', () => {
-    it('loads token from ~/.multis/beeper-token.json', () => {
+    it('loads token from ~/.multis/auth/beeper-token.json', () => {
       const { BeeperPlatform } = loadBeeper();
       fs.writeFileSync(
-        path.join(tmp.multisDir, 'beeper-token.json'),
+        path.join(tmp.multisDir, 'auth', 'beeper-token.json'),
         JSON.stringify({ access_token: 'tok_123' })
       );
       const bp = new BeeperPlatform(makeConfig());
@@ -111,7 +114,7 @@ describe('BeeperPlatform', () => {
 
     it('returns null for malformed token file', () => {
       const { BeeperPlatform } = loadBeeper();
-      fs.writeFileSync(path.join(tmp.multisDir, 'beeper-token.json'), 'not json');
+      fs.writeFileSync(path.join(tmp.multisDir, 'auth', 'beeper-token.json'), 'not json');
       const bp = new BeeperPlatform(makeConfig());
       assert.strictEqual(bp._loadToken(), null);
     });
@@ -212,7 +215,7 @@ describe('BeeperPlatform', () => {
     it('aborts when API call fails', async () => {
       const { BeeperPlatform } = loadBeeper();
       fs.writeFileSync(
-        path.join(tmp.multisDir, 'beeper-token.json'),
+        path.join(tmp.multisDir, 'auth', 'beeper-token.json'),
         JSON.stringify({ access_token: 'bad_tok' })
       );
       const bp = new BeeperPlatform(makeConfig());
@@ -224,7 +227,7 @@ describe('BeeperPlatform', () => {
     it('populates selfIds from accounts response', async () => {
       const { BeeperPlatform } = loadBeeper();
       fs.writeFileSync(
-        path.join(tmp.multisDir, 'beeper-token.json'),
+        path.join(tmp.multisDir, 'auth', 'beeper-token.json'),
         JSON.stringify({ access_token: 'good_tok' })
       );
       const bp = new BeeperPlatform(makeConfig());

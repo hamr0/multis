@@ -1,16 +1,14 @@
 const fs = require('fs');
 const path = require('path');
+const { PATHS } = require('../config');
 
 /**
  * Log an action to the audit log (append-only, newline-delimited JSON)
  * @param {Object} entry - Audit log entry
  */
 function logAudit(entry) {
-  const auditPath = path.join(
-    process.env.HOME || process.env.USERPROFILE,
-    '.multis',
-    'audit.log'
-  );
+  const auditPath = PATHS.auditLog();
+  fs.mkdirSync(path.dirname(auditPath), { recursive: true });
 
   const logEntry = {
     timestamp: new Date().toISOString(),
@@ -29,11 +27,7 @@ function logAudit(entry) {
  * @returns {Array} - Recent audit log entries
  */
 function readAuditLogs(limit = 100) {
-  const auditPath = path.join(
-    process.env.HOME || process.env.USERPROFILE,
-    '.multis',
-    'audit.log'
-  );
+  const auditPath = PATHS.auditLog();
 
   if (!fs.existsSync(auditPath)) {
     return [];

@@ -1,9 +1,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { MULTIS_DIR } = require('../config');
-
-const SESSIONS_PATH = path.join(MULTIS_DIR, 'pin_sessions.json');
+const { PATHS } = require('../config');
 
 function hashPin(pin) {
   return crypto.createHash('sha256').update(String(pin)).digest('hex');
@@ -104,17 +102,17 @@ class PinManager {
 
   _loadSessions() {
     try {
-      if (fs.existsSync(SESSIONS_PATH)) {
-        return JSON.parse(fs.readFileSync(SESSIONS_PATH, 'utf-8'));
+      if (fs.existsSync(PATHS.pinSessions())) {
+        return JSON.parse(fs.readFileSync(PATHS.pinSessions(), 'utf-8'));
       }
     } catch { /* ignore corrupt file */ }
     return {};
   }
 
   _saveSessions() {
-    const dir = path.dirname(SESSIONS_PATH);
+    const dir = path.dirname(PATHS.pinSessions());
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(SESSIONS_PATH, JSON.stringify(this.sessions, null, 2));
+    fs.writeFileSync(PATHS.pinSessions(), JSON.stringify(this.sessions, null, 2));
   }
 }
 

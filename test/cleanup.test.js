@@ -20,7 +20,7 @@ describe('cleanupLogs', () => {
   });
 
   function createLogFile(chatId, dateStr, content = '# log') {
-    const logDir = path.join(tmpDir, '.multis', 'memory', 'chats', chatId, 'log');
+    const logDir = path.join(tmpDir, '.multis', 'data', 'memory', 'chats', chatId, 'log');
     fs.mkdirSync(logDir, { recursive: true });
     fs.writeFileSync(path.join(logDir, `${dateStr}.md`), content);
   }
@@ -47,10 +47,10 @@ describe('cleanupLogs', () => {
     assert.strictEqual(result.deleted, 2, 'should delete 2 old files');
     assert.strictEqual(result.errors, 0);
 
-    const recentPath = path.join(tmpDir, '.multis', 'memory', 'chats', 'chat1', 'log', `${recentStr}.md`);
+    const recentPath = path.join(tmpDir, '.multis', 'data', 'memory', 'chats', 'chat1', 'log', `${recentStr}.md`);
     assert.ok(fs.existsSync(recentPath), 'recent log should still exist');
 
-    const oldPath = path.join(tmpDir, '.multis', 'memory', 'chats', 'chat1', 'log', `${oldStr}.md`);
+    const oldPath = path.join(tmpDir, '.multis', 'data', 'memory', 'chats', 'chat1', 'log', `${oldStr}.md`);
     assert.ok(!fs.existsSync(oldPath), 'old log should be deleted');
   });
 
@@ -77,7 +77,7 @@ describe('cleanupLogs', () => {
     process.env.HOME = tmpDir;
     const { cleanupLogs } = require('../src/maintenance/cleanup');
 
-    const logDir = path.join(tmpDir, '.multis', 'memory', 'chats', 'chat-skip', 'log');
+    const logDir = path.join(tmpDir, '.multis', 'data', 'memory', 'chats', 'chat-skip', 'log');
     fs.mkdirSync(logDir, { recursive: true });
     fs.writeFileSync(path.join(logDir, 'notes.txt'), 'not a date file');
 

@@ -1,8 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { MULTIS_DIR } = require('../config');
-
-const AUDIT_PATH = path.join(MULTIS_DIR, 'prompt_injection_audit.log');
+const { PATHS } = require('../config');
 
 const INJECTION_PATTERNS = [
   /ignore\s+(all\s+)?(previous\s+)?instructions/i,
@@ -37,13 +35,13 @@ function detectInjection(text) {
  * Log a prompt injection attempt to dedicated audit file.
  */
 function logInjectionAttempt(entry) {
-  const dir = path.dirname(AUDIT_PATH);
+  const dir = path.dirname(PATHS.injectionLog());
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const line = JSON.stringify({
     timestamp: new Date().toISOString(),
     ...entry
   }) + '\n';
-  fs.appendFileSync(AUDIT_PATH, line);
+  fs.appendFileSync(PATHS.injectionLog(), line);
 }
 
 module.exports = { detectInjection, logInjectionAttempt };

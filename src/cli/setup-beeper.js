@@ -18,9 +18,9 @@ const readline = require('readline');
 const { execSync } = require('child_process');
 
 const BASE = 'http://localhost:23373';
-const MULTIS_DIR = path.join(process.env.HOME || process.env.USERPROFILE, '.multis');
-const TOKEN_FILE = path.join(MULTIS_DIR, 'beeper-token.json');
-const CONFIG_PATH = path.join(MULTIS_DIR, 'config.json');
+const { PATHS, getMultisDir } = require('../config');
+const TOKEN_FILE = PATHS.beeperToken();
+const CONFIG_PATH = PATHS.config();
 
 function prompt(question) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -50,7 +50,8 @@ function loadToken() {
 }
 
 function saveToken(tokenData) {
-  if (!fs.existsSync(MULTIS_DIR)) fs.mkdirSync(MULTIS_DIR, { recursive: true });
+  const dir = path.dirname(TOKEN_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokenData, null, 2));
 }
 

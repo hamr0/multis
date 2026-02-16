@@ -1,16 +1,13 @@
 const fs = require('fs');
 const path = require('path');
+const { PATHS } = require('../config');
 
 /**
  * Load governance configuration
  * @returns {Object} Governance config
  */
 function loadGovernance() {
-  const configPath = path.join(
-    process.env.HOME || process.env.USERPROFILE,
-    '.multis',
-    'governance.json'
-  );
+  const configPath = PATHS.governance();
 
   if (!fs.existsSync(configPath)) {
     throw new Error('Governance config not found. Run: multis init');

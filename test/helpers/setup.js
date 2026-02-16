@@ -14,6 +14,11 @@ function createTestEnv(overrides = {}) {
   const multisDir = path.join(tmpDir, '.multis');
   fs.mkdirSync(multisDir, { recursive: true });
 
+  // Create organized subdirs
+  for (const sub of ['data', 'auth', 'logs', 'run']) {
+    fs.mkdirSync(path.join(multisDir, sub), { recursive: true });
+  }
+
   // Redirect config module to use temp dir
   setMultisDir(multisDir);
 
@@ -29,12 +34,13 @@ function createTestEnv(overrides = {}) {
   };
 
   fs.writeFileSync(path.join(multisDir, 'config.json'), JSON.stringify(config));
-  fs.writeFileSync(path.join(multisDir, 'governance.json'), JSON.stringify({
-    allowlist: ['.*'], denylist: [], confirm_patterns: []
+  fs.writeFileSync(path.join(multisDir, 'auth', 'governance.json'), JSON.stringify({
+    commands: { allowlist: ['.*'], denylist: [], requireConfirmation: [] },
+    paths: { allowed: ['.*'], denied: [] }
   }));
 
   // Memory base dir for test isolation (prevents leaking into real ~/.multis/memory/)
-  const memoryBaseDir = path.join(multisDir, 'memory', 'chats');
+  const memoryBaseDir = path.join(multisDir, 'data', 'memory', 'chats');
 
   return {
     tmpDir,

@@ -6,7 +6,7 @@ const { logAudit } = require('../governance/audit');
 
 const DEFAULT_URL = 'http://localhost:23373';
 const DEFAULT_POLL_INTERVAL = 3000;
-const TOKEN_FILE = path.join(process.env.HOME || process.env.USERPROFILE, '.multis', 'beeper-token.json');
+const { PATHS } = require('../config');
 
 /**
  * Beeper Desktop API platform adapter.
@@ -226,7 +226,7 @@ class BeeperPlatform extends Platform {
 
   _loadToken() {
     try {
-      const data = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
+      const data = JSON.parse(fs.readFileSync(PATHS.beeperToken(), 'utf8'));
       return data.access_token;
     } catch {
       // Also check legacy location

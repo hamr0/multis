@@ -10,37 +10,97 @@ function getMultisDir() {
 }
 function setMultisDir(dir) { _multisDir = dir; }
 
-// Legacy constants — point to default location. Internal code should use getters.
+// Centralized path getters — all code should use PATHS instead of hardcoding
+const PATHS = {
+  config:       () => path.join(getMultisDir(), 'config.json'),
+  tools:        () => path.join(getMultisDir(), 'tools.json'),
+  db:           () => path.join(getMultisDir(), 'data', 'documents.db'),
+  memory:       () => path.join(getMultisDir(), 'data', 'memory', 'chats'),
+  governance:   () => path.join(getMultisDir(), 'auth', 'governance.json'),
+  pinSessions:  () => path.join(getMultisDir(), 'auth', 'pin_sessions.json'),
+  beeperToken:  () => path.join(getMultisDir(), 'auth', 'beeper-token.json'),
+  auditLog:     () => path.join(getMultisDir(), 'logs', 'audit.log'),
+  injectionLog: () => path.join(getMultisDir(), 'logs', 'injection.log'),
+  daemonLog:    () => path.join(getMultisDir(), 'logs', 'daemon.log'),
+  pid:          () => path.join(getMultisDir(), 'run', 'multis.pid'),
+};
+
+// Legacy constants — point to default location. Prefer PATHS for new code.
 const MULTIS_DIR = path.join(process.env.HOME || process.env.USERPROFILE, '.multis');
 const CONFIG_PATH = path.join(MULTIS_DIR, 'config.json');
-const GOVERNANCE_PATH = path.join(MULTIS_DIR, 'governance.json');
 
 /**
- * Ensure ~/.multis directory exists with default config files
+ * Migrate flat ~/.multis layout to organized subdirs.
+ * Idempotent — skips files that don't exist at old paths or already exist at new paths.
+ */
+function migrateLegacy() {
+  const dir = getMultisDir();
+
+  // Create subdirs
+  for (const sub of ['data', 'auth', 'logs', 'run']) {
+    const subDir = path.join(dir, sub);
+    if (!fs.existsSync(subDir)) fs.mkdirSync(subDir, { recursive: true });
+  }
+
+  // Move individual files: [oldRelative, newRelative]
+  const moves = [
+    ['documents.db',             'data/documents.db'],
+    ['governance.json',          'auth/governance.json'],
+    ['pin_sessions.json',        'auth/pin_sessions.json'],
+    ['beeper-token.json',        'auth/beeper-token.json'],
+    ['audit.log',                'logs/audit.log'],
+    ['prompt_injection_audit.log', 'logs/injection.log'],
+    ['daemon.log',               'logs/daemon.log'],
+    ['multis.pid',               'run/multis.pid'],
+  ];
+
+  for (const [oldRel, newRel] of moves) {
+    const oldPath = path.join(dir, oldRel);
+    const newPath = path.join(dir, newRel);
+    if (fs.existsSync(oldPath) && !fs.existsSync(newPath)) {
+      fs.mkdirSync(path.dirname(newPath), { recursive: true });
+      fs.renameSync(oldPath, newPath);
+    }
+  }
+
+  // Move memory/ → data/memory/ (entire directory)
+  const oldMemDir = path.join(dir, 'memory');
+  const newMemDir = path.join(dir, 'data', 'memory');
+  if (fs.existsSync(oldMemDir) && !fs.existsSync(newMemDir)) {
+    fs.renameSync(oldMemDir, newMemDir);
+  }
+}
+
+/**
+ * Ensure ~/.multis directory exists with default config files and organized subdirs
  */
 function ensureMultisDir() {
   const dir = getMultisDir();
-  const configPath = path.join(dir, 'config.json');
-  const govPath = path.join(dir, 'governance.json');
 
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
 
+  // Migrate flat layout to subdirs (idempotent)
+  migrateLegacy();
+
   // Copy default config if not present
+  const configPath = PATHS.config();
   if (!fs.existsSync(configPath)) {
     const templateDir = path.join(__dirname, '..', '.multis-template');
     fs.copyFileSync(path.join(templateDir, 'config.json'), configPath);
   }
 
   // Copy default governance if not present
+  const govPath = PATHS.governance();
   if (!fs.existsSync(govPath)) {
     const templateDir = path.join(__dirname, '..', '.multis-template');
+    fs.mkdirSync(path.dirname(govPath), { recursive: true });
     fs.copyFileSync(path.join(templateDir, 'governance.json'), govPath);
   }
 
   // Copy default tools config if not present
-  const toolsPath = path.join(dir, 'tools.json');
+  const toolsPath = PATHS.tools();
   if (!fs.existsSync(toolsPath)) {
     const templateDir = path.join(__dirname, '..', '.multis-template');
     const toolsTemplate = path.join(templateDir, 'tools.json');
@@ -86,7 +146,7 @@ function loadConfig() {
   loadEnv();
   ensureMultisDir();
 
-  const configPath = path.join(getMultisDir(), 'config.json');
+  const configPath = PATHS.config();
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 
   // Ensure platforms block exists
@@ -177,7 +237,7 @@ function loadConfig() {
  */
 function saveConfig(config) {
   ensureMultisDir();
-  const configPath = path.join(getMultisDir(), 'config.json');
+  const configPath = PATHS.config();
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8');
 }
 
@@ -218,6 +278,7 @@ module.exports = {
   ensureMultisDir,
   getMultisDir,
   setMultisDir,
+  PATHS,
   MULTIS_DIR,
   CONFIG_PATH
 };

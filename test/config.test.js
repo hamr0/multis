@@ -29,8 +29,9 @@ describe('loadConfig — default merging', () => {
     };
     fs.writeFileSync(path.join(multisDir, 'config.json'), JSON.stringify(config, null, 2));
 
-    // Create governance.json so ensureMultisDir does not try to copy from template
-    fs.writeFileSync(path.join(multisDir, 'governance.json'), JSON.stringify({ allowlist: [], denylist: [] }));
+    // Create subdirs and governance.json so ensureMultisDir does not try to copy from template
+    fs.mkdirSync(path.join(multisDir, 'auth'), { recursive: true });
+    fs.writeFileSync(path.join(multisDir, 'auth', 'governance.json'), JSON.stringify({ allowlist: [], denylist: [] }));
   });
 
   after(() => {

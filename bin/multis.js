@@ -6,9 +6,10 @@ const path = require('path');
 const readline = require('readline');
 const crypto = require('crypto');
 
-const MULTIS_DIR = path.join(process.env.HOME || process.env.USERPROFILE, '.multis');
-const PID_PATH = path.join(MULTIS_DIR, 'multis.pid');
-const CONFIG_PATH = path.join(MULTIS_DIR, 'config.json');
+const { PATHS, getMultisDir } = require('../src/config');
+const MULTIS_DIR = getMultisDir();
+const PID_PATH = PATHS.pid();
+const CONFIG_PATH = PATHS.config();
 const SRC_INDEX = path.join(__dirname, '..', 'src', 'index.js');
 
 const command = process.argv[2];
@@ -483,14 +484,15 @@ async function runInit() {
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
 
   // Copy governance template if not present
-  const govPath = path.join(MULTIS_DIR, 'governance.json');
+  const govPath = PATHS.governance();
   const govTemplate = path.join(__dirname, '..', '.multis-template', 'governance.json');
   if (!fs.existsSync(govPath) && fs.existsSync(govTemplate)) {
+    fs.mkdirSync(path.dirname(govPath), { recursive: true });
     fs.copyFileSync(govTemplate, govPath);
   }
 
   // Copy tools template if not present
-  const toolsPath = path.join(MULTIS_DIR, 'tools.json');
+  const toolsPath = PATHS.tools();
   const toolsTemplate = path.join(__dirname, '..', '.multis-template', 'tools.json');
   if (!fs.existsSync(toolsPath) && fs.existsSync(toolsTemplate)) {
     fs.copyFileSync(toolsTemplate, toolsPath);
@@ -580,7 +582,8 @@ function runStart() {
     process.exit(1);
   }
 
-  const logPath = path.join(MULTIS_DIR, 'daemon.log');
+  const logPath = PATHS.daemonLog();
+  fs.mkdirSync(path.dirname(logPath), { recursive: true });
   const logFd = fs.openSync(logPath, 'a');
 
   const child = spawn('node', [SRC_INDEX], {
@@ -772,7 +775,7 @@ async function runDoctor() {
 
     // Check defaults reference valid agents
     if (config.defaults && typeof config.defaults === 'object') {
-      const validModes = ['personal', 'business'];
+      const validModes = ['off', 'business', 'silent'];
       for (const [mode, agentName] of Object.entries(config.defaults)) {
         if (!validModes.includes(mode)) {
           warnings.push(`default "${mode}" is not a valid mode`);
@@ -805,7 +808,7 @@ async function runDoctor() {
 
   // SQLite DB
   check('SQLite database', () => {
-    const dbPath = path.join(MULTIS_DIR, 'documents.db');
+    const dbPath = PATHS.db();
     if (!fs.existsSync(dbPath)) return { ok: true, detail: 'not created yet (OK)' };
     try {
       const Database = require('better-sqlite3');
@@ -822,13 +825,13 @@ async function runDoctor() {
 
   // Audit log
   check('Audit log', () => {
-    const auditPath = path.join(MULTIS_DIR, 'audit.log');
+    const auditPath = PATHS.auditLog();
     return { ok: true, detail: fs.existsSync(auditPath) ? 'exists' : 'will be created on first event' };
   });
 
   // Memory directories
   check('Memory directories', () => {
-    const memDir = path.join(MULTIS_DIR, 'memory', 'chats');
+    const memDir = PATHS.memory();
     if (!fs.existsSync(memDir)) return { ok: true, detail: 'not created yet (OK)' };
     const dirs = fs.readdirSync(memDir, { withFileTypes: true }).filter(d => d.isDirectory());
     return { ok: true, detail: `${dirs.length} chat(s)` };
@@ -845,7 +848,7 @@ async function runDoctor() {
 
   // Governance
   check('Governance config', () => {
-    const govPath = path.join(MULTIS_DIR, 'governance.json');
+    const govPath = PATHS.governance();
     if (!fs.existsSync(govPath)) return { ok: false, detail: 'governance.json not found' };
     const gov = JSON.parse(fs.readFileSync(govPath, 'utf-8'));
     return { ok: true, detail: `allowlist: ${gov.allowlist?.length || 0}, denylist: ${gov.denylist?.length || 0}` };
@@ -853,7 +856,7 @@ async function runDoctor() {
 
   // Tools config
   check('Tools config', () => {
-    const toolsPath = path.join(MULTIS_DIR, 'tools.json');
+    const toolsPath = PATHS.tools();
     if (!fs.existsSync(toolsPath)) return { ok: true, detail: 'not found (will use defaults)' };
     try {
       const tools = JSON.parse(fs.readFileSync(toolsPath, 'utf-8'));

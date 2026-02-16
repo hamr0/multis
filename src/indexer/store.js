@@ -1,9 +1,7 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
-const { MULTIS_DIR } = require('../config');
-
-const DB_PATH = path.join(MULTIS_DIR, 'documents.db');
+const { PATHS } = require('../config');
 
 // ACT-R base-level activation: B_i = ln(Σ t_j^-d)
 // where t_j = seconds since j-th access, d = decay rate (default 0.5)
@@ -23,7 +21,7 @@ function safeParseArray(raw) {
  * ACT-R activation blended with BM25 for retrieval ranking.
  */
 class DocumentStore {
-  constructor(dbPath = DB_PATH) {
+  constructor(dbPath = PATHS.db()) {
     // Ensure directory exists
     const dir = path.dirname(dbPath);
     if (!fs.existsSync(dir)) {
@@ -419,4 +417,4 @@ class DocumentStore {
   }
 }
 
-module.exports = { DocumentStore, DB_PATH };
+module.exports = { DocumentStore };

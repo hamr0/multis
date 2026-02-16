@@ -60,13 +60,16 @@ describe('CLI commands', () => {
     // Create minimal config so doctor has something to check
     const multisDir = path.join(tmpDir, '.multis');
     fs.mkdirSync(multisDir, { recursive: true });
+    for (const sub of ['data', 'auth', 'logs', 'run']) {
+      fs.mkdirSync(path.join(multisDir, sub), { recursive: true });
+    }
     fs.writeFileSync(path.join(multisDir, 'config.json'), JSON.stringify({
       owner_id: 'test1',
       allowed_users: ['test1'],
       llm: { provider: 'ollama' },
       platforms: {}
     }));
-    fs.writeFileSync(path.join(multisDir, 'governance.json'), JSON.stringify({
+    fs.writeFileSync(path.join(multisDir, 'auth', 'governance.json'), JSON.stringify({
       allowlist: ['.*'], denylist: [], confirm_patterns: []
     }));
 
@@ -80,11 +83,12 @@ describe('CLI commands', () => {
     const multisDir = path.join(tmpDir, '.multis');
     fs.mkdirSync(multisDir, { recursive: true });
     // Write a PID that definitely doesn't exist
-    fs.writeFileSync(path.join(multisDir, 'multis.pid'), '999999999');
+    fs.mkdirSync(path.join(multisDir, 'run'), { recursive: true });
+    fs.writeFileSync(path.join(multisDir, 'run', 'multis.pid'), '999999999');
 
     const r = run('status');
     assert.match(r.stdout, /not running/);
     // PID file should be cleaned up
-    assert.strictEqual(fs.existsSync(path.join(multisDir, 'multis.pid')), false);
+    assert.strictEqual(fs.existsSync(path.join(multisDir, 'run', 'multis.pid')), false);
   });
 });

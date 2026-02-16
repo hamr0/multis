@@ -1,4 +1,4 @@
-const { loadConfig, ensureMultisDir, MULTIS_DIR } = require('./config');
+const { loadConfig, ensureMultisDir, PATHS } = require('./config');
 const { logAudit } = require('./governance/audit');
 const { createMessageRouter } = require('./bot/handlers');
 const { TelegramPlatform } = require('./platforms/telegram');
@@ -56,8 +56,9 @@ async function main() {
   console.log(`Running on: ${platforms.map(p => p.name).join(', ')}`);
 
   // Write PID file for daemon management
-  const pidPath = path.join(MULTIS_DIR, 'multis.pid');
-  fs.writeFileSync(pidPath, String(process.pid));
+  const pidDir = path.dirname(PATHS.pid());
+  if (!fs.existsSync(pidDir)) fs.mkdirSync(pidDir, { recursive: true });
+  fs.writeFileSync(PATHS.pid(), String(process.pid));
 
   // Run cleanup on startup
   try {

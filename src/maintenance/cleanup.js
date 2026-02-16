@@ -1,8 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { MULTIS_DIR } = require('../config');
-
-const MEMORY_CHATS_DIR = path.join(MULTIS_DIR, 'memory', 'chats');
+const { PATHS } = require('../config');
 
 /**
  * Delete daily log files older than maxDays across all chat directories.
@@ -14,12 +12,12 @@ function cleanupLogs(maxDays = 30) {
   let deleted = 0;
   let errors = 0;
 
-  if (!fs.existsSync(MEMORY_CHATS_DIR)) return { deleted, errors };
+  if (!fs.existsSync(PATHS.memory())) return { deleted, errors };
 
-  const chatDirs = fs.readdirSync(MEMORY_CHATS_DIR, { withFileTypes: true });
+  const chatDirs = fs.readdirSync(PATHS.memory(), { withFileTypes: true });
   for (const dir of chatDirs) {
     if (!dir.isDirectory()) continue;
-    const logDir = path.join(MEMORY_CHATS_DIR, dir.name, 'log');
+    const logDir = path.join(PATHS.memory(), dir.name, 'log');
     if (!fs.existsSync(logDir)) continue;
 
     const files = fs.readdirSync(logDir);

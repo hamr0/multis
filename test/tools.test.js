@@ -168,9 +168,12 @@ describe('executeTool', () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-tool-'));
     const multisDir = path.join(tmpDir, '.multis');
     fs.mkdirSync(multisDir, { recursive: true });
+    for (const sub of ['data', 'auth', 'logs', 'run']) {
+      fs.mkdirSync(path.join(multisDir, sub), { recursive: true });
+    }
     setMultisDir(multisDir);
     // Write governance that allows everything
-    fs.writeFileSync(path.join(multisDir, 'governance.json'), JSON.stringify({
+    fs.writeFileSync(path.join(multisDir, 'auth', 'governance.json'), JSON.stringify({
       commands: { allowlist: ['.*'], denylist: [], requireConfirmation: [] },
       paths: { allowed: ['.*'], denied: [] }
     }));

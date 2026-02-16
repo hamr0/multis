@@ -1,6 +1,6 @@
 const path = require('path');
 const { logAudit } = require('../governance/audit');
-const { addAllowedUser, isOwner, saveConfig, getMultisDir } = require('../config');
+const { addAllowedUser, isOwner, saveConfig, getMultisDir, PATHS } = require('../config');
 const { execCommand, readFile, listSkills } = require('../skills/executor');
 const { DocumentIndexer } = require('../indexer/index');
 const { createLLMClient } = require('../llm/client');
@@ -120,7 +120,7 @@ function isPaired(msgOrCtx, config) {
 function createMessageRouter(config, deps = {}) {
   const indexer = deps.indexer || new DocumentIndexer();
   const memoryManagers = deps.memoryManagers || new Map();
-  const _memBaseDir = deps.memoryBaseDir || path.join(getMultisDir(), 'memory', 'chats');
+  const _memBaseDir = deps.memoryBaseDir || PATHS.memory();
   const pinManager = deps.pinManager || new PinManager(config);
   const escalationRetries = deps.escalationRetries || new Map();
 
