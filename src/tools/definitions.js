@@ -53,6 +53,48 @@ const TOOLS = [
     }
   },
   {
+    name: 'grep_files',
+    description: 'Search file contents using grep. Finds lines matching a pattern in files under a directory. Use when the user wants to find text inside files on disk (not indexed documents).',
+    platforms: ['linux', 'macos', 'android'],
+    input_schema: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: 'Text or regex pattern to search for' },
+        path: { type: 'string', description: 'Directory or file to search in (~ expands to home). Default: ~' },
+        options: { type: 'string', description: 'Extra grep flags, e.g. "-i" for case-insensitive, "-l" for filenames only' }
+      },
+      required: ['pattern']
+    },
+    execute: async ({ pattern, path: searchPath, options: flags }, ctx) => {
+      const dir = (searchPath || '~').replace(/^~/, process.env.HOME || '');
+      const opts = flags || '-rn';
+      const cmd = `grep ${opts} ${JSON.stringify(pattern)} ${JSON.stringify(dir)}`;
+      const result = execCommand(cmd, ctx.senderId);
+      if (result.denied) return `Denied: ${result.reason}`;
+      return result.output || 'No matches found.';
+    }
+  },
+  {
+    name: 'find_files',
+    description: 'Find files by name pattern. Use when the user wants to locate a file on disk by its filename.',
+    platforms: ['linux', 'macos', 'android'],
+    input_schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Filename or glob pattern (e.g. "blueprint.md", "*.pdf")' },
+        path: { type: 'string', description: 'Directory to search in (~ expands to home). Default: ~' }
+      },
+      required: ['name']
+    },
+    execute: async ({ name, path: searchPath }, ctx) => {
+      const dir = (searchPath || '~').replace(/^~/, process.env.HOME || '');
+      const cmd = `find ${JSON.stringify(dir)} -maxdepth 5 -name ${JSON.stringify(name)} 2>/dev/null`;
+      const result = execCommand(cmd, ctx.senderId);
+      if (result.denied) return `Denied: ${result.reason}`;
+      return result.output || 'No files found.';
+    }
+  },
+  {
     name: 'search_docs',
     description: 'Search indexed documents (PDFs, DOCX, etc.) for relevant information. Returns matching excerpts with sources.',
     platforms: ['linux', 'macos', 'android'],
