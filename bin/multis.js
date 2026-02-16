@@ -21,6 +21,7 @@ switch (command) {
     runStart();
     break;
   case 'stop':
+  case 'exit':
     runStop();
     break;
   case 'status':
@@ -30,15 +31,40 @@ switch (command) {
     runDoctor();
     break;
   default:
-    console.log('Usage: multis <init|start|stop|status|doctor>');
-    console.log('');
-    console.log('Commands:');
-    console.log('  init    - Set up multis (interactive wizard)');
-    console.log('  start   - Start daemon in background');
-    console.log('  stop    - Stop running daemon');
-    console.log('  status  - Check if daemon is running');
-    console.log('  doctor  - Run diagnostic checks');
+    showHelp(command);
     process.exit(command ? 1 : 0);
+}
+
+function showHelp(unknownCmd) {
+  const bold   = (s) => `\x1b[1m${s}\x1b[0m`;
+  const cyan   = (s) => `\x1b[36m${s}\x1b[0m`;
+  const dim    = (s) => `\x1b[2m${s}\x1b[0m`;
+  const red    = (s) => `\x1b[31m${s}\x1b[0m`;
+
+  if (unknownCmd) console.log(red(`Unknown command: ${unknownCmd}\n`));
+
+  console.log(bold('multis') + dim(' — personal AI assistant\n'));
+  console.log('Usage: multis <command>\n');
+  console.log('Commands:');
+  console.log(`  ${cyan('init')}      Set up multis (interactive wizard)`);
+  console.log(`  ${cyan('start')}     Start daemon in background`);
+  console.log(`  ${cyan('stop')}      Stop running daemon`);
+  console.log(`  ${cyan('status')}    Check if daemon is running`);
+  console.log(`  ${cyan('doctor')}    Run diagnostic checks`);
+  console.log(`  ${cyan('exit')}      Alias for stop`);
+
+  // Show quick status
+  const running = isRunning();
+  const hasConfig = fs.existsSync(CONFIG_PATH);
+  console.log('');
+  if (!hasConfig) {
+    console.log(`Get started: ${bold('multis init')}`);
+  } else if (!running) {
+    console.log(`Status: stopped  →  ${bold('multis start')}`);
+  } else {
+    const pid = fs.readFileSync(PID_PATH, 'utf-8').trim();
+    console.log(`Status: running (PID ${pid})`);
+  }
 }
 
 // ---------------------------------------------------------------------------
