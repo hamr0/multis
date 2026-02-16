@@ -801,7 +801,7 @@ async function routeRemember(msg, platform, config, getMem, note) {
   logAudit({ action: 'remember', user_id: msg.senderId, chatId: msg.chatId, note });
 }
 
-const VALID_MODES = ['personal', 'business', 'silent'];
+const VALID_MODES = ['off', 'business', 'silent'];
 
 async function routeMode(msg, platform, config, args, agentRegistry) {
   // Owner-only
@@ -829,16 +829,16 @@ async function routeMode(msg, platform, config, args, agentRegistry) {
     } else {
       // Telegram: show current chat mode
       const m = getChatMode(config, msg.chatId);
-      await platform.send(msg.chatId, `Current chat mode: ${m}\n\nUsage: /mode <personal|business|silent> [target]`);
+      await platform.send(msg.chatId, `Current chat mode: ${m}\n\nUsage: /mode <off|business|silent> [target]`);
     }
     return;
   }
 
   if (!VALID_MODES.includes(mode)) {
     await platform.send(msg.chatId,
-      'Usage: /mode <personal|business|silent> [target]\n\n' +
+      'Usage: /mode <off|business|silent> [target]\n\n' +
       'Modes:\n' +
-      '  personal — admin, commands enabled\n' +
+      '  off      — completely ignored (no archive, no response)\n' +
       '  business — auto-respond, customer-safe\n' +
       '  silent   — archive only, no bot output\n\n' +
       'From self-chat: /mode silent (interactive picker)\n' +
@@ -1030,7 +1030,7 @@ async function routeHelp(msg, platform, config) {
       '/read <path> - Read a file or directory (owner)',
       '/index <path> <public|admin> - Index a document (owner)',
       '/pin - Change PIN (owner)',
-      '/mode - List chat modes / /mode <personal|business|silent> [target] (owner)',
+      '/mode - List chat modes / /mode <off|business|silent> [target] (owner)',
       '/agent [name] - Show/set agent for this chat (owner)',
       '/agents - List all agents (owner)',
       'Send a file to index it (owner, Telegram only)',
@@ -1197,7 +1197,7 @@ function handleHelp(config) {
         '/exec <cmd> - Run a shell command (owner)',
         '/read <path> - Read a file or directory (owner)',
         '/index <path> - Index a document (owner)',
-        '/mode <personal|business|silent> - Set chat mode (owner)',
+        '/mode <off|business|silent> - Set chat mode (owner)',
         'Send a file to index it (owner)'
       );
     }

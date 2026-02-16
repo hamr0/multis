@@ -39,7 +39,7 @@ class ChatMemoryManager {
 
   loadProfile() {
     if (!fs.existsSync(this.profilePath)) {
-      return { mode: 'personal', platform: null, lastActive: null, created: new Date().toISOString() };
+      return { mode: 'off', platform: null, lastActive: null, created: new Date().toISOString() };
     }
     return JSON.parse(fs.readFileSync(this.profilePath, 'utf-8'));
   }

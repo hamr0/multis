@@ -155,11 +155,11 @@ describe('BeeperPlatform', () => {
       assert.strictEqual(bp._getChatMode('chat1'), 'silent');
     });
 
-    it('returns personal for self-chats', () => {
+    it('returns off for self-chats', () => {
       const { BeeperPlatform } = loadBeeper();
       const bp = new BeeperPlatform(makeConfig());
       bp._personalChats.add('selfChat');
-      assert.strictEqual(bp._getChatMode('selfChat'), 'personal');
+      assert.strictEqual(bp._getChatMode('selfChat'), 'off');
     });
 
     it('uses default_mode from config', () => {
@@ -171,11 +171,11 @@ describe('BeeperPlatform', () => {
     it('uses per-chat mode override', () => {
       const { BeeperPlatform } = loadBeeper();
       const bp = new BeeperPlatform(makeConfig({
-        default_mode: 'personal',
+        default_mode: 'off',
         chat_modes: { 'chat_biz': 'business' },
       }));
       assert.strictEqual(bp._getChatMode('chat_biz'), 'business');
-      assert.strictEqual(bp._getChatMode('chat_other'), 'personal');
+      assert.strictEqual(bp._getChatMode('chat_other'), 'off');
     });
   });
 

@@ -66,7 +66,7 @@
 - RAG pipeline: `routeAsk` → FTS5 search (top 5) → `buildRAGPrompt` → LLM → answer
 - All three LLM providers fixed for native `options.system` support (Anthropic, OpenAI, Ollama)
 - Plain text treated as implicit `/ask` (Telegram + Beeper personal chats)
-- Chat modes: `/mode personal` (ignore incoming) vs `/mode business` (auto-respond)
+- Chat modes: `/mode off` (completely ignored) vs `/mode business` (auto-respond)
 - Per-chat mode persisted to `config.platforms.beeper.chat_modes[chatId]`
 - Beeper self-chat detection + natural language routing via `msg.routeAs`
 

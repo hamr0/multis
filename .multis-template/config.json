@@ -59,6 +59,6 @@
   "agents": {
     "assistant": { "persona": "You are a helpful personal assistant." }
   },
-  "defaults": { "personal": "assistant", "business": "assistant" },
+  "defaults": { "off": "assistant", "business": "assistant" },
   "chat_agents": {}
 }

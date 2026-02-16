@@ -218,8 +218,8 @@ class BeeperPlatform extends Platform {
     const modes = this.config.platforms?.beeper?.chat_modes;
     if (modes && modes[chatId]) return modes[chatId];
     if (this.config.platforms?.beeper?.default_mode) return this.config.platforms.beeper.default_mode;
-    // Personal chats (note-to-self) stay personal; others default per bot_mode
-    if (this._personalChats.has(chatId)) return 'personal';
+    // Personal chats (note-to-self) stay off; others default per bot_mode
+    if (this._personalChats.has(chatId)) return 'off';
     const botMode = this.config.bot_mode || 'personal';
     return botMode === 'personal' ? 'silent' : 'business';
   }

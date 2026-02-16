@@ -80,11 +80,11 @@ Three modes, per-chat, switchable anytime. Global `bot_mode` (personal or busine
 
 | Mode | Self messages | Incoming messages | Admin commands | Use case |
 |------|--------------|-------------------|----------------|----------|
-| **personal** | Commands + natural ask | Ignored | Yes (with PIN) | Your notes, research, trusted admins |
+| **off** | Ignored | Ignored | No | Completely ignored — no archive, no response |
 | **business** | Commands + natural ask | Auto-respond via LLM | No | Customer support, business contacts |
 | **silent** | Ignored | Archived to memory | No | Friends — passive capture, no bot output |
 
-Self-chats (note-to-self, WhatsApp self) are auto-detected as **personal**.
+Self-chats (note-to-self, WhatsApp self) are auto-detected as **off**.
 
 ### Setting modes
 
@@ -100,7 +100,7 @@ Self-chats (note-to-self, WhatsApp self) are auto-detected as **personal**.
 | Context | Admin commands? | Scope | Bot responds? |
 |---------|----------------|-------|---------------|
 | Owner in any chat | Yes | All | To commands |
-| Personal-mode chat | Yes | All | To commands |
+| Off-mode chat | No | n/a | Never |
 | Business-mode chat | No | kb + user:chatId | Auto to all incoming |
 | Silent-mode chat | No | n/a | Never |
 
@@ -108,11 +108,11 @@ Self-chats (note-to-self, WhatsApp self) are auto-detected as **personal**.
 
 | `bot_mode` | New Beeper chats default to | Telegram |
 |------------|----------------------------|----------|
-| **personal** | silent (archive only) | personal (owner's 1:1) |
-| **business** | business (auto-respond) | personal (owner's 1:1) |
+| **personal** | silent (archive only) | off (owner sets mode manually) |
+| **business** | business (auto-respond) | off (owner sets mode manually) |
 
 **Persisted to:** `config.platforms.beeper.chat_modes[chatId]`
-**Fallback chain:** per-chat mode → beeper `default_mode` → global `bot_mode` → 'personal'
+**Fallback chain:** per-chat mode → beeper `default_mode` → global `bot_mode` → 'off'
 
 ---
 

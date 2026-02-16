@@ -59,10 +59,11 @@ Message arrives:
 
 | Mode | Self messages | Incoming messages |
 |------|--------------|-------------------|
-| **personal** (default) | `/` commands + natural language ask | Ignored |
+| **off** (default for self-chats) | Ignored | Ignored |
 | **business** | `/` commands + natural language ask | Auto-respond via LLM |
+| **silent** | `/` commands + natural language ask | Archived, no response |
 
-Set via `/mode personal` or `/mode business`. Persisted to `config.platforms.beeper.chat_modes[chatId]`.
+Set via `/mode off`, `/mode business`, or `/mode silent`. Persisted to `config.platforms.beeper.chat_modes[chatId]`.
 
 ## Config
 

@@ -727,8 +727,8 @@ describe('resolveAgent', () => {
 
   it('mode default used when no per-chat assignment', () => {
     const config = {
-      defaults: { personal: 'coder' },
-      platforms: { beeper: { chat_modes: { chat1: 'personal' } } }
+      defaults: { off: 'coder' },
+      platforms: { beeper: { chat_modes: { chat1: 'off' } } }
     };
     const result = resolveAgent('hello', 'chat1', config, registry);
     assert.strictEqual(result.name, 'coder');

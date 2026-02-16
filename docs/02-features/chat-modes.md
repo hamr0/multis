@@ -6,13 +6,13 @@ Every chat operates in one of three modes that control how multis handles incomi
 
 ## Modes
 
-### Personal (default)
+### Off (default for self-chats)
 
-- **Who:** Admin / owner
-- **Commands:** Full access (exec, read, index, mode, etc.)
-- **Self-messages without prefix:** Natural language questions (implicit `/ask`)
+- **Who:** Chats you want multis to completely ignore
+- **Commands:** None processed
+- **Self-messages without prefix:** Ignored
 - **Incoming from others:** Ignored
-- **Use case:** Your own assistant — notes, research, document queries
+- **Use case:** Disable multis for a chat entirely — no archive, no response
 
 ### Business
 
@@ -45,7 +45,7 @@ Requires owner. Setting a mode requires PIN for protected commands.
 ### From within a chat (Beeper)
 
 ```
-/mode personal    → this chat becomes personal
+/mode off         → this chat becomes off (ignored)
 /mode business    → this chat becomes business
 /mode silent      → this chat becomes silent (archive only)
 ```
@@ -73,12 +73,12 @@ You can also search by name:
 ### Telegram
 
 ```
-/mode personal
+/mode off
 /mode business
 /mode silent
 ```
 
-Telegram bot chats are typically personal (admin-only). Mode switching is more useful on Beeper where you have multiple chat types.
+Telegram bot chats are typically used as admin (owner-only). Mode switching is more useful on Beeper where you have multiple chat types.
 
 ## Configuration
 
@@ -87,18 +87,18 @@ Mode is per-chat, persisted to `config.platforms.beeper.chat_modes[chatId]`.
 ### Fallback chain
 
 ```
-per-chat mode → beeper default_mode → global bot_mode → 'personal'
+per-chat mode → beeper default_mode → global bot_mode → 'off'
 ```
 
 - `config.platforms.beeper.chat_modes[chatId]` — explicit per-chat override
 - `config.platforms.beeper.default_mode` — Beeper-wide default
 - `config.bot_mode` — global default, set during `multis init`
-- `'personal'` — hardcoded fallback
+- `'off'` — hardcoded fallback
 
 ### Global bot_mode
 
 Set during `multis init`:
-- **personal** — you're the only user, all chats default to personal
+- **personal** — you're the only user, all chats default to off (ignored)
 - **business** — you have customers, new chats default to business (auto-respond)
 
 ## Routing Flow
@@ -123,10 +123,10 @@ Message arrives:
 
 ## Privilege Model
 
-| Capability | personal | business | silent |
-|------------|----------|----------|--------|
-| Owner commands (exec, read, index) | Yes | No | No |
-| `/ask` and `/search` | Yes | Auto (incoming) | No |
+| Capability | off | business | silent |
+|------------|-----|----------|--------|
+| Owner commands (exec, read, index) | No | No | No |
+| `/ask` and `/search` | No | Auto (incoming) | No |
 | `/mode` (change modes) | Yes (PIN) | Yes (PIN) | Yes (PIN) |
-| Memory capture | Yes | Yes | Yes |
+| Memory capture | No | Yes | Yes |
 | Bot responds to others | No | Yes | No |
