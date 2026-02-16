@@ -23,16 +23,16 @@ describe('recall_memory tool', () => {
       chunkId: 'mem-1', filePath: 'memory/chats/owner1', pageStart: 0, pageEnd: 0,
       elementType: 'memory_summary', name: 'Memory capture',
       content: 'User mentioned their cat is named Luna and they live in Berlin',
-      parentChunkId: null, sectionPath: '["owner1"]', sectionLevel: 0,
-      documentType: 'conversation', metadata: '{}', scope: 'admin',
+      parentChunkId: null, sectionPath: ['owner1'], sectionLevel: 0,
+      documentType: 'conversation', metadata: {}, scope: 'admin',
       createdAt: '2026-02-10T12:00:00Z', updatedAt: now
     });
     store.saveChunk({
       chunkId: 'mem-2', filePath: 'memory/chats/customer42', pageStart: 0, pageEnd: 0,
       elementType: 'memory_summary', name: 'Memory capture',
       content: 'Customer asked about refund policy for their order',
-      parentChunkId: null, sectionPath: '["customer42"]', sectionLevel: 0,
-      documentType: 'conversation', metadata: '{}', scope: 'user:customer42',
+      parentChunkId: null, sectionPath: ['customer42'], sectionLevel: 0,
+      documentType: 'conversation', metadata: {}, scope: 'user:customer42',
       createdAt: '2026-02-11T08:00:00Z', updatedAt: now
     });
     // A document chunk (should NOT appear in recall_memory results)
@@ -40,8 +40,8 @@ describe('recall_memory tool', () => {
       chunkId: 'doc-1', filePath: '/docs/pets.pdf', pageStart: 1, pageEnd: 1,
       elementType: 'paragraph', name: 'Pet Care Guide',
       content: 'Cats need regular veterinary checkups and a balanced diet with Luna brand food',
-      parentChunkId: null, sectionPath: '["Pet Care"]', sectionLevel: 0,
-      documentType: 'pdf', metadata: '{}', scope: 'kb',
+      parentChunkId: null, sectionPath: ['Pet Care'], sectionLevel: 0,
+      documentType: 'pdf', metadata: {}, scope: 'kb',
       createdAt: now, updatedAt: now
     });
   });

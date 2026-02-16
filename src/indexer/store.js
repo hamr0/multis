@@ -10,6 +10,13 @@ const DB_PATH = path.join(MULTIS_DIR, 'documents.db');
 const DEFAULT_DECAY = 0.5;
 const ACTIVATION_WEIGHT = 2.0; // how much activation influences final rank
 
+// Handle double-stringified JSON (e.g. '"[\\"a\\"]"' → ["a"])
+function safeParseArray(raw) {
+  let parsed = JSON.parse(raw || '[]');
+  if (typeof parsed === 'string') parsed = JSON.parse(parsed);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
 /**
  * DocumentStore - SQLite storage for document chunks with FTS5 search.
  * Ported from aurora_core.store.sqlite (Python).
@@ -230,7 +237,7 @@ class DocumentStore {
         name: row.name,
         content: row.content,
         parentChunkId: row.parent_chunk_id,
-        sectionPath: JSON.parse(row.section_path || '[]'),
+        sectionPath: safeParseArray(row.section_path),
         sectionLevel: row.section_level,
         documentType: row.document_type,
         metadata: JSON.parse(row.metadata || '{}'),
@@ -284,7 +291,7 @@ class DocumentStore {
       name: row.name,
       content: row.content,
       parentChunkId: row.parent_chunk_id,
-      sectionPath: JSON.parse(row.section_path || '[]'),
+      sectionPath: safeParseArray(row.section_path),
       sectionLevel: row.section_level,
       documentType: row.document_type,
       metadata: JSON.parse(row.metadata || '{}'),
@@ -306,7 +313,7 @@ class DocumentStore {
       filePath: row.file_path,
       name: row.name,
       content: row.content,
-      sectionPath: JSON.parse(row.section_path || '[]'),
+      sectionPath: safeParseArray(row.section_path),
       documentType: row.document_type,
       activation: row.activation
     };

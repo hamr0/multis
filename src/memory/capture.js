@@ -62,10 +62,10 @@ async function runCapture(chatId, mem, llm, indexer, options = {}) {
           name: `Memory capture ${now}`,
           content: summary,
           parentChunkId: null,
-          sectionPath: JSON.stringify([chatId]),
+          sectionPath: [chatId],
           sectionLevel: 0,
           documentType: 'conversation',
-          metadata: JSON.stringify({ chatId }),
+          metadata: { chatId },
           scope,
           createdAt: now,
           updatedAt: now
