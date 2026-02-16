@@ -540,16 +540,16 @@ describe('Unpair', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Beeper // command prefix
+// Beeper / command prefix
 // ---------------------------------------------------------------------------
 
 describe('Beeper command routing', () => {
-  it('// prefix is parsed as command on beeper', async () => {
+  it('/ prefix is parsed as command on beeper', async () => {
     const env = createTestEnv({ allowed_users: ['self1'], owner_id: 'self1' });
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    const m = msg('//status', { platform: 'beeper', senderId: 'self1', isSelf: true });
+    const m = msg('/status', { platform: 'beeper', senderId: 'self1', isSelf: true });
     await router(m, platform);
     assert.match(platform.sent[0].text, /multis bot v0\.1\.0/);
   });

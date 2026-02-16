@@ -2,7 +2,7 @@
 
 ## Overview
 
-Every chat operates in one of three modes that control how multis handles incoming messages. Modes apply per-chat and are set by the owner with PIN verification.
+Every chat operates in one of three modes that control how multis handles incoming messages. Modes apply per-chat and are set by the owner. `/mode` without args lists all chats with their current modes (no PIN). Setting a mode requires PIN for protected commands.
 
 ## Modes
 
@@ -33,22 +33,29 @@ Every chat operates in one of three modes that control how multis handles incomi
 
 ## Setting a Mode
 
-Requires owner + PIN.
+Requires owner. Setting a mode requires PIN for protected commands.
+
+### Listing modes (no PIN)
+
+```
+/mode              → lists all chats with current modes (Beeper)
+/mode              → shows current chat mode (Telegram)
+```
 
 ### From within a chat (Beeper)
 
 ```
-//mode personal    → this chat becomes personal
-//mode business    → this chat becomes business
-//mode silent      → this chat becomes silent (archive only)
+/mode personal    → this chat becomes personal
+/mode business    → this chat becomes business
+/mode silent      → this chat becomes silent (archive only)
 ```
 
 ### From self-chat (interactive picker)
 
-When you run `//mode <mode>` from a self/note-to-self chat, multis lists your recent chats so you can pick which one to set:
+When you run `/mode <mode>` from a self/note-to-self chat, multis lists your recent chats so you can pick which one to set:
 
 ```
-//mode silent
+/mode silent
 → Set which chat to silent?
   1) Alice (+31612345678)
   2) Bob's Pizza Group
@@ -59,8 +66,8 @@ When you run `//mode <mode>` from a self/note-to-self chat, multis lists your re
 You can also search by name:
 
 ```
-//mode silent John    → finds chats matching "John", sets if unique match
-//mode business Mom   → finds chats matching "Mom"
+/mode silent John    → finds chats matching "John", sets if unique match
+/mode business Mom   → finds chats matching "Mom"
 ```
 
 ### Telegram
@@ -103,7 +110,7 @@ Message arrives:
   │
   ├─ routeAs: 'silent' → archive to memory, no response
   │
-  ├─ isSelf + starts with // (or /) → parse as command
+  ├─ isSelf + starts with / (personal chats only on Beeper) → parse as command
   │
   ├─ isSelf + personal/self chat → routeAs:'natural' → LLM ask
   │

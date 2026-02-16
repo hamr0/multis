@@ -1,7 +1,7 @@
 /**
  * Normalized message across all platforms.
  * Telegram bot messages are always commands.
- * Beeper messages are commands only when prefixed with //.
+ * Beeper messages are commands only when prefixed with / from personal chats.
  */
 class Message {
   constructor({ id, platform, chatId, chatName, senderId, senderName, isSelf, text, raw, routeAs }) {
@@ -21,25 +21,25 @@ class Message {
   /**
    * Is this message a command for multis?
    * Telegram: all messages to the bot are commands (it's a dedicated bot).
-   * Beeper: only messages starting with // are commands.
+   * Beeper: only messages starting with / are commands (restricted to personal chats by platform).
    */
   isCommand() {
     if (this.platform === 'telegram') return true;
-    if (this.platform === 'beeper') return this.isSelf && this.text.startsWith('//');
+    if (this.platform === 'beeper') return this.isSelf && this.text.startsWith('/');
     return false;
   }
 
   /**
    * Get the command text with platform prefix stripped.
    * Telegram: "/exec ls" -> "exec ls", plain text -> text as-is
-   * Beeper: "//exec ls" -> "exec ls"
+   * Beeper: "/exec ls" -> "exec ls"
    */
   commandText() {
     if (this.platform === 'telegram') {
       return this.text.startsWith('/') ? this.text.slice(1) : this.text;
     }
     if (this.platform === 'beeper') {
-      return this.text.startsWith('//') ? this.text.slice(2).trimStart() : this.text;
+      return this.text.startsWith('/') ? this.text.slice(1).trimStart() : this.text;
     }
     return this.text;
   }

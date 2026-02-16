@@ -10,7 +10,7 @@ const TOKEN_FILE = path.join(process.env.HOME || process.env.USERPROFILE, '.mult
 
 /**
  * Beeper Desktop API platform adapter.
- * Polls localhost:23373 for new messages, processes // commands from self.
+ * Polls localhost:23373 for new messages, processes / commands from self in personal chats.
  */
 class BeeperPlatform extends Platform {
   constructor(config) {
@@ -18,7 +18,7 @@ class BeeperPlatform extends Platform {
     const bc = config.platforms?.beeper || {};
     this.baseUrl = bc.url || DEFAULT_URL;
     this.pollInterval = bc.poll_interval || DEFAULT_POLL_INTERVAL;
-    this.commandPrefix = bc.command_prefix || '//';
+    this.commandPrefix = bc.command_prefix || '/';
     this.token = null;
     this.selfIds = new Set(); // account user IDs to detect self-messages
     this._pollTimer = null;
@@ -55,7 +55,7 @@ class BeeperPlatform extends Platform {
 
     // Start polling
     this._pollTimer = setInterval(() => this._poll(), this.pollInterval);
-    console.log(`Beeper: polling every ${this.pollInterval}ms for ${this.commandPrefix} commands`);
+    console.log(`Beeper: polling every ${this.pollInterval}ms for / commands`);
   }
 
   async stop() {
@@ -79,10 +79,9 @@ class BeeperPlatform extends Platform {
         const chatId = chat.id || chat.chatID;
         if (!chatId) continue;
 
-        // Detect self/note-to-self chats by type or participant count
-        const chatType = chat.type || '';
-        const participants = chat.participants || chat.members || [];
-        if (chatType === 'single' && participants.length <= 1) {
+        // Detect self/note-to-self chats: all participants have isSelf=true
+        const items = chat.participants?.items || chat.members?.items || [];
+        if (items.length > 0 && items.every(p => p.isSelf)) {
           this._personalChats.add(chatId);
         }
 
@@ -104,6 +103,8 @@ class BeeperPlatform extends Platform {
 
   async _poll() {
     if (!this._initialized) return;
+    if (this._polling) return; // prevent overlapping polls
+    this._polling = true;
     try {
       const data = await this._api('GET', '/v1/chats?limit=20');
       const chats = data.items || [];
@@ -144,8 +145,8 @@ class BeeperPlatform extends Platform {
           let routeAs = null;
           let shouldProcess = false;
 
-          if (isSelf && text.startsWith(this.commandPrefix)) {
-            // Explicit command: //ask, //mode, etc. — always process
+          if (isSelf && isPersonalChat && text.startsWith(this.commandPrefix)) {
+            // Explicit command from personal/note-to-self chat only
             shouldProcess = true;
           } else if (isSelf && isPersonalChat && !text.startsWith(this.commandPrefix)) {
             // Self-message in personal/note-to-self chat → natural language ask
@@ -203,6 +204,8 @@ class BeeperPlatform extends Platform {
         console.error(`Beeper: poll error — ${err.message}`);
         this._pollErrorLogged = true;
       }
+    } finally {
+      this._polling = false;
     }
   }
 
@@ -214,8 +217,11 @@ class BeeperPlatform extends Platform {
   _getChatMode(chatId) {
     const modes = this.config.platforms?.beeper?.chat_modes;
     if (modes && modes[chatId]) return modes[chatId];
-    // Fall back: beeper default_mode → global bot_mode → 'personal'
-    return this.config.platforms?.beeper?.default_mode || this.config.bot_mode || 'personal';
+    if (this.config.platforms?.beeper?.default_mode) return this.config.platforms.beeper.default_mode;
+    // Personal chats (note-to-self) stay personal; others default per bot_mode
+    if (this._personalChats.has(chatId)) return 'personal';
+    const botMode = this.config.bot_mode || 'personal';
+    return botMode === 'personal' ? 'silent' : 'business';
   }
 
   _loadToken() {

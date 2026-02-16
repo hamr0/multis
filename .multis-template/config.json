@@ -12,7 +12,7 @@
     "beeper": {
       "enabled": false,
       "url": "http://localhost:23373",
-      "command_prefix": "//",
+      "command_prefix": "/",
       "poll_interval": 3000
     }
   },

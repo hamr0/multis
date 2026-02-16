@@ -66,11 +66,11 @@
 - RAG pipeline: `routeAsk` → FTS5 search (top 5) → `buildRAGPrompt` → LLM → answer
 - All three LLM providers fixed for native `options.system` support (Anthropic, OpenAI, Ollama)
 - Plain text treated as implicit `/ask` (Telegram + Beeper personal chats)
-- Chat modes: `//mode personal` (ignore incoming) vs `//mode business` (auto-respond)
+- Chat modes: `/mode personal` (ignore incoming) vs `/mode business` (auto-respond)
 - Per-chat mode persisted to `config.platforms.beeper.chat_modes[chatId]`
 - Beeper self-chat detection + natural language routing via `msg.routeAs`
 
-**Validated:** 2026-02-10 — live Anthropic API (Haiku 4.5), full router path (not just LLM client). Tested: `/ask`, natural language routing, RAG prompt builder with citations, `//mode`, auth blocking, `/help`.
+**Validated:** 2026-02-10 — live Anthropic API (Haiku 4.5), full router path (not just LLM client). Tested: `/ask`, natural language routing, RAG prompt builder with citations, `/mode`, auth blocking, `/help`.
 
 **Findings:**
 - Platform abstraction (done early in POC7 partial) made this easy — router doesn't care about source
@@ -93,7 +93,7 @@
 
 **Findings:**
 - Beeper E2EE is a dead end for bots — Desktop localhost API bypasses it
-- `//` prefix for Beeper is intuitive — looks like a command but doesn't conflict with any chat app
+- `/` prefix unified across platforms — commands restricted to personal/Note-to-self chats on Beeper
 - Polling at 3s is fast enough, not wasteful
 
 **TODO (polish pass or POC6):** On server startup, check if Beeper Desktop is running (hit `localhost:23373`). If not reachable, log warning and disable Beeper gracefully — don't crash. Re-check periodically.
@@ -183,9 +183,9 @@ User messages:
 ```
 
 ### Commands
-- `//memory` — show this chat's memory.md
-- `//forget` — clear this chat's memory (keeps logs)
-- `//remember <note>` — manually add a note to memory.md
+- `/memory` — show this chat's memory.md
+- `/forget` — clear this chat's memory (keeps logs)
+- `/remember <note>` — manually add a note to memory.md
 
 ### What This Borrows
 
@@ -233,7 +233,7 @@ What's your primary use? [personal / business]
 > personal
 
 Setting default mode: personal
-(You can switch any chat to business later with //mode business)
+(You can switch any chat to business later with /mode business)
 
 Telegram bot token (from @BotFather):
 > ****

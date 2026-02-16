@@ -36,7 +36,7 @@ Platform (base.js)
   ├── start(), stop(), send(chatId, text), sendFile(chatId, filePath, caption), onMessage(callback)
   │
   ├── TelegramPlatform  — Telegraf wrapper, / prefix, sendFile via sendDocument()
-  ├── BeeperPlatform    — polls localhost:23373, // prefix (sendFile not yet supported)
+  ├── BeeperPlatform    — polls localhost:23373, / prefix, personal chats only (sendFile not yet supported)
   └── MatrixPlatform    — (future) Matrix SDK client
 ```
 
@@ -52,7 +52,7 @@ Message arrives
   ├─ msg.routeAs === 'silent'? (chat in silent mode)
   │   └─ YES → archive to memory (appendMessage + appendToLog), NO response
   │
-  ├─ Is a command? (/ on Telegram, // on Beeper)
+  ├─ Is a command? (/ on all platforms, personal chats only on Beeper)
   │   └─ YES → parse command → switch (ask, mode, exec, read, index, search, ...)
   │
   ├─ msg.routeAs === 'natural'? (self-message in personal chat)
@@ -88,11 +88,12 @@ Self-chats (note-to-self, WhatsApp self) are auto-detected as **personal**.
 
 ### Setting modes
 
-- **Owner + PIN required** to change any chat's mode
-- `//mode <mode>` in a chat → sets that chat directly
-- `//mode <mode>` in self-chat → interactive picker (lists recent chats)
-- `//mode <mode> <name>` in self-chat → search by name/number
-- On Telegram: `/mode <mode>` sets current chat (all chats are 1:1)
+- **Owner required** to change any chat's mode
+- `/mode` (no args) → lists all chats with current modes (no PIN)
+- `/mode <mode>` in a chat → sets that chat directly
+- `/mode <mode>` in self-chat → interactive picker (lists recent chats)
+- `/mode <mode> <name>` in self-chat → search by name/number
+- On Telegram: `/mode` shows current mode, `/mode <mode>` sets it
 
 ### Privilege model
 
@@ -643,7 +644,7 @@ All behavioral settings are configurable. Sane defaults applied when missing.
       "enabled": true,
       "url": "http://localhost:23373",
       "poll_interval": 3000,
-      "command_prefix": "//",
+      "command_prefix": "/",
       "default_mode": "personal",
       "chat_modes": {}
     }

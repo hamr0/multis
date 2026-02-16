@@ -12,7 +12,7 @@
 ### Path 2: Beeper Desktop API (viable, requires Desktop running)
 - Polls `localhost:23373` for messages across all bridges
 - Bypasses E2EE (talks to Desktop directly)
-- `//` command prefix for self-messages
+- `/` command prefix for self-messages (personal chats only)
 - Chat modes: `personal` (natural language in self-chats) and `business` (auto-respond)
 - Token setup via `node src/cli/setup-beeper.js`
 
@@ -49,8 +49,8 @@ src/platforms/
 ```
 Message arrives:
   ├─ text starts with [multis] → skip (our response)
-  ├─ isSelf + starts with // → command (routeAsk, routeMode, etc.)
-  ├─ isSelf + personal chat + no // → routeAs:'natural' → implicit ask
+  ├─ isSelf + personal chat + starts with / → command (routeAsk, routeMode, etc.)
+  ├─ isSelf + personal chat + no / → routeAs:'natural' → implicit ask
   ├─ !isSelf + business mode → routeAs:'business' → auto-respond via LLM
   └─ else → ignore
 ```
@@ -59,10 +59,10 @@ Message arrives:
 
 | Mode | Self messages | Incoming messages |
 |------|--------------|-------------------|
-| **personal** (default) | `//` commands + natural language ask | Ignored |
-| **business** | `//` commands + natural language ask | Auto-respond via LLM |
+| **personal** (default) | `/` commands + natural language ask | Ignored |
+| **business** | `/` commands + natural language ask | Auto-respond via LLM |
 
-Set via `//mode personal` or `//mode business`. Persisted to `config.platforms.beeper.chat_modes[chatId]`.
+Set via `/mode personal` or `/mode business`. Persisted to `config.platforms.beeper.chat_modes[chatId]`.
 
 ## Config
 
@@ -74,7 +74,7 @@ Set via `//mode personal` or `//mode business`. Persisted to `config.platforms.b
       "enabled": true,
       "url": "http://localhost:23373",
       "poll_interval": 3000,
-      "command_prefix": "//",
+      "command_prefix": "/",
       "default_mode": "personal",
       "chat_modes": {}
     }

@@ -21,7 +21,7 @@ function makeConfig(overrides = {}) {
       beeper: {
         enabled: true,
         url: 'http://localhost:23373',
-        command_prefix: '//',
+        command_prefix: '/',
         poll_interval: 100,
         ...overrides,
       },
@@ -64,7 +64,7 @@ describe('BeeperPlatform', () => {
       const bp = new BeeperPlatform({ platforms: {} });
       assert.strictEqual(bp.baseUrl, 'http://localhost:23373');
       assert.strictEqual(bp.pollInterval, 3000);
-      assert.strictEqual(bp.commandPrefix, '//');
+      assert.strictEqual(bp.commandPrefix, '/');
     });
 
     it('respects custom config values', () => {
@@ -149,10 +149,17 @@ describe('BeeperPlatform', () => {
   // -------------------------------------------------------------------------
 
   describe('_getChatMode', () => {
-    it('returns personal by default', () => {
+    it('returns silent by default when bot_mode is personal', () => {
       const { BeeperPlatform } = loadBeeper();
       const bp = new BeeperPlatform(makeConfig());
-      assert.strictEqual(bp._getChatMode('chat1'), 'personal');
+      assert.strictEqual(bp._getChatMode('chat1'), 'silent');
+    });
+
+    it('returns personal for self-chats', () => {
+      const { BeeperPlatform } = loadBeeper();
+      const bp = new BeeperPlatform(makeConfig());
+      bp._personalChats.add('selfChat');
+      assert.strictEqual(bp._getChatMode('selfChat'), 'personal');
     });
 
     it('uses default_mode from config', () => {
@@ -292,25 +299,25 @@ describe('BeeperPlatform', () => {
       assert.ok(bp._seen.has('200'));
     });
 
-    it('detects personal/self chats (single + <=1 participant)', async () => {
+    it('detects personal/self chats (all participants isSelf)', async () => {
       const { BeeperPlatform } = loadBeeper();
       const bp = new BeeperPlatform(makeConfig());
 
       bp._api = async (method, apiPath) => {
         if (apiPath.startsWith('/v1/chats?')) {
           return { items: [
-            { id: 'selfChat', type: 'single', participants: [] },
-            { id: 'groupChat', type: 'group', participants: ['a', 'b', 'c'] },
-            { id: 'dmChat', type: 'single', participants: ['me'] },
+            { id: 'noteToSelf', type: 'group', participants: { items: [{ id: 'me', isSelf: true }] } },
+            { id: 'groupChat', type: 'group', participants: { items: [{ id: 'a', isSelf: false }, { id: 'me', isSelf: true }] } },
+            { id: 'dmChat', type: 'single', participants: { items: [{ id: 'friend', isSelf: false }, { id: 'me', isSelf: true }] } },
           ]};
         }
         return { items: [{ id: '1' }] };
       };
 
       await bp._seedLastSeen();
-      assert.ok(bp._personalChats.has('selfChat'));
+      assert.ok(bp._personalChats.has('noteToSelf'));
       assert.ok(!bp._personalChats.has('groupChat'));
-      assert.ok(bp._personalChats.has('dmChat'));
+      assert.ok(!bp._personalChats.has('dmChat'));
     });
 
     it('handles API errors gracefully', async () => {
@@ -355,22 +362,40 @@ describe('BeeperPlatform', () => {
       assert.strictEqual(called, false);
     });
 
-    it('routes self // command messages', async () => {
+    it('routes self / command messages from personal chats', async () => {
       const bp = makeBp(loadBeeper);
+      bp._personalChats.add('c1');
       const received = [];
       bp.onMessage(async (msg) => received.push(msg));
 
       bp._api = fakeApi(
         [{ id: 'c1', title: 'My Chat' }],
-        { c1: [{ id: '10', senderID: 'self1', text: '//status' }] }
+        { c1: [{ id: '10', senderID: 'self1', text: '/status' }] }
       );
 
       await bp._poll();
       assert.strictEqual(received.length, 1);
-      assert.strictEqual(received[0].text, '//status');
+      assert.strictEqual(received[0].text, '/status');
       assert.strictEqual(received[0].isSelf, true);
       assert.strictEqual(received[0].routeAs, null);
       assert.strictEqual(received[0].platform, 'beeper');
+    });
+
+    it('ignores / command from non-personal chat', async () => {
+      const bp = makeBp(loadBeeper);
+      // c1 is NOT in _personalChats
+      const received = [];
+      bp.onMessage(async (msg) => received.push(msg));
+
+      bp._api = fakeApi(
+        [{ id: 'c1', title: 'Friend Chat' }],
+        { c1: [{ id: '10', senderID: 'self1', text: '/status' }] }
+      );
+
+      await bp._poll();
+      // Should not be routed as command — silent mode archives it
+      const commands = received.filter(m => m.routeAs === null);
+      assert.strictEqual(commands.length, 0);
     });
 
     it('routes self natural language in personal chats', async () => {
@@ -406,7 +431,7 @@ describe('BeeperPlatform', () => {
       assert.strictEqual(received[0].isSelf, false);
     });
 
-    it('ignores non-self messages in personal mode', async () => {
+    it('archives non-self messages as silent in default mode', async () => {
       const bp = makeBp(loadBeeper);
       const received = [];
       bp.onMessage(async (msg) => received.push(msg));
@@ -417,7 +442,8 @@ describe('BeeperPlatform', () => {
       );
 
       await bp._poll();
-      assert.strictEqual(received.length, 0);
+      assert.strictEqual(received.length, 1);
+      assert.strictEqual(received[0].routeAs, 'silent');
     });
 
     it('skips [multis] prefixed messages to avoid cascade', async () => {
@@ -436,13 +462,14 @@ describe('BeeperPlatform', () => {
 
     it('skips already-seen messages (dedup)', async () => {
       const bp = makeBp(loadBeeper);
+      bp._personalChats.add('c1');
       bp._seen.add('10');
       const received = [];
       bp.onMessage(async (msg) => received.push(msg));
 
       bp._api = fakeApi(
         [{ id: 'c1' }],
-        { c1: [{ id: '10', senderID: 'self1', text: '//test' }] }
+        { c1: [{ id: '10', senderID: 'self1', text: '/test' }] }
       );
 
       await bp._poll();
@@ -451,6 +478,7 @@ describe('BeeperPlatform', () => {
 
     it('processes only new messages, skips seen', async () => {
       const bp = makeBp(loadBeeper);
+      bp._personalChats.add('c1');
       bp._seen.add('4');
       const received = [];
       bp.onMessage(async (msg) => received.push(msg));
@@ -459,28 +487,29 @@ describe('BeeperPlatform', () => {
         [{ id: 'c1' }],
         // Newest first (as returned by API)
         { c1: [
-          { id: '8', senderID: 'self1', text: '//newer' },
-          { id: '6', senderID: 'self1', text: '//older' },
-          { id: '4', senderID: 'self1', text: '//skip' },
+          { id: '8', senderID: 'self1', text: '/newer' },
+          { id: '6', senderID: 'self1', text: '/older' },
+          { id: '4', senderID: 'self1', text: '/skip' },
         ]}
       );
 
       await bp._poll();
       // Should skip id=4, process id=6 then id=8 (oldest first)
       assert.strictEqual(received.length, 2);
-      assert.strictEqual(received[0].text, '//older');
-      assert.strictEqual(received[1].text, '//newer');
+      assert.strictEqual(received[0].text, '/older');
+      assert.strictEqual(received[1].text, '/newer');
       assert.ok(bp._seen.has('8'));
     });
 
     it('adds processed message IDs to seen set', async () => {
       const bp = makeBp(loadBeeper);
+      bp._personalChats.add('c1');
       const received = [];
       bp.onMessage(async (msg) => received.push(msg));
 
       bp._api = fakeApi(
         [{ id: 'c1' }],
-        { c1: [{ id: '42', senderID: 'self1', text: '//cmd' }] }
+        { c1: [{ id: '42', senderID: 'self1', text: '/cmd' }] }
       );
 
       await bp._poll();
@@ -489,12 +518,13 @@ describe('BeeperPlatform', () => {
 
     it('creates normalized Message with correct fields', async () => {
       const bp = makeBp(loadBeeper);
+      bp._personalChats.add('c1');
       const received = [];
       bp.onMessage(async (msg) => received.push(msg));
 
       bp._api = fakeApi(
         [{ id: 'c1', title: 'Work Chat' }],
-        { c1: [{ id: '10', senderID: 'self1', senderName: 'Me', text: '//help' }] }
+        { c1: [{ id: '10', senderID: 'self1', senderName: 'Me', text: '/help' }] }
       );
 
       await bp._poll();
@@ -510,11 +540,12 @@ describe('BeeperPlatform', () => {
 
     it('handles handler errors without crashing poll', async () => {
       const bp = makeBp(loadBeeper);
+      bp._personalChats.add('c1');
       bp.onMessage(async () => { throw new Error('handler boom'); });
 
       bp._api = fakeApi(
         [{ id: 'c1' }],
-        { c1: [{ id: '10', senderID: 'self1', text: '//fail' }] }
+        { c1: [{ id: '10', senderID: 'self1', text: '/fail' }] }
       );
 
       // Should not throw
@@ -560,13 +591,13 @@ describe('Message (beeper)', () => {
   // Fresh require since HOME might differ
   const { Message } = require('../src/platforms/message');
 
-  it('isCommand returns true for self // messages', () => {
-    const m = new Message({ platform: 'beeper', text: '//status', isSelf: true });
+  it('isCommand returns true for self / messages', () => {
+    const m = new Message({ platform: 'beeper', text: '/status', isSelf: true });
     assert.strictEqual(m.isCommand(), true);
   });
 
-  it('isCommand returns false for non-self // messages', () => {
-    const m = new Message({ platform: 'beeper', text: '//status', isSelf: false });
+  it('isCommand returns false for non-self / messages', () => {
+    const m = new Message({ platform: 'beeper', text: '/status', isSelf: false });
     assert.strictEqual(m.isCommand(), false);
   });
 
@@ -575,8 +606,8 @@ describe('Message (beeper)', () => {
     assert.strictEqual(m.isCommand(), false);
   });
 
-  it('commandText strips // prefix and trims', () => {
-    const m = new Message({ platform: 'beeper', text: '//exec ls', isSelf: true });
+  it('commandText strips / prefix and trims', () => {
+    const m = new Message({ platform: 'beeper', text: '/exec ls', isSelf: true });
     assert.strictEqual(m.commandText(), 'exec ls');
   });
 
@@ -586,7 +617,7 @@ describe('Message (beeper)', () => {
   });
 
   it('parseCommand extracts command and args', () => {
-    const m = new Message({ platform: 'beeper', text: '//read /etc/hosts', isSelf: true });
+    const m = new Message({ platform: 'beeper', text: '/read /etc/hosts', isSelf: true });
     const parsed = m.parseCommand();
     assert.strictEqual(parsed.command, 'read');
     assert.strictEqual(parsed.args, '/etc/hosts');

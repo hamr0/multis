@@ -157,7 +157,7 @@ function createMessageRouter(config, deps = {}) {
   const maxToolRounds = config.llm?.max_tool_rounds || 5;
 
   // Owner commands that require PIN auth
-  const PIN_PROTECTED = new Set(['exec', 'read', 'index', 'mode']);
+  const PIN_PROTECTED = new Set(['exec', 'read', 'index']);
 
   return async (msg, platform) => {
     // Handle Telegram document uploads
@@ -166,26 +166,11 @@ function createMessageRouter(config, deps = {}) {
       return;
     }
 
-    // Silent mode: archive to memory, no response
-    if (msg.routeAs === 'silent') {
-      const mem = getMem(msg.chatId, { isAdmin: false });
-      if (mem) {
-        const role = msg.isSelf ? 'user' : 'contact';
-        mem.appendMessage(role, msg.text);
-        mem.appendToLog(role, msg.text);
-      }
-      return;
-    }
-
-    // Natural language / business routing (set by platform adapter)
-    if (msg.routeAs === 'natural' || msg.routeAs === 'business') {
-      if (!isPaired(msg, config)) return;
-      await routeAsk(msg, platform, config, indexer, llm, msg.text, getMem, memCfg, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
-      return;
-    }
+    // Interactive replies (PIN, mode picker) must be checked before routeAs
+    // so they aren't swallowed by natural/silent/business routing
+    const text = msg.text || '';
 
     // Check for PIN input (4-6 digit text from user with pending command)
-    const text = msg.text || '';
     if (pinManager.hasPending(msg.senderId) && /^\d{4,6}$/.test(text.trim())) {
       const pending = pinManager.getPending(msg.senderId);
       if (!pending) {
@@ -212,7 +197,6 @@ function createMessageRouter(config, deps = {}) {
       pinManager.clearPending(msg.senderId);
       // Re-route the stored command
       msg = stored.msg;
-      // Fall through to command handling below with stored command/args
       await executeCommand(stored.command, stored.args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
       return;
     }
@@ -235,6 +219,24 @@ function createMessageRouter(config, deps = {}) {
     // Clear stale pending mode if user sends something else
     if (config._pendingMode?.[msg.senderId]) {
       delete config._pendingMode[msg.senderId];
+    }
+
+    // Silent mode: archive to memory, no response
+    if (msg.routeAs === 'silent') {
+      const mem = getMem(msg.chatId, { isAdmin: false });
+      if (mem) {
+        const role = msg.isSelf ? 'user' : 'contact';
+        mem.appendMessage(role, msg.text);
+        mem.appendToLog(role, msg.text);
+      }
+      return;
+    }
+
+    // Natural language / business routing (set by platform adapter)
+    if (msg.routeAs === 'natural' || msg.routeAs === 'business') {
+      if (!isPaired(msg, config)) return;
+      await routeAsk(msg, platform, config, indexer, llm, msg.text, getMem, memCfg, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
+      return;
     }
 
     if (!msg.isCommand()) return;
@@ -395,8 +397,7 @@ async function routeStart(msg, platform, config, code) {
   }
 
   if (!code) {
-    const prefix = msg.platform === 'telegram' ? '/' : '//';
-    await platform.send(msg.chatId, `Send: ${prefix}start <pairing_code>`);
+    await platform.send(msg.chatId, 'Send: /start <pairing_code>');
     logAudit({ action: 'start', user_id: userId, username, status: 'no_code' });
     return;
   }
@@ -435,8 +436,7 @@ async function routeUnpair(msg, platform, config) {
   config.allowed_users = config.allowed_users.filter(id => id !== userId);
   saveConfig(config);
 
-  const prefix = msg.platform === 'telegram' ? '/' : '//';
-  await platform.send(msg.chatId, `Unpaired. Send ${prefix}start <code> to pair again.`);
+  await platform.send(msg.chatId, 'Unpaired. Send /start <code> to pair again.');
   logAudit({ action: 'unpair', user_id: userId, status: 'success' });
 }
 
@@ -447,8 +447,7 @@ async function routeExec(msg, platform, config, command) {
   }
 
   if (!command) {
-    const prefix = msg.platform === 'telegram' ? '/' : '//';
-    await platform.send(msg.chatId, `Usage: ${prefix}exec <command>`);
+    await platform.send(msg.chatId, 'Usage: /exec <command>');
     return;
   }
 
@@ -473,8 +472,7 @@ async function routeRead(msg, platform, config, filePath) {
   }
 
   if (!filePath) {
-    const prefix = msg.platform === 'telegram' ? '/' : '//';
-    await platform.send(msg.chatId, `Usage: ${prefix}read <path>`);
+    await platform.send(msg.chatId, 'Usage: /read <path>');
     return;
   }
 
@@ -495,8 +493,7 @@ async function routeIndex(msg, platform, config, indexer, args) {
   }
 
   if (!args) {
-    const prefix = msg.platform === 'telegram' ? '/' : '//';
-    await platform.send(msg.chatId, `Usage: ${prefix}index <path> <public|admin>`);
+    await platform.send(msg.chatId, 'Usage: /index <path> <public|admin>');
     return;
   }
 
@@ -533,8 +530,7 @@ async function routeIndex(msg, platform, config, indexer, args) {
 
 async function routeSearch(msg, platform, config, indexer, query) {
   if (!query) {
-    const prefix = msg.platform === 'telegram' ? '/' : '//';
-    await platform.send(msg.chatId, `Usage: ${prefix}search <query>`);
+    await platform.send(msg.chatId, 'Usage: /search <query>');
     return;
   }
 
@@ -614,8 +610,7 @@ async function runAgentLoop(llm, messages, toolSchemas, tools, opts = {}) {
 
 async function routeAsk(msg, platform, config, indexer, llm, question, getMem, memCfg, escalationRetries, agentRegistry, toolDeps = {}) {
   if (!question) {
-    const prefix = msg.platform === 'telegram' ? '/' : '//';
-    await platform.send(msg.chatId, `Usage: ${prefix}ask <question>`);
+    await platform.send(msg.chatId, 'Usage: /ask <question>');
     return;
   }
 
@@ -797,8 +792,7 @@ async function routeForget(msg, platform, config, getMem) {
 
 async function routeRemember(msg, platform, config, getMem, note) {
   if (!note) {
-    const prefix = msg.platform === 'telegram' ? '/' : '//';
-    await platform.send(msg.chatId, `Usage: ${prefix}remember <note>`);
+    await platform.send(msg.chatId, 'Usage: /remember <note>');
     return;
   }
   const mem = getMem(msg.chatId, { isAdmin: isOwner(msg.senderId, config, msg) });
@@ -810,7 +804,7 @@ async function routeRemember(msg, platform, config, getMem, note) {
 const VALID_MODES = ['personal', 'business', 'silent'];
 
 async function routeMode(msg, platform, config, args, agentRegistry) {
-  // Owner-only (PIN already checked by router for owner commands)
+  // Owner-only
   if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only command.');
     return;
@@ -818,6 +812,41 @@ async function routeMode(msg, platform, config, args, agentRegistry) {
 
   const parts = (args || '').trim().split(/\s+/);
   const mode = parts[0] ? parts[0].toLowerCase() : '';
+
+  // No args → list chats with current modes (read-only, no PIN needed)
+  if (!mode) {
+    if (msg.platform === 'beeper' && platform._api) {
+      const allChats = await listBeeperChats(platform);
+      if (!allChats || allChats.length === 0) {
+        await platform.send(msg.chatId, 'No chats found.');
+        return;
+      }
+      const lines = allChats.map(c => {
+        const m = getChatMode(config, c.id);
+        return `  ${c.title || c.id} [${m}]`;
+      });
+      await platform.send(msg.chatId, `Chat modes:\n${lines.join('\n')}`);
+    } else {
+      // Telegram: show current chat mode
+      const m = getChatMode(config, msg.chatId);
+      await platform.send(msg.chatId, `Current chat mode: ${m}\n\nUsage: /mode <personal|business|silent> [target]`);
+    }
+    return;
+  }
+
+  if (!VALID_MODES.includes(mode)) {
+    await platform.send(msg.chatId,
+      'Usage: /mode <personal|business|silent> [target]\n\n' +
+      'Modes:\n' +
+      '  personal — admin, commands enabled\n' +
+      '  business — auto-respond, customer-safe\n' +
+      '  silent   — archive only, no bot output\n\n' +
+      'From self-chat: /mode silent (interactive picker)\n' +
+      'From self-chat: /mode silent John (search by name)\n' +
+      'In any chat: /mode business (sets current chat)'
+    );
+    return;
+  }
 
   // Check if second arg is an agent name (optional)
   let agentArg = null;
@@ -827,22 +856,6 @@ async function routeMode(msg, platform, config, args, agentRegistry) {
     target = parts.slice(2).join(' ');
   } else {
     target = parts.slice(1).join(' ');
-  }
-
-  const prefix = msg.platform === 'telegram' ? '/' : '//';
-
-  if (!mode || !VALID_MODES.includes(mode)) {
-    await platform.send(msg.chatId,
-      `Usage: ${prefix}mode <personal|business|silent> [target]\n\n` +
-      'Modes:\n' +
-      '  personal — admin, commands enabled\n' +
-      '  business — auto-respond, customer-safe\n' +
-      '  silent   — archive only, no bot output\n\n' +
-      `From self-chat: ${prefix}mode silent (interactive picker)\n` +
-      `From self-chat: ${prefix}mode silent John (search by name)\n` +
-      `In any chat: ${prefix}mode business (sets current chat)`
-    );
-    return;
   }
 
   // Apply agent assignment if specified
@@ -885,11 +898,13 @@ async function routeMode(msg, platform, config, args, agentRegistry) {
 
   // Beeper: no target — if in self-chat, show interactive picker
   if (msg.isSelf) {
-    const chats = await listBeeperChats(platform);
-    if (!chats || chats.length === 0) {
+    const allChats = await listBeeperChats(platform);
+    if (!allChats || allChats.length === 0) {
       await platform.send(msg.chatId, 'No chats found.');
       return;
     }
+    // Exclude the current chat (command channel) from the picker
+    const chats = allChats.filter(c => c.id !== msg.chatId);
     const list = chats.map((c, i) => {
       const currentMode = getChatMode(config, c.id);
       return `  ${i + 1}) ${c.title || c.name || c.id} [${currentMode}]`;
@@ -918,7 +933,10 @@ function setChatMode(config, chatId, mode) {
 function getChatMode(config, chatId) {
   const modes = config.platforms?.beeper?.chat_modes;
   if (modes && modes[chatId]) return modes[chatId];
-  return config.bot_mode || 'personal';
+  if (config.platforms?.beeper?.default_mode) return config.platforms.beeper.default_mode;
+  // Default: personal bot_mode → silent for Beeper chats, business → business
+  const botMode = config.bot_mode || 'personal';
+  return botMode === 'personal' ? 'silent' : 'business';
 }
 
 async function listBeeperChats(platform) {
@@ -991,31 +1009,30 @@ async function routeAgents(msg, platform, agentRegistry) {
 }
 
 async function routeHelp(msg, platform, config) {
-  const prefix = msg.platform === 'telegram' ? '/' : '//';
   const cmds = [
     'multis commands:',
-    `${prefix}ask <question> - Ask about indexed documents`,
-    `${prefix}status - Bot info`,
-    `${prefix}search <query> - Search indexed documents`,
-    `${prefix}docs - Show indexing stats`,
-    `${prefix}memory - Show conversation memory`,
-    `${prefix}remember <note> - Save a note to memory`,
-    `${prefix}forget - Clear conversation memory`,
-    `${prefix}skills - List available skills`,
-    `${prefix}unpair - Remove pairing`,
-    `${prefix}help - This message`,
+    '/ask <question> - Ask about indexed documents',
+    '/status - Bot info',
+    '/search <query> - Search indexed documents',
+    '/docs - Show indexing stats',
+    '/memory - Show conversation memory',
+    '/remember <note> - Save a note to memory',
+    '/forget - Clear conversation memory',
+    '/skills - List available skills',
+    '/unpair - Remove pairing',
+    '/help - This message',
     '',
     'Plain text messages are treated as questions.'
   ];
   if (isOwner(msg.senderId, config, msg)) {
     cmds.splice(1, 0,
-      `${prefix}exec <cmd> - Run a shell command (owner)`,
-      `${prefix}read <path> - Read a file or directory (owner)`,
-      `${prefix}index <path> <public|admin> - Index a document (owner)`,
-      `${prefix}pin - Change PIN (owner)`,
-      `${prefix}mode <personal|business|silent> [agent] - Set chat mode (owner)`,
-      `${prefix}agent [name] - Show/set agent for this chat (owner)`,
-      `${prefix}agents - List all agents (owner)`,
+      '/exec <cmd> - Run a shell command (owner)',
+      '/read <path> - Read a file or directory (owner)',
+      '/index <path> <public|admin> - Index a document (owner)',
+      '/pin - Change PIN (owner)',
+      '/mode - List chat modes / /mode <personal|business|silent> [target] (owner)',
+      '/agent [name] - Show/set agent for this chat (owner)',
+      '/agents - List all agents (owner)',
       'Send a file to index it (owner, Telegram only)',
       'Use @agentname to invoke a specific agent per-message'
     );

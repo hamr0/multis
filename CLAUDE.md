@@ -88,7 +88,7 @@ npm test             # node --test test/**/*.test.js
 ## Key Patterns
 
 1. **Platform abstraction**: All platforms implement base.js, emit normalized Message objects to a shared router in handlers.js
-2. **Command routing**: Telegram uses `/` prefix, Beeper uses `//`. Plain text routes to implicit `/ask` (RAG pipeline)
+2. **Command routing**: All platforms use `/` prefix. Beeper commands only work from personal/Note-to-self chats. Plain text routes to implicit `/ask` (RAG pipeline)
 3. **Owner model**: First paired user becomes owner. Owner-only commands: exec, read, index. Check with `isOwner(userId, config)`
 
 ## Config and Secrets
