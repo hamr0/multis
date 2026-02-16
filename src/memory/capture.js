@@ -24,7 +24,7 @@ Rules:
 async function runCapture(chatId, mem, llm, indexer, options = {}) {
   const keepLast = options.keepLast || 5;
   const scope = options.scope || 'kb';
-  const maxSections = options.maxSections || 5;
+  const maxSections = options.maxSections || 12;
 
   try {
     const recent = mem.loadRecent();

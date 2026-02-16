@@ -14,13 +14,14 @@ class ChatMemoryManager {
   constructor(chatId, options = {}) {
     this.chatId = String(chatId);
     this.isAdmin = !!options.isAdmin;
-    this.dir = path.join(MEMORY_BASE, this.chatId);
+    const base = options.baseDir || MEMORY_BASE;
+    this.dir = path.join(base, this.chatId);
     this.profilePath = path.join(this.dir, 'profile.json');
     this.recentPath = path.join(this.dir, 'recent.json');
     this.logDir = path.join(this.dir, 'log');
     // Admin chats share a single memory.md across platforms
     if (this.isAdmin) {
-      const adminDir = path.join(MEMORY_BASE, 'admin');
+      const adminDir = path.join(base, 'admin');
       if (!fs.existsSync(adminDir)) fs.mkdirSync(adminDir, { recursive: true });
       this.memoryPath = path.join(adminDir, 'memory.md');
     } else {

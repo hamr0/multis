@@ -93,9 +93,9 @@ describe('loadConfig — default merging', () => {
 
     assert.strictEqual(config.memory.enabled, true);
     assert.strictEqual(config.memory.recent_window, 20);
-    assert.strictEqual(config.memory.capture_threshold, 20);
+    assert.strictEqual(config.memory.capture_threshold, 10);
     assert.strictEqual(config.memory.decay_rate, 0.05);
-    assert.strictEqual(config.memory.memory_max_sections, 5);
+    assert.strictEqual(config.memory.memory_max_sections, 12);
     assert.strictEqual(config.memory.retention_days, 90);
     assert.strictEqual(config.memory.admin_retention_days, 365);
     assert.strictEqual(config.memory.log_retention_days, 30);

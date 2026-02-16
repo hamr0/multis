@@ -226,19 +226,19 @@ Message arrives → append to recent.json + daily log
                      │      scope=admin (admin chat) or scope=user:<chatId> (customer)
                      │      element_type='memory_summary', document_type='conversation'
                      │
-                     ├─ 4. PRUNE memory.md — keep only last N sections (default 5)
+                     ├─ 4. PRUNE memory.md — keep only last N sections (default 12)
                      │      Dropped sections already indexed in step 3, nothing lost
                      │
                      └─ 5. Trim recent.json to last 5
 ```
 
-**memory.md = hot scratchpad.** Small, recent, always fresh. When the LLM needs older context, FTS search finds it from the 90-day indexed archive. This keeps system prompts lean while preserving full history.
+**memory.md = hot scratchpad.** Small, recent, always fresh. When the LLM needs older context, the `recall_memory` tool searches FTS for `memory_summary` chunks from the 90-day indexed archive. This keeps system prompts lean while preserving full history.
 
 ### Retention and cleanup
 
 | What | Default | Config key | Cleanup |
 |------|---------|------------|---------|
-| memory.md sections | Last 5 captures | `memory.memory_max_sections` | Pruned at each capture — oldest sections drop off |
+| memory.md sections | Last 12 captures | `memory.memory_max_sections` | Pruned at each capture — oldest sections drop off |
 | FTS summary chunks | 90 days | `memory.retention_days` | Delete old chunks on startup / daily |
 | Admin FTS chunks | 365 days | `memory.admin_retention_days` | Same |
 | Daily logs | 30 days | `memory.log_retention_days` | Delete old `log/YYYY-MM-DD.md` files |
@@ -288,6 +288,14 @@ Messages:
 | `/memory` | Show this chat's memory.md |
 | `/forget` | Clear memory.md (keeps raw logs) |
 | `/remember <note>` | Manually add a note to memory.md |
+
+### recall_memory tool
+
+The LLM has a `recall_memory` tool that searches only `memory_summary` chunks (not documents). Used when the user references something discussed before ("do you remember...", "my wife's name", "what did I say about..."). The system prompt nudges the LLM to use it for older memories not visible in the current memory.md section.
+
+- **Scope-filtered**: owner sees all memory scopes; non-owner only sees `user:<chatId>` memories
+- **Type-filtered**: `store.search()` accepts a `types` option that adds `AND c.element_type IN (...)` to the SQL query
+- **Not owner_only**: customers can recall their own scoped memories too
 
 ---
 
@@ -570,8 +578,8 @@ All behavioral settings are configurable. Sane defaults applied when missing.
   },
   "memory": {
     "recent_window": 20,
-    "capture_threshold": 20,
-    "memory_max_sections": 5,
+    "capture_threshold": 10,
+    "memory_max_sections": 12,
     "retention_days": 90,
     "admin_retention_days": 365,
     "log_retention_days": 30,

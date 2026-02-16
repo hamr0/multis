@@ -180,14 +180,20 @@ class DocumentStore {
 
     const ftsQuery = terms.join(' OR ');
 
-    // Build scope filter if provided
-    const { scopes, decay } = options;
+    // Build scope and type filters if provided
+    const { scopes, decay, types } = options;
     let scopeClause = '';
+    let typeClause = '';
     const params = [ftsQuery];
     if (scopes && scopes.length > 0) {
       const placeholders = scopes.map(() => '?').join(', ');
       scopeClause = `AND c.scope IN (${placeholders})`;
       params.push(...scopes);
+    }
+    if (types && types.length > 0) {
+      const tp = types.map(() => '?').join(', ');
+      typeClause = `AND c.element_type IN (${tp})`;
+      params.push(...types);
     }
     // Fetch 3x candidates for activation re-ranking
     const candidateLimit = limit * 3;
@@ -199,6 +205,7 @@ class DocumentStore {
       JOIN chunks c ON fts.chunk_id = c.chunk_id
       WHERE chunks_fts MATCH ?
       ${scopeClause}
+      ${typeClause}
       ORDER BY rank
       LIMIT ?
     `);

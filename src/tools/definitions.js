@@ -76,6 +76,31 @@ const TOOLS = [
     }
   },
   {
+    name: 'recall_memory',
+    description: 'Search your memory of past conversations. Use when the user references something discussed before ("do you remember...", "what did I say about...", "my wife\'s name"), or when answering requires personal context. This searches conversation summaries, NOT documents.',
+    platforms: ['linux', 'macos', 'android'],
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'What to search for in memory' }
+      },
+      required: ['query']
+    },
+    execute: async ({ query }, ctx) => {
+      if (!ctx.indexer) return 'Memory search not available.';
+      const scopes = ctx.isOwner ? undefined : [`user:${ctx.chatId}`];
+      const results = ctx.indexer.store.search(query, 5, {
+        scopes,
+        types: ['memory_summary']
+      });
+      if (results.length === 0) return 'No matching memories found.';
+      return results.map((r, i) => {
+        const date = r.createdAt?.slice(0, 10) || 'unknown date';
+        return `[${i + 1}] ${date}: ${r.content.slice(0, 500)}`;
+      }).join('\n\n');
+    }
+  },
+  {
     name: 'remember',
     description: 'Save a note to persistent memory for this conversation. Use when the user asks to remember something.',
     platforms: ['linux', 'macos', 'android'],

@@ -22,24 +22,8 @@ describe('ChatMemoryManager — pruneMemory', () => {
   });
 
   function makeMem(chatId, opts = {}) {
-    // Create a manager that writes into our temp dir
     const baseDir = path.join(tmpDir, '.multis', 'memory', 'chats');
-    const mgr = new ChatMemoryManager(chatId, opts);
-    // Override paths to use our tmpDir
-    const chatDir = path.join(baseDir, String(chatId));
-    mgr.dir = chatDir;
-    mgr.profilePath = path.join(chatDir, 'profile.json');
-    mgr.recentPath = path.join(chatDir, 'recent.json');
-    mgr.logDir = path.join(chatDir, 'log');
-    if (opts.isAdmin) {
-      const adminDir = path.join(baseDir, 'admin');
-      if (!fs.existsSync(adminDir)) fs.mkdirSync(adminDir, { recursive: true });
-      mgr.memoryPath = path.join(adminDir, 'memory.md');
-    } else {
-      mgr.memoryPath = path.join(chatDir, 'memory.md');
-    }
-    mgr.ensureDirectories();
-    return mgr;
+    return new ChatMemoryManager(chatId, { ...opts, baseDir });
   }
 
   describe('pruneMemory()', () => {
@@ -113,24 +97,26 @@ describe('ChatMemoryManager — pruneMemory', () => {
   });
 
   describe('getMemoryManager cache', () => {
+    const baseDir = () => path.join(tmpDir, '.multis', 'memory', 'chats');
+
     it('returns same instance for same chatId and role', () => {
       const cache = new Map();
-      const m1 = getMemoryManager(cache, 'chat1');
-      const m2 = getMemoryManager(cache, 'chat1');
+      const m1 = getMemoryManager(cache, 'chat1', { baseDir: baseDir() });
+      const m2 = getMemoryManager(cache, 'chat1', { baseDir: baseDir() });
       assert.strictEqual(m1, m2);
     });
 
     it('returns different instances for different chatIds', () => {
       const cache = new Map();
-      const m1 = getMemoryManager(cache, 'chat1');
-      const m2 = getMemoryManager(cache, 'chat2');
+      const m1 = getMemoryManager(cache, 'chat1', { baseDir: baseDir() });
+      const m2 = getMemoryManager(cache, 'chat2', { baseDir: baseDir() });
       assert.notStrictEqual(m1, m2);
     });
 
     it('returns different instances for admin vs user on same chatId', () => {
       const cache = new Map();
-      const m1 = getMemoryManager(cache, 'chat1', { isAdmin: false });
-      const m2 = getMemoryManager(cache, 'chat1', { isAdmin: true });
+      const m1 = getMemoryManager(cache, 'chat1', { isAdmin: false, baseDir: baseDir() });
+      const m2 = getMemoryManager(cache, 'chat1', { isAdmin: true, baseDir: baseDir() });
       assert.notStrictEqual(m1, m2);
     });
   });
@@ -199,18 +185,9 @@ describe('runCapture — indexes summary, not raw messages', () => {
     const dbPath = path.join(tmpDir, 'capture-test.db');
     const store = new DocumentStore(dbPath);
 
-    // Create a memory manager
+    // Create a memory manager using baseDir to avoid leaking into ~/.multis
     const baseDir = path.join(tmpDir, '.multis', 'memory', 'chats');
-    const chatDir = path.join(baseDir, 'testchat');
-    fs.mkdirSync(path.join(chatDir, 'log'), { recursive: true });
-
-    const mem = new ChatMemoryManager('testchat');
-    mem.dir = chatDir;
-    mem.profilePath = path.join(chatDir, 'profile.json');
-    mem.recentPath = path.join(chatDir, 'recent.json');
-    mem.logDir = path.join(chatDir, 'log');
-    mem.memoryPath = path.join(chatDir, 'memory.md');
-    mem.ensureDirectories();
+    const mem = new ChatMemoryManager('testchat', { baseDir });
 
     // Seed recent messages
     for (let i = 0; i < 10; i++) {
@@ -270,15 +247,7 @@ describe('runCapture — indexes summary, not raw messages', () => {
     const store = new DocumentStore(dbPath);
 
     const baseDir = path.join(tmpDir, '.multis', 'memory', 'chats');
-    const chatDir = path.join(baseDir, 'skipchat');
-    fs.mkdirSync(path.join(chatDir, 'log'), { recursive: true });
-
-    const mem = new ChatMemoryManager('skipchat');
-    mem.dir = chatDir;
-    mem.recentPath = path.join(chatDir, 'recent.json');
-    mem.logDir = path.join(chatDir, 'log');
-    mem.memoryPath = path.join(chatDir, 'memory.md');
-    mem.ensureDirectories();
+    const mem = new ChatMemoryManager('skipchat', { baseDir });
 
     mem.appendMessage('user', 'hi');
     mem.appendMessage('assistant', 'hello');
