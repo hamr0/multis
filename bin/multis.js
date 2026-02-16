@@ -13,58 +13,75 @@ const SRC_INDEX = path.join(__dirname, '..', 'src', 'index.js');
 
 const command = process.argv[2];
 
-switch (command) {
-  case 'init':
-    runInit();
-    break;
-  case 'start':
-    runStart();
-    break;
-  case 'stop':
-  case 'exit':
-    runStop();
-    break;
-  case 'status':
-    runStatus();
-    break;
-  case 'doctor':
-    runDoctor();
-    break;
-  default:
-    showHelp(command);
-    process.exit(command ? 1 : 0);
+if (command) {
+  // Direct command mode: multis start, multis stop, etc.
+  runCommand(command);
+} else {
+  // Interactive menu mode: just `multis`
+  runMenu();
 }
 
-function showHelp(unknownCmd) {
-  const bold   = (s) => `\x1b[1m${s}\x1b[0m`;
-  const cyan   = (s) => `\x1b[36m${s}\x1b[0m`;
-  const dim    = (s) => `\x1b[2m${s}\x1b[0m`;
-  const red    = (s) => `\x1b[31m${s}\x1b[0m`;
+function runCommand(cmd) {
+  switch (cmd) {
+    case 'init':   runInit(); break;
+    case 'start':  runStart(); break;
+    case 'stop':   runStop(); break;
+    case 'status': runStatus(); break;
+    case 'doctor': runDoctor(); break;
+    default:
+      console.log(`\x1b[31mUnknown command: ${cmd}\x1b[0m\n`);
+      console.log('Usage: multis <init|start|stop|status|doctor>');
+      console.log('   or: multis  (interactive menu)');
+      process.exit(1);
+  }
+}
 
-  if (unknownCmd) console.log(red(`Unknown command: ${unknownCmd}\n`));
+async function runMenu() {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ask = (q) => new Promise(resolve => rl.question(q, resolve));
 
-  console.log(bold('multis') + dim(' — personal AI assistant\n'));
-  console.log('Usage: multis <command>\n');
-  console.log('Commands:');
-  console.log(`  ${cyan('init')}      Set up multis (interactive wizard)`);
-  console.log(`  ${cyan('start')}     Start daemon in background`);
-  console.log(`  ${cyan('stop')}      Stop running daemon`);
-  console.log(`  ${cyan('status')}    Check if daemon is running`);
-  console.log(`  ${cyan('doctor')}    Run diagnostic checks`);
-  console.log(`  ${cyan('exit')}      Alias for stop`);
+  const bold = (s) => `\x1b[1m${s}\x1b[0m`;
+  const cyan = (s) => `\x1b[36m${s}\x1b[0m`;
+  const dim  = (s) => `\x1b[2m${s}\x1b[0m`;
+  const green = (s) => `\x1b[32m${s}\x1b[0m`;
+  const yellow = (s) => `\x1b[33m${s}\x1b[0m`;
 
-  // Show quick status
+  console.log(bold('\nmultis') + dim(' — personal AI assistant\n'));
+
+  // Quick status
   const running = isRunning();
   const hasConfig = fs.existsSync(CONFIG_PATH);
-  console.log('');
   if (!hasConfig) {
-    console.log(`Get started: ${bold('multis init')}`);
-  } else if (!running) {
-    console.log(`Status: stopped  →  ${bold('multis start')}`);
-  } else {
+    console.log(`Status: ${yellow('not configured')}\n`);
+  } else if (running) {
     const pid = fs.readFileSync(PID_PATH, 'utf-8').trim();
-    console.log(`Status: running (PID ${pid})`);
+    console.log(`Status: ${green('running')} ${dim(`(PID ${pid})`)}\n`);
+  } else {
+    console.log(`Status: ${yellow('stopped')}\n`);
   }
+
+  console.log('  1) init      Set up multis (interactive wizard)');
+  console.log('  2) start     Start daemon in background');
+  console.log('  3) stop      Stop running daemon');
+  console.log('  4) status    Check if daemon is running');
+  console.log('  5) doctor    Run diagnostic checks');
+  console.log('  0) exit      Quit this menu\n');
+
+  const choice = (await ask('Choose (0-5): ')).trim();
+  rl.close();
+
+  const commands = { '1': 'init', '2': 'start', '3': 'stop', '4': 'status', '5': 'doctor' };
+  if (choice === '0' || choice === '') {
+    console.log('Bye.');
+    process.exit(0);
+  }
+  const cmd = commands[choice];
+  if (!cmd) {
+    console.log(`Invalid choice: ${choice}`);
+    process.exit(1);
+  }
+  console.log('');
+  runCommand(cmd);
 }
 
 // ---------------------------------------------------------------------------

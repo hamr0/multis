@@ -29,9 +29,10 @@ describe('CLI commands', () => {
     }
   }
 
-  it('no args prints usage', () => {
+  it('no args shows interactive menu', () => {
     const r = run('');
-    assert.match(r.stdout, /Usage: multis/);
+    assert.match(r.stdout, /multis/);
+    assert.match(r.stdout, /init|start|stop|status|doctor/);
   });
 
   it('unknown command prints usage and exits 1', () => {
