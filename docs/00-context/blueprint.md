@@ -603,8 +603,11 @@ Full onboarding wizard — init finishes = everything works.
 ```
 multis init
   │
-  ├─ Step 1a: Platform selection (Telegram / Beeper / Both)
-  ├─ Step 1b: Bot mode (personal / business) → sets bot_mode
+  ├─ Step 1: "What do you need?"
+  │   ├─ 1) Personal assistant (Telegram) → personal mode, Telegram only
+  │   ├─ 2) Personal assistant (Beeper) [default] → personal mode, Beeper only
+  │   └─ 3) Business chatbot (Beeper) → business mode, Beeper
+  │       └─ Follow-up: "Also use Telegram as admin channel?" (y/n)
   │
   ├─ Step 2a: Telegram setup (if selected)
   │   ├─ Paste token → format validation → getMe() verification

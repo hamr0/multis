@@ -135,26 +135,43 @@ async function runInit() {
   }
 
   // -----------------------------------------------------------------------
-  // Step 1: Platform + Mode
+  // Step 1: What do you need?
   // -----------------------------------------------------------------------
-  step(1, TOTAL_STEPS, 'Platform & Mode');
+  step(1, TOTAL_STEPS, 'What do you need?');
 
-  console.log('Which platform will you use?');
-  console.log('  1) Telegram  — chat via your own Telegram bot');
-  console.log('  2) Beeper    — use Beeper Desktop (no API keys needed)');
-  console.log('  3) Both');
-  const platformChoice = (await ask('\nChoose (1/2/3) [1]: ')).trim() || '1';
+  console.log('  1) Personal assistant (Telegram)');
+  console.log('     ' + c.dim('Your private AI. Commands, docs, search.'));
+  console.log('');
+  console.log('  2) Personal assistant (Beeper) ' + c.dim('— recommended'));
+  console.log('     ' + c.dim('Same, plus all your messengers archived and searchable.'));
+  console.log('');
+  console.log('  3) Business chatbot (Beeper)');
+  console.log('     ' + c.dim('Auto-respond to customers across all channels.'));
 
-  const useTelegram = platformChoice === '1' || platformChoice === '3';
-  const useBeeper = platformChoice === '2' || platformChoice === '3';
+  const setupChoice = (await ask('\nChoose (1/2/3) [2]: ')).trim() || '2';
+
+  let useTelegram = false;
+  let useBeeper = false;
+
+  switch (setupChoice) {
+    case '1':
+      useTelegram = true;
+      config.bot_mode = 'personal';
+      break;
+    case '3': {
+      useBeeper = true;
+      config.bot_mode = 'business';
+      const addTg = (await ask('\nAlso use Telegram as a second admin channel? (y/n) [n]: ')).trim().toLowerCase();
+      if (addTg === 'y' || addTg === 'yes') useTelegram = true;
+      break;
+    }
+    default: // '2' or anything else
+      useBeeper = true;
+      config.bot_mode = 'personal';
+      break;
+  }
 
   if (!config.platforms) config.platforms = {};
-
-  console.log('\nHow will you use this bot?');
-  console.log('  1) Personal  — your private assistant, all chats silent by default');
-  console.log('  2) Business  — customer support, all chats auto-respond by default');
-  const modeChoice = (await ask('\nChoose (1/2) [1]: ')).trim() || '1';
-  config.bot_mode = modeChoice === '2' ? 'business' : 'personal';
   summary.botMode = config.bot_mode;
 
   const platformNames = [useTelegram && 'Telegram', useBeeper && 'Beeper'].filter(Boolean).join(' + ');
@@ -300,8 +317,29 @@ async function runInit() {
         if (!config.platforms.beeper) config.platforms.beeper = {};
         config.platforms.beeper.enabled = true;
         config.platforms.beeper.url = config.platforms.beeper.url || 'http://localhost:23373';
-        config.platforms.beeper.command_prefix = config.platforms.beeper.command_prefix || '//';
+        config.platforms.beeper.command_prefix = config.platforms.beeper.command_prefix || '/';
         config.platforms.beeper.poll_interval = config.platforms.beeper.poll_interval || 3000;
+
+        // Auto-detect Telegram bot chat in Beeper (to exclude from polling)
+        if (useTelegram && token) {
+          try {
+            const chatsData = await beeper.api(token, 'GET', '/v1/chats?limit=30');
+            const beeperChats = chatsData.items || [];
+            // Match by bot username (without @) in chat title
+            const botName = (summary.telegram?.bot || '').replace('@', '').toLowerCase();
+            if (botName) {
+              const botChat = beeperChats.find(c =>
+                (c.title || c.name || '').toLowerCase() === botName ||
+                (c.title || c.name || '').toLowerCase() === botName.replace('bot', '')
+              );
+              if (botChat) {
+                const botChatId = botChat.id || botChat.chatID;
+                config.platforms.beeper.bot_chat_id = botChatId;
+                console.log(c.ok(`Bot chat detected in Beeper: "${botChat.title || botChat.name}" — will be excluded from polling`));
+              }
+            }
+          } catch { /* non-critical */ }
+        }
 
         summary.beeper = 'connected';
 
