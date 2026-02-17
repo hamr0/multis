@@ -600,34 +600,41 @@ Chat is the primary interface. CLI is just for lifecycle management.
 
 Full onboarding wizard — init finishes = everything works.
 
+**Re-init behavior:** When config already exists, each step shows the current value with `[Enter to keep]`. Pressing Enter skips that step entirely (no re-verification). Only steps where the user provides new input run the full setup flow. First-time users (no config) see the full wizard with no skip options.
+
 ```
 multis init
   │
   ├─ Step 1: "What do you need?"
+  │   ├─ Re-init: shows "Current: Personal assistant (Beeper)" + Enter to keep
   │   ├─ 1) Personal assistant (Telegram) → personal mode, Telegram only
   │   ├─ 2) Personal assistant (Beeper) [default] → personal mode, Beeper only
   │   └─ 3) Business chatbot (Beeper) → business mode, Beeper
   │       └─ Follow-up: "Also use Telegram as admin channel?" (y/n)
   │
   ├─ Step 2a: Telegram setup (if selected)
+  │   ├─ Re-init: shows "@botname owner: ID ✓" + Enter to keep (skips verification)
   │   ├─ Paste token → format validation → getMe() verification
   │   ├─ Print "Token verified — bot is @username"
   │   ├─ Wait for /start (60s) → auto-pair as owner
   │   └─ Timeout: warn, continue (pair later)
   │
   ├─ Step 2b: Beeper setup (if selected)
+  │   ├─ Re-init: shows "configured (url) ✓" + Enter to keep
   │   ├─ Check Desktop API at localhost:23373
   │   ├─ OAuth PKCE flow (reuses setup-beeper.js exports)
   │   ├─ List connected accounts
   │   └─ Show always-on warnings + recovery key reminder
   │
   ├─ Step 3: LLM provider
+  │   ├─ Re-init: shows "Provider (model) ✓" + Enter to keep
   │   ├─ 1) Anthropic → ask key → verify with real API call
   │   ├─ 2) OpenAI → ask key → verify
   │   ├─ 3) OpenAI-compatible → ask base URL + model + key → verify
   │   └─ 4) Ollama → check localhost:11434 reachable
   │
   ├─ Step 4: PIN (4-6 digits, optional)
+  │   └─ Re-init: shows "PIN: set ✓" + Enter to keep, or type new PIN
   │
   └─ Step 5: Save config + summary with verification status
 ```

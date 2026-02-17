@@ -129,7 +129,13 @@ async function runInit() {
   const templatePath = path.join(__dirname, '..', '.multis-template', 'config.json');
   if (fs.existsSync(CONFIG_PATH)) {
     config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
-    console.log(c.dim('Existing config found — updating.\n'));
+    const profile = config.bot_mode === 'business' ? 'Business chatbot' : 'Personal assistant';
+    const plats = [
+      config.platforms?.telegram?.enabled && 'Telegram',
+      config.platforms?.beeper?.enabled && 'Beeper',
+    ].filter(Boolean).join(' + ') || 'no platforms';
+    const llmName = config.llm?.provider || 'no LLM';
+    console.log(c.dim(`Existing config: ${profile} (${plats}), ${llmName} — updating.\n`));
   } else if (fs.existsSync(templatePath)) {
     config = JSON.parse(fs.readFileSync(templatePath, 'utf-8'));
   }
@@ -138,6 +144,23 @@ async function runInit() {
   // Step 1: What do you need?
   // -----------------------------------------------------------------------
   step(1, TOTAL_STEPS, 'What do you need?');
+
+  let useTelegram = false;
+  let useBeeper = false;
+
+  // Check if we have a valid existing setup to offer Enter-to-keep
+  const hasExistingSetup = config.bot_mode &&
+    (config.platforms?.telegram?.enabled || config.platforms?.beeper?.enabled);
+
+  if (hasExistingSetup) {
+    const profile = config.bot_mode === 'business' ? 'Business chatbot' : 'Personal assistant';
+    const plats = [
+      config.platforms?.telegram?.enabled && 'Telegram',
+      config.platforms?.beeper?.enabled && 'Beeper',
+    ].filter(Boolean).join(' + ');
+    console.log(`  Current: ${profile} (${plats})`);
+    console.log('');
+  }
 
   console.log('  1) Personal assistant (Telegram)');
   console.log('     ' + c.dim('Your private AI. Commands, docs, search.'));
@@ -148,34 +171,41 @@ async function runInit() {
   console.log('  3) Business chatbot (Beeper)');
   console.log('     ' + c.dim('Auto-respond to customers across all channels.'));
 
-  const setupChoice = (await ask('\nChoose (1/2/3) [2]: ')).trim() || '2';
+  const step1Default = hasExistingSetup ? '' : '2';
+  const step1Hint = hasExistingSetup ? 'Enter to keep, or choose 1/2/3' : '1/2/3';
+  const setupChoice = (await ask(`\nChoose (${step1Hint}) [${step1Default || 'keep'}]: `)).trim() || step1Default;
 
-  let useTelegram = false;
-  let useBeeper = false;
-
-  switch (setupChoice) {
-    case '1':
-      useTelegram = true;
-      config.bot_mode = 'personal';
-      break;
-    case '3': {
-      useBeeper = true;
-      config.bot_mode = 'business';
-      const addTg = (await ask('\nAlso use Telegram as a second admin channel? (y/n) [n]: ')).trim().toLowerCase();
-      if (addTg === 'y' || addTg === 'yes') useTelegram = true;
-      break;
+  if (!setupChoice && hasExistingSetup) {
+    // Keep existing setup
+    useTelegram = !!config.platforms?.telegram?.enabled;
+    useBeeper = !!config.platforms?.beeper?.enabled;
+    const profile = config.bot_mode === 'business' ? 'Business chatbot' : 'Personal assistant';
+    const plats = [useTelegram && 'Telegram', useBeeper && 'Beeper'].filter(Boolean).join(' + ');
+    console.log(c.ok(`Keeping: ${plats}, ${config.bot_mode} mode`));
+  } else {
+    switch (setupChoice || '2') {
+      case '1':
+        useTelegram = true;
+        config.bot_mode = 'personal';
+        break;
+      case '3': {
+        useBeeper = true;
+        config.bot_mode = 'business';
+        const addTg = (await ask('\nAlso use Telegram as a second admin channel? (y/n) [n]: ')).trim().toLowerCase();
+        if (addTg === 'y' || addTg === 'yes') useTelegram = true;
+        break;
+      }
+      default: // '2' or anything else
+        useBeeper = true;
+        config.bot_mode = 'personal';
+        break;
     }
-    default: // '2' or anything else
-      useBeeper = true;
-      config.bot_mode = 'personal';
-      break;
+    const platformNames = [useTelegram && 'Telegram', useBeeper && 'Beeper'].filter(Boolean).join(' + ');
+    console.log(c.ok(`${platformNames}, ${config.bot_mode} mode`));
   }
 
   if (!config.platforms) config.platforms = {};
   summary.botMode = config.bot_mode;
-
-  const platformNames = [useTelegram && 'Telegram', useBeeper && 'Beeper'].filter(Boolean).join(' + ');
-  console.log(c.ok(`${platformNames}, ${config.bot_mode} mode`));
 
   // -----------------------------------------------------------------------
   // Step 2: Platform connections
@@ -184,84 +214,107 @@ async function runInit() {
 
   if (useTelegram) {
     console.log(c.bold('Telegram\n'));
-    console.log('Create a bot via @BotFather on Telegram:');
-    console.log(c.dim('  1. Search @BotFather → /newbot → pick name → copy token\n'));
 
-    let token = '';
-    let botUsername = '';
-    while (!botUsername) {
-      const currentToken = config.telegram_bot_token || config.platforms?.telegram?.bot_token || '';
-      token = (await ask(`Bot token${currentToken ? ` [${currentToken.slice(0, 8)}...]` : ''}: `)).trim();
-      if (!token && currentToken) token = currentToken;
+    // Check if Telegram is already configured with a verified token
+    const existingTgToken = config.telegram_bot_token || config.platforms?.telegram?.bot_token || '';
+    const existingTgBot = config.platforms?.telegram?.bot_username || '';
+    const existingOwner = config.owner_id || '';
+    let skipTelegram = false;
 
-      if (!token) {
-        console.log(c.warn('Token required for Telegram. Try again.\n'));
-        continue;
-      }
-
-      if (!/^\d+:[A-Za-z0-9_-]+$/.test(token)) {
-        console.log(c.warn('Invalid format (expected digits:alphanumeric). Try again.\n'));
-        continue;
-      }
-
-      console.log('Verifying token...');
-      try {
-        const { Telegraf } = require('telegraf');
-        const testBot = new Telegraf(token);
-        const me = await testBot.telegram.getMe();
-        botUsername = me.username;
-        console.log(c.ok(`Bot verified: @${botUsername}\n`));
-
-        console.log(`Now send ${c.bold('/start')} to @${botUsername} in Telegram`);
-        console.log(c.dim('Waiting up to 60 seconds...\n'));
-
-        const paired = await new Promise((resolve) => {
-          const timeout = setTimeout(() => {
-            testBot.stop('timeout');
-            resolve(null);
-          }, 60000);
-
-          testBot.start((ctx) => {
-            clearTimeout(timeout);
-            const userId = String(ctx.from.id);
-            const username = ctx.from.username || ctx.from.first_name || userId;
-            testBot.stop('paired');
-            resolve({ userId, username });
-          });
-
-          testBot.launch({ dropPendingUpdates: true }).catch(() => {
-            clearTimeout(timeout);
-            resolve(null);
-          });
-        });
-
-        if (paired) {
-          config.owner_id = paired.userId;
-          if (!config.allowed_users) config.allowed_users = [];
-          if (!config.allowed_users.includes(paired.userId)) {
-            config.allowed_users.push(paired.userId);
-          }
-          console.log(c.ok(`Paired as owner (@${paired.username})`));
-          summary.telegram = { bot: `@${botUsername}`, owner: `@${paired.username}` };
-        } else {
-          console.log(c.warn('No /start received. You can pair later via /start <code>.'));
-          summary.telegram = { bot: `@${botUsername}`, owner: null };
-        }
-      } catch (err) {
-        console.log(c.fail(`Verification failed: ${err.message}`));
-        const retry = (await ask('Try a different token? (Y/n): ')).trim().toLowerCase();
-        if (retry === 'n') {
-          summary.telegram = { bot: null, owner: null, error: 'token not verified' };
-          break;
-        }
-        continue;
+    if (existingTgToken && existingTgBot) {
+      const ownerStr = existingOwner ? ` owner: ${existingOwner}` : '';
+      console.log(`  Telegram: @${existingTgBot}${ownerStr} ${c.green('✓')}`);
+      const tgInput = (await ask('  [Enter to keep, or paste new token]: ')).trim();
+      if (!tgInput) {
+        skipTelegram = true;
+        const ownerDisplay = existingOwner ? `ID ${existingOwner}` : null;
+        summary.telegram = { bot: `@${existingTgBot}`, owner: ownerDisplay };
+        console.log(c.ok('Keeping Telegram config'));
       }
     }
 
-    config.telegram_bot_token = token;
-    if (!config.platforms.telegram) config.platforms.telegram = {};
-    config.platforms.telegram.bot_token = token;
-    config.platforms.telegram.enabled = true;
+    if (!skipTelegram) {
+      if (!existingTgBot) {
+        console.log('Create a bot via @BotFather on Telegram:');
+        console.log(c.dim('  1. Search @BotFather → /newbot → pick name → copy token\n'));
+      }
+
+      let token = '';
+      let botUsername = '';
+      while (!botUsername) {
+        token = (await ask(`Bot token${existingTgToken ? ` [${existingTgToken.slice(0, 8)}...]` : ''}: `)).trim();
+        if (!token && existingTgToken) token = existingTgToken;
+
+        if (!token) {
+          console.log(c.warn('Token required for Telegram. Try again.\n'));
+          continue;
+        }
+
+        if (!/^\d+:[A-Za-z0-9_-]+$/.test(token)) {
+          console.log(c.warn('Invalid format (expected digits:alphanumeric). Try again.\n'));
+          continue;
+        }
+
+        console.log('Verifying token...');
+        try {
+          const { Telegraf } = require('telegraf');
+          const testBot = new Telegraf(token);
+          const me = await testBot.telegram.getMe();
+          botUsername = me.username;
+          console.log(c.ok(`Bot verified: @${botUsername}\n`));
+
+          console.log(`Now send ${c.bold('/start')} to @${botUsername} in Telegram`);
+          console.log(c.dim('Waiting up to 60 seconds...\n'));
+
+          const paired = await new Promise((resolve) => {
+            const timeout = setTimeout(() => {
+              testBot.stop('timeout');
+              resolve(null);
+            }, 60000);
+
+            testBot.start((ctx) => {
+              clearTimeout(timeout);
+              const userId = String(ctx.from.id);
+              const username = ctx.from.username || ctx.from.first_name || userId;
+              testBot.stop('paired');
+              resolve({ userId, username });
+            });
+
+            testBot.launch({ dropPendingUpdates: true }).catch(() => {
+              clearTimeout(timeout);
+              resolve(null);
+            });
+          });
+
+          if (paired) {
+            config.owner_id = paired.userId;
+            if (!config.allowed_users) config.allowed_users = [];
+            if (!config.allowed_users.includes(paired.userId)) {
+              config.allowed_users.push(paired.userId);
+            }
+            console.log(c.ok(`Paired as owner (@${paired.username})`));
+            summary.telegram = { bot: `@${botUsername}`, owner: `@${paired.username}` };
+          } else {
+            console.log(c.warn('No /start received. You can pair later via /start <code>.'));
+            summary.telegram = { bot: `@${botUsername}`, owner: null };
+          }
+        } catch (err) {
+          console.log(c.fail(`Verification failed: ${err.message}`));
+          const retry = (await ask('Try a different token? (Y/n): ')).trim().toLowerCase();
+          if (retry === 'n') {
+            summary.telegram = { bot: null, owner: null, error: 'token not verified' };
+            break;
+          }
+          continue;
+        }
+      }
+
+      config.telegram_bot_token = token;
+      if (!config.platforms.telegram) config.platforms.telegram = {};
+      config.platforms.telegram.bot_token = token;
+      config.platforms.telegram.bot_username = botUsername;
+      config.platforms.telegram.enabled = true;
+    }
   } else {
     if (!config.platforms.telegram) config.platforms.telegram = {};
     config.platforms.telegram.enabled = false;
@@ -269,7 +322,23 @@ async function runInit() {
 
   if (useBeeper) {
     console.log(`\n${c.bold('Beeper')}\n`);
-    try {
+
+    // Check if Beeper is already configured
+    const existingBeeperEnabled = config.platforms?.beeper?.enabled;
+    let skipBeeper = false;
+
+    if (existingBeeperEnabled) {
+      const beeperUrl = config.platforms.beeper.url || 'localhost:23373';
+      console.log(`  Beeper: configured (${beeperUrl}) ${c.green('✓')}`);
+      const beeperInput = (await ask('  [Enter to keep, or type "r" to reconfigure]: ')).trim().toLowerCase();
+      if (!beeperInput) {
+        skipBeeper = true;
+        summary.beeper = 'connected (kept)';
+        console.log(c.ok('Keeping Beeper config'));
+      }
+    }
+
+    if (!skipBeeper) try {
       const beeper = require('../src/cli/setup-beeper');
 
       console.log('Checking Beeper Desktop API...');
@@ -363,16 +432,37 @@ async function runInit() {
   // -----------------------------------------------------------------------
   step(3, TOTAL_STEPS, 'LLM Provider');
 
+  if (!config.llm) config.llm = {};
+
+  // Check if LLM is already configured
+  const existingLLM = config.llm.provider && (config.llm.apiKey || config.llm.provider === 'ollama');
+  let skipLLM = false;
+
+  if (existingLLM) {
+    const providerName = config.llm.provider.charAt(0).toUpperCase() + config.llm.provider.slice(1);
+    const modelName = config.llm.model || 'default';
+    console.log(`  LLM: ${providerName} (${modelName}) ${c.green('✓')}`);
+    console.log('');
+  }
+
   console.log('Which LLM provider?');
   console.log('  1) Anthropic (Claude)');
   console.log('  2) OpenAI (GPT)');
   console.log('  3) OpenAI-compatible (OpenRouter, Together, Groq, etc.)');
   console.log('  4) Ollama (local, free, no API key)');
-  const llmChoice = (await ask('\nChoose (1/2/3/4) [1]: ')).trim() || '1';
 
-  if (!config.llm) config.llm = {};
+  const llmHint = existingLLM ? 'Enter to keep, or choose 1/2/3/4' : '1/2/3/4';
+  const llmDefault = existingLLM ? '' : '1';
+  const llmChoice = (await ask(`\nChoose (${llmHint}) [${llmDefault || 'keep'}]: `)).trim() || llmDefault;
 
-  switch (llmChoice) {
+  if (!llmChoice && existingLLM) {
+    skipLLM = true;
+    const providerName = config.llm.provider.charAt(0).toUpperCase() + config.llm.provider.slice(1);
+    summary.llm = { provider: providerName, model: config.llm.model, verified: true };
+    console.log(c.ok(`Keeping: ${providerName} (${config.llm.model})`));
+  }
+
+  if (!skipLLM) switch (llmChoice || '1') {
     case '1': { // Anthropic
       const defaults = LLM_DEFAULTS.anthropic;
       config.llm.provider = defaults.provider;
@@ -495,16 +585,34 @@ async function runInit() {
   // -----------------------------------------------------------------------
   step(4, TOTAL_STEPS, 'Security');
 
-  const pinChoice = (await ask('Set a PIN for sensitive commands like /exec? (4-6 digits, Enter to skip): ')).trim();
-  if (pinChoice && /^\d{4,6}$/.test(pinChoice)) {
-    if (!config.security) config.security = {};
-    config.security.pin_hash = crypto.createHash('sha256').update(pinChoice).digest('hex');
-    console.log(c.ok('PIN set'));
-    summary.pin = true;
-  } else if (pinChoice) {
-    console.log(c.warn('Invalid PIN (must be 4-6 digits). Skipping.'));
+  const existingPin = !!config.security?.pin_hash;
+
+  if (existingPin) {
+    console.log(`  PIN: set ${c.green('✓')}`);
+    const pinInput = (await ask('  [Enter to keep, or type new 4-6 digit PIN]: ')).trim();
+    if (!pinInput) {
+      console.log(c.ok('Keeping PIN'));
+      summary.pin = true;
+    } else if (/^\d{4,6}$/.test(pinInput)) {
+      config.security.pin_hash = crypto.createHash('sha256').update(pinInput).digest('hex');
+      console.log(c.ok('PIN updated'));
+      summary.pin = true;
+    } else {
+      console.log(c.warn('Invalid PIN (must be 4-6 digits). Keeping existing.'));
+      summary.pin = true;
+    }
   } else {
-    console.log(c.dim('No PIN set (optional).'));
+    const pinChoice = (await ask('Set a PIN for sensitive commands like /exec? (4-6 digits, Enter to skip): ')).trim();
+    if (pinChoice && /^\d{4,6}$/.test(pinChoice)) {
+      if (!config.security) config.security = {};
+      config.security.pin_hash = crypto.createHash('sha256').update(pinChoice).digest('hex');
+      console.log(c.ok('PIN set'));
+      summary.pin = true;
+    } else if (pinChoice) {
+      console.log(c.warn('Invalid PIN (must be 4-6 digits). Skipping.'));
+    } else {
+      console.log(c.dim('No PIN set (optional).'));
+    }
   }
 
   // -----------------------------------------------------------------------
