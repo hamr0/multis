@@ -42,6 +42,8 @@ Platform (base.js)
 
 All platforms emit normalized `Message` objects → single router handles everything.
 
+**Platform registry**: `createMessageRouter()` returns a handler with `registerPlatform(name, instance)`. Each platform registers itself at startup (`handler.registerPlatform('beeper', beeper)`). This allows cross-platform operations — e.g. Telegram's `/mode` can list/search Beeper chats via the registry.
+
 ### Message routing flow
 
 ```
@@ -106,7 +108,11 @@ Self-chats (note-to-self, WhatsApp self) are auto-detected as **off** (command c
 - `/mode <mode>` in a chat → sets that chat directly
 - `/mode <mode>` in self-chat → interactive picker (top 20 recent chats)
 - `/mode <mode> <name>` in self-chat → search by name across all chats (top 100). 1 match → sets immediately, multiple → numbered picker
-- On Telegram: `/mode` shows current mode, `/mode <mode>` sets it
+
+**Telegram as admin**: Telegram is a full admin channel — both platforms are equal:
+- `/mode` → shows global bot mode + all Beeper chat modes
+- `/mode <mode>` → sets global bot_mode (default for new chats)
+- `/mode <mode> <name>` → sets a specific Beeper chat's mode by name (uses platform registry to access Beeper API)
 
 ### Chat tracking
 
