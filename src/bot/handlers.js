@@ -970,14 +970,24 @@ async function listBeeperChats(platform) {
 }
 
 async function findBeeperChat(platform, search) {
-  const chats = await listBeeperChats(platform);
-  if (!chats) return null;
-  const q = search.toLowerCase();
-  const matches = chats.filter(c =>
-    (c.title && c.title.toLowerCase().includes(q)) ||
-    (c.id && c.id.toLowerCase().includes(q))
-  );
-  return matches.length > 0 ? matches : null;
+  if (!platform._api) return null;
+  // Search wider than the picker — find chats beyond the recent 20
+  try {
+    const data = await platform._api('GET', '/v1/chats?limit=100');
+    const chats = (data.items || []).map(c => ({
+      id: c.id || c.chatID,
+      title: c.title || c.name || '',
+      network: c.network || '',
+    })).filter(c => c.id);
+    const q = search.toLowerCase();
+    const matches = chats.filter(c =>
+      (c.title && c.title.toLowerCase().includes(q)) ||
+      (c.id && c.id.toLowerCase().includes(q))
+    );
+    return matches.length > 0 ? matches : null;
+  } catch {
+    return null;
+  }
 }
 
 async function routeAgent(msg, platform, config, args, agentRegistry) {

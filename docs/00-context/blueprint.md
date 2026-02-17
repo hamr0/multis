@@ -102,11 +102,21 @@ Self-chats (note-to-self, WhatsApp self) are auto-detected as **off** (command c
 ### Setting modes
 
 - **Owner required** to change any chat's mode
-- `/mode` (no args) → lists all chats with current modes (no PIN)
+- `/mode` (no args) → lists recent chats with current modes (top 20, no PIN)
 - `/mode <mode>` in a chat → sets that chat directly
-- `/mode <mode>` in self-chat → interactive picker (lists recent chats)
-- `/mode <mode> <name>` in self-chat → search by name/number
+- `/mode <mode>` in self-chat → interactive picker (top 20 recent chats)
+- `/mode <mode> <name>` in self-chat → search by name across all chats (top 100). 1 match → sets immediately, multiple → numbered picker
 - On Telegram: `/mode` shows current mode, `/mode <mode>` sets it
+
+### Chat tracking
+
+Only the **20 most recent chats** are polled each cycle. Older/dormant chats are not monitored — they start being tracked again when new activity pushes them into the top 20. This is by design: no wasted storage on inactive chats.
+
+**Storage chain for silent mode**: message arrives → polled (if in top 20) → archived to `memory/chats/<chatId>/` (rolling window + daily log) → rolling window overflows → LLM summarizes → summary indexed to SQLite FTS DB as scoped chunk.
+
+**Business mode**: same archival path, plus the bot auto-responds via LLM.
+
+**Off mode**: completely skipped — no archive, no response, no storage.
 
 ### Typical workflows
 
