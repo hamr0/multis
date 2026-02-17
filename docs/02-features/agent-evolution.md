@@ -1,7 +1,8 @@
-# Agent Evolution: Tier 1-2 Sketch
+# Agent Evolution: From Chatbot to Autonomous Assistant
 
 > Design sketch for evolving multis from chatbot → agent → automated assistant.
 > Reference: OpenClaw gateway architecture (docs.openclaw.ai).
+> See also: `agent-orchestration.md` for first-principles breakdown of orchestration components.
 
 ---
 
@@ -322,6 +323,105 @@ The agent loop + tools + scheduler covers 95% of personal assistant use cases. M
 
 ---
 
+## What multis Actually Needs (Minimal Effective Agent)
+
+After analyzing the full orchestration landscape (see `agent-orchestration.md`), here's what multis needs to go from "responds when asked" to "gets shit done autonomously" — without gateway bloat.
+
+### The honest minimal set
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                 WHAT WE ACTUALLY NEED                    │
+│                                                          │
+│  1. Agent loop          ✅ done (runAgentLoop)           │
+│  2. Tools + registry    ✅ done (25+ tools, governance)  │
+│  3. Memory              ✅ done (FTS, per-chat, ACT-R)   │
+│  4. Multi-agent         ✅ done (personas, @mention)     │
+│  5. Planner prompt      ~20 lines of prompt engineering  │
+│  6. Task persistence    ~60 lines (JSON file + status)   │
+│  7. Scheduler           ~100 lines (setInterval + cron)  │
+│  8. Human checkpoints   ~30 lines (ask + wait for reply) │
+│  9. Retry/timeout       ~40 lines (wrap tool calls)      │
+│                                                          │
+│  New code: ~250 lines   Frameworks needed: 0             │
+└─────────────────────────────────────────────────────────┘
+```
+
+### What each new piece does
+
+**Planner prompt** — Before acting on a complex goal, the LLM outputs a step plan with dependencies. Not a component — just prompt engineering added to the system prompt: "When the user gives a multi-step goal, first output a plan as JSON, then execute each step."
+
+**Task persistence** — A JSON file (`~/.multis/data/tasks/active.json`) tracking plan steps and their status (`pending`, `running`, `waiting_for_input`, `done`, `failed`). Survives daemon restarts. Agent resumes from last incomplete step.
+
+**Scheduler** — `setInterval` at 60s + `cron-parser` for expressions. Jobs stored in `jobs.json`. Each job triggers an agent turn via `runAgentLoop`. This is the only way the agent acts without being messaged.
+
+**Human checkpoints** — Before irreversible actions (booking, sending, purchasing), the agent sends a confirmation message and pauses. State goes to `waiting_for_input`. When the user replies, execution continues. This is the human-in-the-loop that separates a useful agent from a dangerous one.
+
+**Retry/timeout** — Wrap tool calls with try/catch + exponential backoff for transient failures (API rate limits, network errors). Max 3 retries. Timeout at 60s per tool call. Prevents the agent from hanging forever on a bad API call.
+
+### What we're deferring and why
+
+| Component | Status | Reasoning |
+|-----------|--------|-----------|
+| **Heartbeat** | Defer | Cron covers 80% of ambient awareness use cases. `/cron 0 */1 * * * Check for unresponded business messages` achieves the same result. Add heartbeat later if we find ourselves creating the same cron jobs repeatedly. |
+| **Hooks** | Skip | Hooks are for extensibility when you can't predict use cases — useful for platforms with third-party developers. For a personal tool where we control all the code, just add the behavior directly. One line in the escalation handler beats a hook system. |
+| **Message bus** | Skip | One agent, one process. The agent loop IS the bus — tool call → result → next step. Buses are for multiple parallel agents coordinating, which we don't need. |
+| **A2A protocol** | Skip | Only relevant for cross-system agent collaboration (calling an external booking agent, payment agent, etc.). Internal persona routing uses `resolveAgent()`. Revisit only if we need external agent interop. |
+| **Stream bus** | Skip | Agent reports progress via chat messages, not SSE events. No web dashboard to stream to. |
+
+### Multi-step execution flow
+
+```
+You → "Book my Berlin trip"
+│
+├─ Agent receives message
+├─ Planner prompt fires: "Break this into steps"
+│   → LLM returns: [search flights, search hotels, book flight,
+│                    book hotel, compose itinerary, send email]
+│   → With dependencies: book depends on search, email depends on both
+│
+├─ Task list persisted to ~/.multis/data/tasks/active.json
+│
+├─ Agent starts executing sequentially:
+│   │
+│   ├─ Step 1: search_flights tool → results
+│   ├─ Step 2: search_hotels tool → results
+│   ├─ Step 3: "Best flight is €340 Lufthansa. Book it?"
+│   │          → sends message to you
+│   │          → WAITS for your reply (state: waiting_for_input)
+│   ├─ You reply: "yes"
+│   │          → books flight
+│   ├─ Step 4: "Hotel Europa, €89/night, 400m from venue. Book?"
+│   │          → WAITS
+│   ├─ You reply: "yes"
+│   │          → books hotel
+│   ├─ Step 5: compose itinerary (tool: write_file)
+│   └─ Step 6: send email (tool: gmail API)
+│
+└─ "Done. Flight LH1234 €340, Hotel Europa €267 (3 nights).
+    Itinerary emailed to team@company.com."
+```
+
+This is **one agent, one loop, with pauses**. No message bus. No parallel agents. No JSON-RPC. Just a longer conversation with a plan at the start and persistence in the middle.
+
+### The actuation problem
+
+The agent needs to act on the world. Reliability decreases as you move down:
+
+| Layer | Method | Example | Reliability |
+|-------|--------|---------|-------------|
+| 1 | Native API (REST) | Gmail, Calendar, Spotify | High |
+| 2 | MCP Server (wraps API) | Same as above, packaged for LLM | High |
+| 3 | CLI / Shell | termux-sms-send, git push | Medium-high |
+| 4 | Browser automation | Playwright on websites | Medium |
+| 5 | UI automation | ADB/DroidClaw on phone apps | Low |
+
+**Rule:** Use the highest-reliability layer available. API > CLI > browser > UI automation. MCP is just packaging — it doesn't create capabilities that don't exist as APIs.
+
+A personal assistant that "gets shit done" eventually needs all five layers, because the world isn't uniform: Gmail has an API, but WhatsApp personal accounts don't. Spotify has an API, but Uber Eats doesn't.
+
+---
+
 ## Implementation Order
 
 ```
@@ -330,15 +430,17 @@ The agent loop + tools + scheduler covers 95% of personal assistant use cases. M
   ✅ Tier 1: Agent loop  │  All done (runAgentLoop, tools, multi-agent personas)
                          │
   ┌──────────────────────┤
-  │ Tier 2A: Scheduler   │  ~210 lines. Phase C in roadmap.
-  │  /remind, /cron      │  Prerequisite: none. Uses existing runAgentLoop.
-  │  /jobs, /cancel      │
+  │ ESSENTIAL            │
+  │  Planner prompt      │  ~20 lines (prompt engineering, not code)
+  │  Task persistence    │  ~60 lines (JSON task file + status tracking)
+  │  Scheduler (/remind, │  ~100 lines (setInterval + cron-parser)
+  │   /cron, /jobs)      │  Prerequisite: none. Uses existing runAgentLoop.
+  │  Human checkpoints   │  ~30 lines (ask + wait for reply on irreversible actions)
+  │  Retry/timeout       │  ~40 lines (wrap tool calls with backoff)
   ├──────────────────────┤
-  │ Tier 2B: Heartbeat   │  ~65 lines. After scheduler works.
-  │  Periodic awareness   │  Prerequisite: Tier 2A (shares scheduler infra).
-  ├──────────────────────┤
-  │ Tier 2C: Hooks       │  ~70 lines. Only if dogfooding demands it.
-  │  Event-driven         │  Prerequisite: none.
+  │ NICE TO HAVE         │
+  │  Heartbeat           │  ~65 lines. Cron covers 80% of this.
+  │  Hooks               │  ~70 lines. Only if dogfooding demands it.
   └──────────────────────┤
                          │
   ○ Tier 3: Multi-agent  │  Not planned. Use A2A protocol (not custom).
@@ -347,7 +449,8 @@ The agent loop + tools + scheduler covers 95% of personal assistant use cases. M
                        FUTURE
 ```
 
-Total new code for Tier 2 (all three): **~345 lines** — well within the <500 line POC constraint.
+Essential new code: **~250 lines** — well within the <500 line POC constraint.
+Nice-to-have adds ~135 lines if needed.
 
 ---
 
@@ -365,3 +468,108 @@ Total new code for Tier 2 (all three): **~345 lines** — well within the <500 l
 | **Config** | Complex multi-agent YAML | Single config.json + tools.json |
 
 **Key insight**: OpenClaw's gateway complexity exists because it's multi-tenant and multi-channel at scale. multis doesn't need a gateway — the daemon process *is* the gateway. The agent loop, tools, and scheduler give the same capabilities at personal scale without the orchestration overhead.
+
+---
+
+## Android Device Control: Termux vs DroidClaw
+
+Two complementary approaches for controlling an Android phone from multis.
+
+### Termux + termux-api (system-level)
+
+Termux runs Node.js natively on Android. `termux-api` exposes system APIs as shell commands — multis's `/exec` already handles them.
+
+| Capability | Command | Notes |
+|------------|---------|-------|
+| **Send SMS** | `termux-sms-send -n "+1234567890" "hello"` | Full send, not just compose |
+| **Read SMS** | `termux-sms-list` | Inbox access |
+| **Clipboard** | `termux-clipboard-get` / `termux-clipboard-set` | Read + write |
+| **Camera** | `termux-camera-photo -c 0 /path/photo.jpg` | Front/rear |
+| **Notifications** | `termux-notification --title "X" --content "Y"` | Custom notifications |
+| **Location** | `termux-location` | GPS coordinates |
+| **TTS** | `termux-tts-speak "hello"` | Text-to-speech |
+| **Vibrate** | `termux-vibrate` | Haptic feedback |
+| **Battery** | `termux-battery-status` | Charge level, charging state |
+| **WiFi** | `termux-wifi-connectioninfo` / `termux-wifi-scaninfo` | Network info |
+
+**Runs on the phone itself.** No USB, no laptop needed. Can connect back to laptop multis via reverse SSH tunnel or Tailscale.
+
+### DroidClaw (UI-level)
+
+[github.com/unitedbyai/droidclaw](https://github.com/unitedbyai/droidclaw) — AI-powered UI automation via ADB. Reads the accessibility tree (or falls back to screenshots), sends UI state to an LLM, LLM decides what to tap/type/swipe.
+
+| Capability | How | Notes |
+|------------|-----|-------|
+| **Any app** | Tap buttons, fill forms, navigate | WhatsApp, Instagram, banking, food delivery |
+| **Webviews** | Screenshot + vision fallback | When accessibility tree is unavailable |
+| **Multi-step flows** | Workflow engine (JSON) | LLM-driven, adapts to UI changes |
+| **Deterministic scripts** | Flow engine (YAML) | No LLM, fixed action sequences |
+
+**Runs on your laptop**, sends ADB commands to the phone. Connection options:
+
+| Method | Requirement |
+|--------|-------------|
+| USB | Phone plugged in |
+| WiFi ADB | `adb tcpip 5555` → `adb connect <phone-ip>:5555` (same LAN) |
+| Tailscale | VPN mesh, works from anywhere |
+
+**Runtime:** Bun (TypeScript). Would be called as a subprocess from multis, not imported.
+
+### When to use which
+
+| Need | Use | Why |
+|------|-----|-----|
+| Send SMS | Termux | Direct API, instant, reliable |
+| Read clipboard | Termux | Direct API |
+| Take photo | Termux | Direct API |
+| Send WhatsApp message | DroidClaw | No API — must tap the UI |
+| Order food on Uber Eats | DroidClaw | No API — must navigate the app |
+| Post on Instagram | DroidClaw | No API — must drive the UI |
+| Check battery | Termux | Direct API |
+| Open a specific URL | Termux (`termux-open-url`) | Direct API |
+
+**Rule:** If `termux-api` can do it, use Termux. DroidClaw is for apps that have **no API at all**.
+
+### Integration with multis
+
+DroidClaw would be a tool in the existing agent loop, not a replacement:
+
+```
+User → Telegram/Beeper → multis (LLM + tools)
+                              │
+                              ├─ exec (shell commands)
+                              ├─ termux-api (SMS, clipboard, camera, etc.)
+                              └─ droidclaw (UI automation)
+                                   └─ ADB → Android device
+```
+
+**Still need Tier 2 (scheduler, heartbeat, hooks)?** Yes — DroidClaw replaces the *execution layer*, not the *decision layer*:
+
+- **Scheduler** — "at 9am, order my usual coffee on the app" needs a trigger. DroidClaw is fire-and-forget per goal.
+- **Heartbeat** — "check if any WhatsApp messages need attention" needs periodic awareness. DroidClaw has no awareness loop.
+- **Hooks** — "when a customer escalates, send me a WhatsApp" needs an event source. DroidClaw doesn't emit events.
+
+### Tradeoffs
+
+- **LLM cost** — DroidClaw runs its own LLM loop per action cycle (multiple calls per goal), on top of multis's LLM usage
+- **Fragility** — UI automation breaks when apps update their layout. Accessibility tree + screenshot fallback helps, but less reliable than APIs
+- **Latency** — each action cycle reads screen → LLM → execute → repeat. Multi-step flows take seconds per step
+
+### iOS: no equivalent
+
+Apple blocks all external device control:
+
+| Approach | Blocker |
+|----------|---------|
+| ADB equivalent | Doesn't exist on iOS |
+| XCUITest / Appium | Requires Mac + Xcode + developer provisioning |
+| Shortcuts app | No external trigger API, limited actions |
+| Jailbreak | Fragile, breaks on updates |
+
+**iOS strategy:** Telegram/Beeper is the only interface. The phone is a client, not an agent. Shortcuts can do limited automation but can't be triggered programmatically from multis.
+
+### Summary
+
+- **Android is the power platform** — Termux for system APIs, DroidClaw for UI-only apps, both remoteable over WiFi/Tailscale
+- **iOS is receive-only** — Telegram chat interface, no on-device agent capability
+- **DroidClaw is optional** — only needed for apps without APIs. Most personal assistant tasks are covered by Termux + shell commands

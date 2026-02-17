@@ -916,7 +916,8 @@ Not needed yet. Current tools (filesystem, shell, knowledge, desktop, Android) c
 
 The agent system evolves in tiers. Tier 1 is done. Tier 2 is next. Tier 3 is only if the product pivots from personal tool to platform.
 
-Full design sketch with architecture, schemas, and size estimates: **`docs/02-features/agent-evolution.md`**
+Full design: **`docs/02-features/agent-evolution.md`** (architecture, schemas, size estimates, what to build vs skip)
+First-principles breakdown: **`docs/02-features/agent-orchestration.md`** (orchestration components explained, actuation layers, why frameworks overcomplicate this)
 
 ### Tier 1: Agent Tool Loop (DONE)
 
@@ -926,21 +927,29 @@ LLM decides when to use tools in a multi-round loop. 25+ tools across filesystem
 - `src/tools/definitions.js`, `registry.js`, `executor.js`
 - `resolveAgent()` + `config.agents` for multi-persona
 
-### Tier 2: Scheduling + Automation (Phase C)
+### Tier 2: Autonomous Agent (~250 lines, essential)
 
-Three components, ~345 lines total:
+Five components that turn a reactive chatbot into an agent that executes multi-step plans:
 
 | Component | What | Size |
 |-----------|------|------|
-| **2A: Scheduler** | `/remind`, `/cron`, `/jobs`, `/cancel` — agent turns at scheduled times | ~210 lines |
-| **2B: Heartbeat** | Periodic awareness check — "anything need attention?" | ~65 lines |
-| **2C: Hooks** | Event-driven shell scripts on escalation, capture, etc. | ~70 lines |
+| **Planner prompt** | LLM breaks goals into steps with dependencies before acting | ~20 lines (prompt) |
+| **Task persistence** | JSON file tracking plan steps + status, survives restarts | ~60 lines |
+| **Scheduler** | `/remind`, `/cron`, `/jobs` — time-triggered agent turns | ~100 lines |
+| **Human checkpoints** | Ask user before irreversible actions (book, send, purchase) | ~30 lines |
+| **Retry/timeout** | Backoff on transient API failures, 60s timeout per tool call | ~40 lines |
 
-Scheduler reuses `runAgentLoop` — jobs are agent turns, not hardcoded scripts. Persistent to `~/.multis/data/cron/jobs.json`. Owner-only. Runs inside daemon process (no separate scheduler).
+Scheduler reuses `runAgentLoop` — jobs are agent turns, not hardcoded scripts. Persistent to `~/.multis/data/cron/jobs.json`. Owner-only. Runs inside daemon process.
+
+**Deferred (nice-to-have, ~135 lines):**
+- Heartbeat (~65 lines) — cron covers 80% of ambient awareness use cases
+- Hooks (~70 lines) — only if dogfooding demands event-driven extensibility
+
+**Explicitly skipped:** Message bus (one agent, one process), A2A protocol (no external agents), stream bus (chat is the UI), gateway (daemon IS the gateway). These solve multi-tenant platform problems, not personal assistant problems.
 
 ### Tier 3: Multi-Agent Orchestration (not planned)
 
-Broadcast groups, agent handoffs, parallel execution with result merging. Only relevant if multis becomes multi-tenant. The agent loop + tools + scheduler covers 95% of personal assistant use cases.
+Broadcast groups, agent handoffs, parallel execution with result merging. Only relevant if multis becomes multi-tenant. Use A2A protocol (Google → Linux Foundation) if ever needed — don't invent a custom agent-to-agent bus.
 
 ### Other Future Enhancements
 

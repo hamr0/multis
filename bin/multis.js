@@ -18,7 +18,7 @@ const LOGO = [
   '  │  ║║║║ ║║  ║ ║╚═╗   │',
   '  │  ╩ ╩╚═╝╩═╝╩ ╩╚═╝   │',
   '  ╰──╮─────────────────╯',
-  '     ╰──',
+  '     ╰── v' + JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8')).version,
 ].join('\n');
 
 const command = process.argv[2];
@@ -841,6 +841,10 @@ async function runDoctor() {
   console.log(dim('── Profile ') + dim('─'.repeat(42)));
 
   const profileRows = [];
+
+  // Version
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
+  profileRows.push(['Version', pkg.version]);
 
   // Status (running/stopped)
   if (isRunning()) {
