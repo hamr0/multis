@@ -159,7 +159,10 @@ function createMessageRouter(config, deps = {}) {
   // Owner commands that require PIN auth
   const PIN_PROTECTED = new Set(['exec', 'read', 'index']);
 
-  return async (msg, platform) => {
+  // Platform registry — populated via router.registerPlatform()
+  const platformRegistry = new Map();
+
+  const router = async (msg, platform) => {
     // Handle Telegram document uploads
     if (msg._document) {
       await handleDocumentUpload(msg, platform, config, indexer);
@@ -280,8 +283,11 @@ function createMessageRouter(config, deps = {}) {
       }
     }
 
-    await executeCommand(command, args, msg, platform, config, indexer, llm, getMem, memCfg, pinManager, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
+    await executeCommand(command, args, msg, platform, config, indexer, llm, getMem, memCfg, pinManager, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry });
   };
+
+  router.registerPlatform = (name, instance) => platformRegistry.set(name, instance);
+  return router;
 }
 
 async function executeCommand(command, args, msg, platform, config, indexer, llm, getMem, memCfg, pinManager, escalationRetries, agentRegistry, toolDeps) {
@@ -323,7 +329,7 @@ async function executeCommand(command, args, msg, platform, config, indexer, llm
         await routeRemember(msg, platform, config, getMem, args);
         break;
       case 'mode':
-        await routeMode(msg, platform, config, args, agentRegistry);
+        await routeMode(msg, platform, config, args, agentRegistry, toolDeps.platformRegistry);
         break;
       case 'agent':
         await routeAgent(msg, platform, config, args, agentRegistry);
@@ -809,7 +815,7 @@ async function routeRemember(msg, platform, config, getMem, note) {
 
 const VALID_MODES = ['off', 'business', 'silent'];
 
-async function routeMode(msg, platform, config, args, agentRegistry) {
+async function routeMode(msg, platform, config, args, agentRegistry, platformRegistry) {
   // Owner-only
   if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only command.');
@@ -819,9 +825,75 @@ async function routeMode(msg, platform, config, args, agentRegistry) {
   const parts = (args || '').trim().split(/\s+/);
   const mode = parts[0] ? parts[0].toLowerCase() : '';
 
-  // No args → list chats with current modes (read-only, no PIN needed)
+  // Telegram: /mode works as admin — can set per-chat Beeper modes via platform registry
+  if (msg.platform === 'telegram') {
+    const beeperPlatform = platformRegistry?.get('beeper');
+    const hasBeeperChats = beeperPlatform && config.platforms?.beeper?.enabled;
+
+    if (!mode) {
+      const current = config.bot_mode || 'personal';
+      let statusMsg = `Bot mode: ${current}`;
+      if (hasBeeperChats) {
+        const allChats = await listBeeperChats(beeperPlatform);
+        if (allChats && allChats.length > 0) {
+          const lines = allChats.map(c => {
+            const m = getChatMode(config, c.id);
+            return `  ${c.title || c.id} [${m}]`;
+          });
+          statusMsg += `\n\nChat modes:\n${lines.join('\n')}`;
+        }
+      }
+      statusMsg += '\n\nUsage: /mode <business|silent|off> [chat name]';
+      await platform.send(msg.chatId, statusMsg);
+      return;
+    }
+
+    if (!VALID_MODES.includes(mode)) {
+      await platform.send(msg.chatId,
+        'Usage: /mode <business|silent|off> [chat name]\n\n' +
+        'Modes:\n' +
+        '  business — auto-respond\n' +
+        '  silent   — archive only\n' +
+        '  off      — completely ignored\n\n' +
+        'Without target: sets global bot mode.\n' +
+        'With target: sets mode for a specific Beeper chat.'
+      );
+      return;
+    }
+
+    // With target → set per-chat Beeper mode
+    const target = parts.slice(1).join(' ');
+    if (target && hasBeeperChats) {
+      const match = await findBeeperChat(beeperPlatform, target);
+      if (!match) {
+        await platform.send(msg.chatId, `No chat found matching "${target}".`);
+        return;
+      }
+      if (match.length > 1) {
+        const list = match.map((c, i) => `  ${i + 1}) ${c.title || c.name || c.id}`).join('\n');
+        if (!config._pendingMode) config._pendingMode = {};
+        config._pendingMode[msg.senderId] = { mode, matches: match, agent: null };
+        await platform.send(msg.chatId, `Multiple matches:\n${list}\n\nReply with a number:`);
+        return;
+      }
+      const chat = match[0];
+      setChatMode(config, chat.id, mode);
+      await platform.send(msg.chatId, `${chat.title || chat.id} set to: ${mode}`);
+      logAudit({ action: 'mode', user_id: msg.senderId, chatId: chat.id, mode, target });
+      return;
+    }
+
+    // No target → set global bot_mode
+    config.bot_mode = mode;
+    saveConfig(config);
+    await platform.send(msg.chatId, `Bot mode set to: ${mode}`);
+    logAudit({ action: 'mode', user_id: msg.senderId, mode, scope: 'global' });
+    return;
+  }
+
+  // Beeper: no args → list chats with current modes (read-only, no PIN needed)
   if (!mode) {
-    if (msg.platform === 'beeper' && platform._api) {
+    if (platform._api) {
       const allChats = await listBeeperChats(platform);
       if (!allChats || allChats.length === 0) {
         await platform.send(msg.chatId, 'No chats found.');
@@ -832,20 +904,10 @@ async function routeMode(msg, platform, config, args, agentRegistry) {
         return `  ${c.title || c.id} [${m}]`;
       });
       await platform.send(msg.chatId, `Chat modes:\n${lines.join('\n')}`);
-    } else if (config.platforms?.beeper?.enabled) {
-      // Telegram is an admin channel when Beeper is also active
-      await platform.send(msg.chatId,
-        'Telegram is your admin channel — chat modes apply to Beeper chats.\n\n' +
-        'Use /mode from Beeper self-chat to list and set modes.\n\n' +
-        'Usage: /mode <business|silent|off> [target]'
-      );
     } else {
       await platform.send(msg.chatId,
-        'Usage: /mode <business|silent|off>\n\n' +
-        'Modes:\n' +
-        '  business — auto-respond\n' +
-        '  silent   — archive only\n' +
-        '  off      — completely ignored'
+        'Usage: /mode <business|silent|off> [target]\n\n' +
+        'Sets mode for a Beeper chat.'
       );
     }
     return;
@@ -882,15 +944,6 @@ async function routeMode(msg, platform, config, args, agentRegistry) {
       config.chat_agents[chatId] = agentArg;
       saveConfig(config);
     }
-  }
-
-  // Telegram is an admin channel when Beeper is also active — modes only apply to Beeper chats
-  if (msg.platform === 'telegram' && config.platforms?.beeper?.enabled) {
-    await platform.send(msg.chatId,
-      'Telegram is your admin channel — chat modes apply to Beeper chats.\n\n' +
-      'Use /mode from Beeper self-chat to set modes.'
-    );
-    return;
   }
 
   // Beeper: if target specified, search for chat by name/number

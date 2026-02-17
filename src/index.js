@@ -25,6 +25,7 @@ async function main() {
     try {
       const telegram = new TelegramPlatform(config);
       telegram.onMessage(handler);
+      handler.registerPlatform('telegram', telegram);
       platforms.push(telegram);
     } catch (err) {
       console.error(`Telegram: ${err.message}`);
@@ -36,6 +37,7 @@ async function main() {
     try {
       const beeper = new BeeperPlatform(config);
       beeper.onMessage(handler);
+      handler.registerPlatform('beeper', beeper);
       platforms.push(beeper);
     } catch (err) {
       console.error(`Beeper: ${err.message}`);
