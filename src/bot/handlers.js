@@ -832,12 +832,20 @@ async function routeMode(msg, platform, config, args, agentRegistry) {
         return `  ${c.title || c.id} [${m}]`;
       });
       await platform.send(msg.chatId, `Chat modes:\n${lines.join('\n')}`);
-    } else {
-      // Telegram is an admin channel — modes apply to Beeper chats
+    } else if (config.platforms?.beeper?.enabled) {
+      // Telegram is an admin channel when Beeper is also active
       await platform.send(msg.chatId,
         'Telegram is your admin channel — chat modes apply to Beeper chats.\n\n' +
         'Use /mode from Beeper self-chat to list and set modes.\n\n' +
         'Usage: /mode <business|silent|off> [target]'
+      );
+    } else {
+      await platform.send(msg.chatId,
+        'Usage: /mode <business|silent|off>\n\n' +
+        'Modes:\n' +
+        '  business — auto-respond\n' +
+        '  silent   — archive only\n' +
+        '  off      — completely ignored'
       );
     }
     return;
@@ -876,8 +884,8 @@ async function routeMode(msg, platform, config, args, agentRegistry) {
     }
   }
 
-  // Telegram is an admin channel — modes only apply to Beeper chats
-  if (msg.platform === 'telegram') {
+  // Telegram is an admin channel when Beeper is also active — modes only apply to Beeper chats
+  if (msg.platform === 'telegram' && config.platforms?.beeper?.enabled) {
     await platform.send(msg.chatId,
       'Telegram is your admin channel — chat modes apply to Beeper chats.\n\n' +
       'Use /mode from Beeper self-chat to set modes.'
