@@ -110,13 +110,23 @@ Self-chats (note-to-self, WhatsApp self) are auto-detected as **off** (command c
 
 ### Chat tracking
 
-Only the **20 most recent chats** are polled each cycle. Older/dormant chats are not monitored — they start being tracked again when new activity pushes them into the top 20. This is by design: no wasted storage on inactive chats.
+Only the **20 most recent chats** are polled each cycle. This is a sliding window — when a dormant chat receives a new message, it enters the top 20 and gets picked up on the next poll. Over time, all active chats are tracked. Dormant chats with zero activity are not monitored (no wasted storage).
 
 **Storage chain for silent mode**: message arrives → polled (if in top 20) → archived to `memory/chats/<chatId>/` (rolling window + daily log) → rolling window overflows → LLM summarizes → summary indexed to SQLite FTS DB as scoped chunk.
 
 **Business mode**: same archival path, plus the bot auto-responds via LLM.
 
 **Off mode**: completely skipped — no archive, no response, no storage.
+
+### Beeper API limitation
+
+The Beeper Desktop API (`/v1/chats`) only returns chats that Beeper has loaded in memory. Inactive/archived chats (e.g. old LinkedIn conversations) are not returned even with high limits. This means:
+
+- **`/mode <mode>`** (picker): shows top 20 recent — always works for active chats
+- **`/mode <mode> <name>`** (search): searches top 100 — finds most chats but not deeply archived ones
+- **Dormant chats**: cannot be pre-configured via `/mode`. When the contact messages you, the chat becomes active, enters the API response, and gets tracked per your profile default (silent or business). You can then change its mode
+
+This is acceptable — there's no reason to set a mode on a chat with zero activity. The profile default handles new/reactivated chats automatically.
 
 ### Typical workflows
 
