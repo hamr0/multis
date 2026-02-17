@@ -12,6 +12,15 @@ const PID_PATH = PATHS.pid();
 const CONFIG_PATH = PATHS.config();
 const SRC_INDEX = path.join(__dirname, '..', 'src', 'index.js');
 
+const LOGO = [
+  '  ╭────────────────────╮',
+  '  │  ╔╦╗╦ ╦╦ ╔╦╗╦╔═╗   │',
+  '  │  ║║║║ ║║  ║ ║╚═╗   │',
+  '  │  ╩ ╩╚═╝╩═╝╩ ╩╚═╝   │',
+  '  ╰──╮─────────────────╯',
+  '     ╰──',
+].join('\n');
+
 const command = process.argv[2];
 
 if (command) {
@@ -48,7 +57,7 @@ async function runMenu() {
   const green = (s) => `\x1b[32m${s}\x1b[0m`;
   const yellow = (s) => `\x1b[33m${s}\x1b[0m`;
 
-  console.log(bold('\nmultis') + dim(' — personal AI assistant\n'));
+  console.log('\n' + LOGO + '\n');
 
   // Quick status
   const running = isRunning();
@@ -117,7 +126,8 @@ async function runInit() {
   const summary = { telegram: null, beeper: null, beeperAccounts: [], llm: null, pin: false };
   const TOTAL_STEPS = 4;
 
-  console.log(c.bold('\nmultis init') + ' — interactive setup\n');
+  console.log('\n' + LOGO);
+  console.log(c.dim('  interactive setup\n'));
 
   // Ensure directory
   if (!fs.existsSync(MULTIS_DIR)) {
@@ -826,7 +836,7 @@ async function runDoctor() {
   let config = null;
   try { config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')); } catch { /* */ }
 
-  console.log(bold('\nmultis doctor\n'));
+  console.log('\n' + LOGO + '\n');
 
   // ── Profile ──────────────────────────────────────
   console.log(dim('── Profile ') + dim('─'.repeat(42)));
