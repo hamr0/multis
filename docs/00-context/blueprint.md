@@ -19,15 +19,15 @@ A personal and business AI agent that lives in your chat apps. Runs locally on y
 
 ## 2. Platforms
 
-### Three paths, one config
+### Platform roles
 
-| Path | Requires | Status |
-|------|----------|--------|
-| **Telegram** (mandatory) | Bot token from @BotFather | Done |
-| **Beeper Desktop API** (optional) | Beeper Desktop running on localhost | Done |
-| **Self-hosted Matrix** (optional) | VPS + domain, $5-10/month | Planned (POC7) |
+| Platform | Role | Details |
+|----------|------|---------|
+| **Telegram bot** | Admin channel | Owner-only. Commands, monitoring, `/mode` control. Non-owners get pairing prompt. |
+| **Beeper** | Gateway to all chats | All contacts (WhatsApp, Telegram, LinkedIn, etc.) come through Beeper bridges. Per-chat modes (business/silent/off). Business-mode contacts get auto-responses without pairing. |
+| **Self-hosted Matrix** | Future alternative to Beeper | VPS + domain, $5-10/month. Planned (POC7). |
 
-User fills in what they have in `~/.multis/config.json`. Telegram is always available.
+**Telegram bot is admin only** — it is not a customer-facing channel. Other Telegram contacts reach multis through Beeper's Telegram bridge, alongside WhatsApp, LinkedIn, etc. One gateway, per-chat modes.
 
 ### Platform abstraction
 
@@ -35,8 +35,8 @@ User fills in what they have in `~/.multis/config.json`. Telegram is always avai
 Platform (base.js)
   ├── start(), stop(), send(chatId, text), sendFile(chatId, filePath, caption), onMessage(callback)
   │
-  ├── TelegramPlatform  — Telegraf wrapper, / prefix, sendFile via sendDocument()
-  ├── BeeperPlatform    — polls localhost:23373, / prefix, personal chats only (sendFile not yet supported)
+  ├── TelegramPlatform  — Telegraf wrapper, admin-only, / prefix
+  ├── BeeperPlatform    — polls localhost:23373, / prefix, all bridges (WhatsApp, Telegram, LinkedIn, etc.)
   └── MatrixPlatform    — (future) Matrix SDK client
 ```
 
@@ -109,10 +109,10 @@ Self-chats (note-to-self, WhatsApp self) are auto-detected as **off** (command c
 - `/mode <mode>` in self-chat → interactive picker (top 20 recent chats)
 - `/mode <mode> <name>` in self-chat → search by name across all chats (top 100). 1 match → sets immediately, multiple → numbered picker
 
-**Telegram as admin**: Telegram is a full admin channel — both platforms are equal:
+**From Telegram** (admin channel — controls Beeper chats via platform registry):
 - `/mode` → shows global bot mode + all Beeper chat modes
-- `/mode <mode>` → sets global bot_mode (default for new chats)
-- `/mode <mode> <name>` → sets a specific Beeper chat's mode by name (uses platform registry to access Beeper API)
+- `/mode <mode>` → sets global bot_mode (default for new Beeper chats)
+- `/mode <mode> <name>` → sets a specific Beeper chat's mode by name
 
 ### Chat tracking
 

@@ -243,7 +243,8 @@ function createMessageRouter(config, deps = {}) {
 
     // Natural language / business routing (set by platform adapter)
     if (msg.routeAs === 'natural' || msg.routeAs === 'business') {
-      if (!isPaired(msg, config)) return;
+      // Business: anyone can get a response (customers via Beeper)
+      if (msg.routeAs !== 'business' && !isPaired(msg, config)) return;
       await routeAsk(msg, platform, config, indexer, llm, msg.text, getMem, memCfg, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
       return;
     }
