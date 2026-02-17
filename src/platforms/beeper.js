@@ -216,7 +216,9 @@ class BeeperPlatform extends Platform {
 
   _getChatMode(chatId) {
     const modes = this.config.platforms?.beeper?.chat_modes;
-    if (modes && modes[chatId]) return modes[chatId];
+    const stored = modes?.[chatId];
+    // Ignore stale 'personal' values (was renamed to profile, not a valid mode)
+    if (stored && stored !== 'personal') return stored;
     if (this.config.platforms?.beeper?.default_mode) return this.config.platforms.beeper.default_mode;
     // Personal chats (note-to-self) stay off; others default per bot_mode
     if (this._personalChats.has(chatId)) return 'off';

@@ -66,14 +66,13 @@ async function runMenu() {
   console.log('  2) start     Start daemon in background');
   console.log('  3) stop      Stop running daemon');
   console.log('  4) restart   Stop + start (or just start if not running)');
-  console.log('  5) status    Check if daemon is running');
-  console.log('  6) doctor    Run diagnostic checks');
+  console.log('  5) doctor    Run diagnostic checks');
   console.log('  0) exit      Quit this menu\n');
 
-  const choice = (await ask('Choose (0-6): ')).trim();
+  const choice = (await ask('Choose (0-5): ')).trim();
   rl.close();
 
-  const commands = { '1': 'init', '2': 'start', '3': 'stop', '4': 'restart', '5': 'status', '6': 'doctor' };
+  const commands = { '1': 'init', '2': 'start', '3': 'stop', '4': 'restart', '5': 'doctor' };
   if (choice === '0' || choice === '') {
     console.log('Bye.');
     process.exit(0);
@@ -592,6 +591,7 @@ function runStart() {
     env: { ...process.env }
   });
 
+  fs.mkdirSync(path.dirname(PID_PATH), { recursive: true });
   fs.writeFileSync(PID_PATH, String(child.pid));
   child.unref();
   console.log(`multis started (PID ${child.pid}).`);

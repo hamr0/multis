@@ -835,18 +835,18 @@ async function routeMode(msg, platform, config, args, agentRegistry) {
     } else {
       // Telegram: show current chat mode
       const m = getChatMode(config, msg.chatId);
-      await platform.send(msg.chatId, `Current chat mode: ${m}\n\nUsage: /mode <off|business|silent> [target]`);
+      await platform.send(msg.chatId, `Current chat mode: ${m}\n\nUsage: /mode <business|silent|off> [target]`);
     }
     return;
   }
 
   if (!VALID_MODES.includes(mode)) {
     await platform.send(msg.chatId,
-      'Usage: /mode <off|business|silent> [target]\n\n' +
+      'Usage: /mode <business|silent|off> [target]\n\n' +
       'Modes:\n' +
-      '  off      — completely ignored (no archive, no response)\n' +
       '  business — auto-respond, customer-safe\n' +
-      '  silent   — archive only, no bot output\n\n' +
+      '  silent   — archive only, no bot output\n' +
+      '  off      — completely ignored (no archive, no response)\n\n' +
       'From self-chat: /mode silent (interactive picker)\n' +
       'From self-chat: /mode silent John (search by name)\n' +
       'In any chat: /mode business (sets current chat)'
@@ -945,9 +945,11 @@ function setChatMode(config, chatId, mode) {
 
 function getChatMode(config, chatId) {
   const modes = config.platforms?.beeper?.chat_modes;
-  if (modes && modes[chatId]) return modes[chatId];
+  const stored = modes?.[chatId];
+  // Ignore stale 'personal' values (was renamed to profile, not a valid mode)
+  if (stored && stored !== 'personal') return stored;
   if (config.platforms?.beeper?.default_mode) return config.platforms.beeper.default_mode;
-  // Default: personal bot_mode → silent for Beeper chats, business → business
+  // Default: personal profile → silent, business profile → business
   const botMode = config.bot_mode || 'personal';
   return botMode === 'personal' ? 'silent' : 'business';
 }
@@ -1043,7 +1045,7 @@ async function routeHelp(msg, platform, config) {
       '/read <path> - Read a file or directory (owner)',
       '/index <path> <public|admin> - Index a document (owner)',
       '/pin - Change PIN (owner)',
-      '/mode - List chat modes / /mode <off|business|silent> [target] (owner)',
+      '/mode - List chat modes / /mode <business|silent|off> [target] (owner)',
       '/agent [name] - Show/set agent for this chat (owner)',
       '/agents - List all agents (owner)',
       'Send a file to index it (owner, Telegram only)',
@@ -1210,7 +1212,7 @@ function handleHelp(config) {
         '/exec <cmd> - Run a shell command (owner)',
         '/read <path> - Read a file or directory (owner)',
         '/index <path> - Index a document (owner)',
-        '/mode <off|business|silent> - Set chat mode (owner)',
+        '/mode <business|silent|off> - Set chat mode (owner)',
         'Send a file to index it (owner)'
       );
     }

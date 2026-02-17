@@ -74,17 +74,30 @@ Message arrives
 
 ---
 
-## 3. Chat Modes
+## 3. Profiles and Chat Modes
 
-Three modes, per-chat, switchable anytime. Global `bot_mode` (personal or business) set at init determines the default for unset chats.
+### Profiles (set at init)
+
+A **profile** is a global setting chosen during `multis init`. It determines the default mode for all chats.
+
+| Profile | Set at | Default mode for chats | Use case |
+|---------|--------|----------------------|----------|
+| **personal** | `multis init` | silent | Private assistant — track conversations passively, respond only when asked |
+| **business** | `multis init` | business | Customer support — bot auto-responds to all incoming messages |
+
+Profile is stored as `bot_mode` in config.json. It does not change per-chat — it only sets the default.
+
+### Modes (per-chat)
+
+Three modes, per-chat, switchable anytime via `/mode`. The profile determines the default; modes override it per-chat.
 
 | Mode | Self messages | Incoming messages | Admin commands | Use case |
 |------|--------------|-------------------|----------------|----------|
+| **business** | Commands + natural ask | Auto-respond via LLM | No | Customer support, business contacts. Use `/agent` to assign different agents per chat |
+| **silent** | Ignored | Archived to memory | No | Passive capture — track conversations without bot output |
 | **off** | Ignored | Ignored | No | Completely ignored — no archive, no response |
-| **business** | Commands + natural ask | Auto-respond via LLM | No | Customer support, business contacts |
-| **silent** | Ignored | Archived to memory | No | Friends — passive capture, no bot output |
 
-Self-chats (note-to-self, WhatsApp self) are auto-detected as **off**.
+Self-chats (note-to-self, WhatsApp self) are auto-detected as **off** (command channel, not a contact).
 
 ### Setting modes
 
@@ -95,6 +108,12 @@ Self-chats (note-to-self, WhatsApp self) are auto-detected as **off**.
 - `/mode <mode> <name>` in self-chat → search by name/number
 - On Telegram: `/mode` shows current mode, `/mode <mode>` sets it
 
+### Typical workflows
+
+**Personal profile**: all chats default to `silent`. Override specific chats to `off` if you don't want tracking, or to `business` if you want the bot to respond (e.g. a group you manage).
+
+**Business profile**: all chats default to `business`. Override specific chats to `silent` (monitor without responding) or `off` (ignore completely). Use `/agent` to assign different agents per chat (e.g. `support` for customers, `sales` for suppliers).
+
 ### Privilege model
 
 | Context | Admin commands? | Scope | Bot responds? |
@@ -104,15 +123,15 @@ Self-chats (note-to-self, WhatsApp self) are auto-detected as **off**.
 | Business-mode chat | No | kb + user:chatId | Auto to all incoming |
 | Silent-mode chat | No | n/a | Never |
 
-### Default behavior by bot_mode
+### Default behavior by profile
 
-| `bot_mode` | New Beeper chats default to | Telegram |
-|------------|----------------------------|----------|
+| Profile (`bot_mode`) | New Beeper chats default to | Telegram |
+|----------------------|----------------------------|----------|
 | **personal** | silent (archive only) | off (owner sets mode manually) |
 | **business** | business (auto-respond) | off (owner sets mode manually) |
 
 **Persisted to:** `config.platforms.beeper.chat_modes[chatId]`
-**Fallback chain:** per-chat mode → beeper `default_mode` → global `bot_mode` → 'off'
+**Fallback chain:** per-chat mode → beeper `default_mode` → profile (`bot_mode`) default → 'off'
 
 ---
 
