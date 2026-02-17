@@ -5,6 +5,53 @@
 
 ---
 
+## Agentic Collaboration Landscape (Feb 2026)
+
+Four protocols/frameworks are emerging as the standard stack for agentic systems. They operate at **different layers** — complementary, not competing:
+
+```
+┌─────────────────────────────────────┐
+│  AG-UI    Agent ↔ User (frontend)   │  "How does the agent render in a UI?"
+├─────────────────────────────────────┤
+│  AG2      Agent orchestration       │  "How do I build/wire multi-agent teams?"
+├─────────────────────────────────────┤
+│  A2A      Agent ↔ Agent (network)   │  "How do agents across systems discover & collaborate?"
+├─────────────────────────────────────┤
+│  MCP      Agent ↔ Tools/Data        │  "How does an agent access external tools?"
+└─────────────────────────────────────┘
+```
+
+### AG-UI — Agent-User Interaction Protocol
+
+- **By:** CopilotKit (MIT, 12k+ stars)
+- **What:** Event-based protocol (~16 event types over SSE/WebSocket) for rendering agent state in real-time web UIs. Streaming chat, generative UI components, shared state sync, human-in-the-loop interrupts.
+- **SDKs:** TypeScript (primary), Kotlin, Go, Dart, Java, Rust, Ruby
+- **Adopted by:** LangGraph, CrewAI, Microsoft Agent Framework, Google ADK, AWS Strands, Pydantic AI
+- **Relevance to multis:** Low. Our UI is Telegram/Beeper chat, not a web dashboard. Only relevant if we build a web frontend with live agent status. Revisit if Model C (self-hosted for businesses) needs a dashboard.
+
+### AG2 — Multi-Agent Framework (ex-AutoGen)
+
+- **By:** AG2AI, forked from Microsoft Research (Apache 2.0, 4k+ stars, 700k+ monthly PyPI downloads)
+- **What:** Python framework for multi-agent orchestration. ConversableAgent primitives, 9 group orchestration patterns (swarm, group chat, sequential, nested), cross-framework interop ("AgentOS" connecting AG2 + Google ADK + OpenAI Agents SDK + LangChain).
+- **Runtime:** Python only (>=3.10)
+- **Relevance to multis:** None for adoption (wrong language, heavy framework). Worth studying their 9 orchestration patterns for design ideas if we ever need Tier 3 multi-agent coordination. Their swarm and group chat patterns are well-documented.
+
+### A2A — Agent-to-Agent Protocol
+
+- **By:** Google → Linux Foundation (Apache 2.0, 22k+ stars, 50+ launch partners)
+- **What:** Wire protocol (JSON-RPC 2.0 over HTTP) for cross-system agent collaboration. Agent Cards (JSON discovery documents like OpenAPI specs) declare capabilities, skills, and connection info. Supports sync, SSE streaming, and async long-running tasks. Agents stay opaque — no shared memory or tools.
+- **SDKs:** Python, Go, JavaScript, Java, .NET (language-agnostic by design)
+- **Partners:** Atlassian, Salesforce, SAP, ServiceNow, PayPal, LangChain, Cohere, MongoDB
+- **Relevance to multis:** **High for Tier 3.** Language-agnostic, HTTP-based, fits Node.js. If multis ever needs to talk to external agents (booking, payment, a customer's own AI), A2A is the emerging standard. Adopt instead of inventing a custom agent-to-agent protocol. See Tier 3 section below.
+
+### What This Means for multis
+
+Tier 1-2 (agent loop, scheduler, heartbeat, hooks) is **internal orchestration** — none of these projects solve that problem. They solve inter-system, multi-tenant, or frontend problems. Our ~345 lines of Tier 2 code remain the right approach.
+
+The key takeaway: **don't reinvent the wheel at Tier 3.** When external agent collaboration is needed, adopt A2A rather than designing a custom message bus.
+
+---
+
 ## Current State (Tier 1 — DONE)
 
 multis already has a working agent loop. The LLM decides when to use tools.
@@ -232,7 +279,7 @@ User-defined triggers that fire on events. "When X happens, do Y."
 
 ## Tier 3: Multi-Agent Orchestration (future, not planned)
 
-For reference. Only relevant if multis becomes multi-tenant or needs parallel agent execution.
+For reference. Only relevant if multis becomes multi-tenant or needs external agent collaboration.
 
 ### What OpenClaw has
 
@@ -240,21 +287,38 @@ For reference. Only relevant if multis becomes multi-tenant or needs parallel ag
 - **Agent handoffs** — @billing in response → transfers chat to billing agent with context
 - **Gateway** — central process that owns all connections, routes messages, manages sessions
 
-### What multis would need
+### Adopt A2A, don't reinvent
 
-- Agent-to-agent message bus (shared queue or direct calls)
-- Parallel execution with result merging
-- Session isolation per agent (separate memory contexts)
-- Coordination protocol (fan-out, wait-for-all, first-wins)
+If Tier 3 is ever needed, use the **A2A protocol** (Google → Linux Foundation) instead of building a custom agent-to-agent message bus. A2A provides:
+
+- **Agent Cards** — JSON discovery documents declaring capabilities, skills, auth requirements. multis would publish its own Agent Card describing what it can do.
+- **Standard wire protocol** — JSON-RPC 2.0 over HTTP. No custom transports to maintain.
+- **Task lifecycle** — submitted → working → input-required → completed/failed/canceled. Built-in long-running task support.
+- **Opacity** — agents collaborate without sharing internal state, memory, or tools. multis keeps its memory/FTS/governance private.
+- **JS SDK available** — `a2a-sdk` on npm, fits our Node.js stack.
+
+**What this replaces from the original design:**
+
+| Original plan | A2A equivalent |
+|---------------|----------------|
+| Agent-to-agent message bus | JSON-RPC over HTTP (standard) |
+| Coordination protocol (fan-out, wait-for-all) | A2A task lifecycle + streaming |
+| Custom discovery | Agent Cards |
+| Session isolation per agent | Opacity by design |
+
+**What A2A does NOT replace** (still build ourselves):
+- Internal persona routing (`resolveAgent()` — already done)
+- Internal parallel execution (if ever needed, ~50 lines of Promise.all)
+- Broadcast groups (internal concern, not cross-system)
 
 ### When to build
 
 Never, unless:
+- A real use case requires multis to call an external agent (booking, payment, customer's AI)
 - Multiple users need different agents handling their chats simultaneously
-- A use case requires genuine parallel work (not just sequential tool calls)
 - The single-agent + tools model can't handle the complexity
 
-The agent loop + tools + scheduler covers 95% of personal assistant use cases. Multi-agent is for platforms, not personal tools.
+The agent loop + tools + scheduler covers 95% of personal assistant use cases. Multi-agent orchestration is for platforms, not personal tools. When the time comes, adopt A2A — don't invent a protocol.
 
 ---
 
@@ -277,8 +341,8 @@ The agent loop + tools + scheduler covers 95% of personal assistant use cases. M
   │  Event-driven         │  Prerequisite: none.
   └──────────────────────┤
                          │
-  ○ Tier 3: Multi-agent  │  Not planned. Gateway-level orchestration.
-    orchestration        │  Only if personal tool → platform pivot.
+  ○ Tier 3: Multi-agent  │  Not planned. Use A2A protocol (not custom).
+    orchestration        │  Only if external agent collaboration needed.
                          │
                        FUTURE
 ```
