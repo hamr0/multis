@@ -23,11 +23,12 @@ A personal and business AI agent that lives in your chat apps. Runs locally on y
 
 | Platform | Role | Details |
 |----------|------|---------|
-| **Telegram bot** | Admin channel | Owner-only. Commands, monitoring, `/mode` control. Non-owners get pairing prompt. |
-| **Beeper** | Gateway to all chats | All contacts (WhatsApp, Telegram, LinkedIn, etc.) come through Beeper bridges. Per-chat modes (business/silent/off). Business-mode contacts get auto-responses without pairing. |
+| **Beeper Note-to-self** | Primary admin | Owner commands, `/mode`, `/ask`, monitoring. Always available when Beeper Desktop is running. |
+| **Telegram bot** | Secondary admin | Same admin capabilities. Available even when Beeper Desktop is off. |
+| **Beeper chats** | Gateway to all contacts | WhatsApp, Telegram, LinkedIn, etc. come through Beeper bridges. Per-chat modes (business/silent/off). Business-mode contacts get auto-responses without pairing. |
 | **Self-hosted Matrix** | Future alternative to Beeper | VPS + domain, $5-10/month. Planned (POC7). |
 
-**Telegram bot is admin only** — it is not a customer-facing channel. Other Telegram contacts reach multis through Beeper's Telegram bridge, alongside WhatsApp, LinkedIn, etc. One gateway, per-chat modes.
+**Admin channels**: The owner interacts with multis from two places — Beeper Note-to-self (primary) and Telegram bot (secondary). Both have full admin access: commands, `/mode` control over Beeper chats, `/ask`, etc. Telegram bot is not customer-facing — other Telegram contacts reach multis through Beeper's Telegram bridge, alongside WhatsApp, LinkedIn, etc.
 
 ### Platform abstraction
 
