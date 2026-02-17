@@ -126,8 +126,7 @@ async function runInit() {
   const summary = { telegram: null, beeper: null, beeperAccounts: [], llm: null, pin: false };
   const TOTAL_STEPS = 4;
 
-  console.log('\n' + LOGO);
-  console.log(c.dim('  interactive setup\n'));
+  console.log(c.bold('\nmultis init') + ' — interactive setup\n');
 
   // Ensure directory
   if (!fs.existsSync(MULTIS_DIR)) {
@@ -836,7 +835,7 @@ async function runDoctor() {
   let config = null;
   try { config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')); } catch { /* */ }
 
-  console.log('\n' + LOGO + '\n');
+  console.log(bold('\nmultis doctor\n'));
 
   // ── Profile ──────────────────────────────────────
   console.log(dim('── Profile ') + dim('─'.repeat(42)));
