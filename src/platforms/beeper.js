@@ -26,6 +26,7 @@ class BeeperPlatform extends Platform {
     this._processing = new Set(); // message IDs currently being handled (dedup guard)
     this._initialized = false; // first poll seeds _lastSeen without processing
     this._personalChats = new Set(); // chatIds that are self/note-to-self chats
+    this._botChatId = bc.bot_chat_id || null; // Telegram bot chat to exclude from polling
   }
 
   async start() {
@@ -78,6 +79,7 @@ class BeeperPlatform extends Platform {
       for (const chat of chats) {
         const chatId = chat.id || chat.chatID;
         if (!chatId) continue;
+        if (chatId === this._botChatId) continue; // skip Telegram bot chat
 
         // Detect self/note-to-self chats: all participants have isSelf=true
         const items = chat.participants?.items || chat.members?.items || [];
@@ -112,6 +114,7 @@ class BeeperPlatform extends Platform {
       for (const chat of chats) {
         const chatId = chat.id || chat.chatID;
         if (!chatId) continue;
+        if (chatId === this._botChatId) continue; // skip Telegram bot chat
 
         const msgData = await this._api('GET', `/v1/chats/${encodeURIComponent(chatId)}/messages?limit=5`);
         const messages = msgData.items || [];

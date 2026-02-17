@@ -833,9 +833,12 @@ async function routeMode(msg, platform, config, args, agentRegistry) {
       });
       await platform.send(msg.chatId, `Chat modes:\n${lines.join('\n')}`);
     } else {
-      // Telegram: show current chat mode
-      const m = getChatMode(config, msg.chatId);
-      await platform.send(msg.chatId, `Current chat mode: ${m}\n\nUsage: /mode <business|silent|off> [target]`);
+      // Telegram is an admin channel — modes apply to Beeper chats
+      await platform.send(msg.chatId,
+        'Telegram is your admin channel — chat modes apply to Beeper chats.\n\n' +
+        'Use /mode from Beeper self-chat to list and set modes.\n\n' +
+        'Usage: /mode <business|silent|off> [target]'
+      );
     }
     return;
   }
@@ -873,13 +876,12 @@ async function routeMode(msg, platform, config, args, agentRegistry) {
     }
   }
 
-  // If on Telegram, always set current chat (1:1 with bot)
+  // Telegram is an admin channel — modes only apply to Beeper chats
   if (msg.platform === 'telegram') {
-    setChatMode(config, msg.chatId, mode);
-    assignAgent(msg.chatId);
-    const agentNote = agentArg ? `, agent: ${agentArg}` : '';
-    await platform.send(msg.chatId, `Chat mode set to: ${mode}${agentNote}`);
-    logAudit({ action: 'mode', user_id: msg.senderId, chatId: msg.chatId, mode, agent: agentArg });
+    await platform.send(msg.chatId,
+      'Telegram is your admin channel — chat modes apply to Beeper chats.\n\n' +
+      'Use /mode from Beeper self-chat to set modes.'
+    );
     return;
   }
 
@@ -957,13 +959,14 @@ function getChatMode(config, chatId) {
 async function listBeeperChats(platform) {
   if (!platform._api) return null;
   try {
+    const botChatId = platform._botChatId || null;
     const data = await platform._api('GET', '/v1/chats?limit=20');
     const chats = data.items || [];
     return chats.map(c => ({
       id: c.id || c.chatID,
       title: c.title || c.name || '',
       network: c.network || '',
-    })).filter(c => c.id);
+    })).filter(c => c.id && c.id !== botChatId);
   } catch {
     return null;
   }
@@ -973,12 +976,13 @@ async function findBeeperChat(platform, search) {
   if (!platform._api) return null;
   // Search wider than the picker — find chats beyond the recent 20
   try {
+    const botChatId = platform._botChatId || null;
     const data = await platform._api('GET', '/v1/chats?limit=100');
     const chats = (data.items || []).map(c => ({
       id: c.id || c.chatID,
       title: c.title || c.name || '',
       network: c.network || '',
-    })).filter(c => c.id);
+    })).filter(c => c.id && c.id !== botChatId);
     const q = search.toLowerCase();
     const matches = chats.filter(c =>
       (c.title && c.title.toLowerCase().includes(q)) ||
