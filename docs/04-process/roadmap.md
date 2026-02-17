@@ -40,13 +40,18 @@ Start from scratch as if you're a new user. Validates the full install → first
 - [ ] `rm -rf ~/.multis` (clean slate)
 - [ ] `npm install` from repo root
 - [ ] `node bin/multis.js init` — complete the wizard
-  - [ ] Platform selection (Telegram / Beeper / Both)?
-  - [ ] Bot mode (personal / business)?
+  - [ ] "What do you need?" shows 3 options (default: 2)?
+  - [ ] Option 1 → Telegram setup, personal mode?
+  - [ ] Option 2 (Enter) → Beeper setup, personal mode?
+  - [ ] Option 3 → Beeper setup, business mode, asks about Telegram?
+  - [ ] Option 3 + y → Beeper + Telegram setup, business mode?
   - [ ] Telegram token → verified? Bot username shown?
   - [ ] Inline pairing → sent /start → paired as owner?
+  - [ ] Beeper command_prefix defaults to `/` (not `//`)?
+  - [ ] Bot chat auto-detected in Beeper (excluded from polling)?
   - [ ] LLM provider → key verified with real API call?
   - [ ] PIN set?
-  - [ ] Summary shows all verified components?
+  - [ ] Summary shows correct platform + mode combination?
   - [ ] `~/.multis/config.json` created with correct values?
   - [ ] `owner_id` set from inline pairing?
 - [ ] `node bin/multis.js start` — does the daemon start?
@@ -62,8 +67,8 @@ Start from scratch as if you're a new user. Validates the full install → first
 - [ ] `/help` — shows owner commands (exec, read, index, pin, mode)?
 - [ ] `/exec ls ~` — triggers PIN prompt? Enter PIN → output?
 - [ ] `/exec echo hello` — governance allows it?
-- [ ] `/mode` (no args) — shows current chat mode?
-- [ ] `/mode off` — sets mode to off (no PIN needed, mode removed from PIN_PROTECTED)?
+- [ ] `/mode` (no args) — says "Telegram is admin channel, use /mode from Beeper"?
+- [ ] `/mode off` from Telegram — says modes apply to Beeper chats (no local set)?
 - [ ] `/read ~/.multis/config.json` — shows file content?
 - [ ] Upload a PDF file — auto-indexed? Reports chunk count?
 - [ ] `/index ~/some-real-doc.pdf kb` — indexes with scope?
@@ -103,8 +108,8 @@ Start from scratch as if you're a new user. Validates the full install → first
 
 #### Mode tests (Beeper)
 
-- [ ] `/mode` (no args) from Note-to-self → lists all chats with current modes (no PIN)?
-- [ ] `/mode business` from Note-to-self → interactive picker? Pick a chat → set?
+- [ ] `/mode` (no args) from Note-to-self → lists all chats with current modes (no PIN)? Bot chat excluded from list?
+- [ ] `/mode business` from Note-to-self → interactive picker? Pick a chat → set? Bot chat not in picker?
 - [ ] `/mode silent John` from Note-to-self → search by name → set?
 - [ ] `/mode off` → sets chat to off (completely ignored)?
 - [ ] `/mode business` in a non-self chat → silently ignored (commands restricted to personal chats)?
@@ -167,6 +172,10 @@ Keep a running list here as you test. Each entry: what happened, expected vs act
 | 3 | Files | Bot said "no permission" for find_files — governance blocking find | Medium | Fixed (find_files tool added) |
 | 4 | Mode | "personal" mode name confusing — sounded like "my chat" not "ignored" | Low | Fixed (renamed to "off") |
 | 5 | Agent | `/mode business sales Alice` from Note-to-self assigned agent to Note-to-self, not Alice | Medium | Fixed (agent deferred to target resolution) |
+| 6 | Init | Two separate platform+mode questions confusing — value depends on combination | Low | Fixed (single use-case question, 3 options) |
+| 7 | Mode | `/mode` on Telegram set mode locally — Telegram is admin channel, modes apply to Beeper | Medium | Fixed (Telegram /mode now explains, doesn't set) |
+| 8 | Beeper | Bot's own Telegram chat appeared in Beeper polling and /mode picker | Low | Fixed (bot_chat_id excluded from polls + lists) |
+| 9 | Init | Beeper command_prefix defaulted to `//` instead of `/` | Low | Fixed |
 |   |      |       |          |        |
 
 ---

@@ -588,7 +588,7 @@ async function runInit() {
     console.log('  Send /start <code> to your bot to pair as owner.');
   }
 
-  console.log(`\nRun ${c.bold('multis start')} to launch.`);
+  console.log(`\nRun ${c.bold('multis')} to launch.`);
 
   rl.close();
 }
@@ -615,7 +615,7 @@ function runStart() {
   }
 
   if (!fs.existsSync(CONFIG_PATH)) {
-    console.log('No config found. Run: multis init');
+    console.log('No config found. Run: multis init\n  or: multis → 1) init');
     process.exit(1);
   }
 
