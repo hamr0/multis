@@ -74,8 +74,8 @@ describe('CLI commands', () => {
     }));
 
     const r = run('doctor');
-    assert.match(r.stdout, /Node\.js >= 20/);
-    assert.match(r.stdout, /config\.json valid/);
+    assert.match(r.stdout, /Node\.js/);
+    assert.match(r.stdout, /Config/);
     assert.match(r.stdout, /checks passed/);
   });
 

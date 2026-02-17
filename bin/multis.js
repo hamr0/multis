@@ -814,216 +814,257 @@ function runStatus() {
 // doctor
 // ---------------------------------------------------------------------------
 async function runDoctor() {
+  const bold   = (s) => `\x1b[1m${s}\x1b[0m`;
+  const green  = (s) => `\x1b[32m${s}\x1b[0m`;
+  const red    = (s) => `\x1b[31m${s}\x1b[0m`;
+  const yellow = (s) => `\x1b[33m${s}\x1b[0m`;
+  const dim    = (s) => `\x1b[2m${s}\x1b[0m`;
+  const ok     = green('✓');
+  const fail   = red('✗');
+
+  // Load config
+  let config = null;
+  try { config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')); } catch { /* */ }
+
+  console.log(bold('\nmultis doctor\n'));
+
+  // ── Profile ──────────────────────────────────────
+  console.log(dim('── Profile ') + dim('─'.repeat(42)));
+
+  const profileRows = [];
+
+  // Status (running/stopped)
+  if (isRunning()) {
+    const pid = fs.readFileSync(PID_PATH, 'utf-8').trim();
+    profileRows.push(['Status', green('running') + dim(` (PID ${pid})`)]);
+  } else {
+    profileRows.push(['Status', yellow('stopped')]);
+  }
+
+  // Mode
+  profileRows.push(['Mode', config?.bot_mode || yellow('not set')]);
+
+  // Telegram
+  if (config?.platforms?.telegram?.enabled) {
+    const botName = config.platforms.telegram.bot_username;
+    const owner = config.owner_id;
+    let tgVal = botName ? `@${botName}` : dim('token set');
+    if (owner) tgVal += dim(` (owner: ${owner})`);
+    profileRows.push(['Telegram', tgVal]);
+  } else {
+    profileRows.push(['Telegram', dim('disabled')]);
+  }
+
+  // Beeper — detect networks from chat_modes or _pendingMode
+  if (config?.platforms?.beeper?.enabled) {
+    const url = config.platforms.beeper.url || 'localhost:23373';
+    const host = url.replace(/^https?:\/\//, '');
+    // Detect networks from _pendingMode matches
+    const networks = new Set();
+    if (config._pendingMode) {
+      for (const pending of Object.values(config._pendingMode)) {
+        for (const m of (pending.matches || [])) {
+          if (m.network) networks.add(m.network);
+        }
+      }
+    }
+    const netStr = networks.size > 0 ? ` (${[...networks].join(', ')})` : '';
+    profileRows.push(['Beeper', `${host}${netStr}`]);
+  } else {
+    profileRows.push(['Beeper', dim('disabled')]);
+  }
+
+  // LLM — verify connectivity
+  let llmVerified = false;
+  const provider = config?.llm?.provider;
+  const hasKey = config?.llm?.apiKey || provider === 'ollama';
+  if (provider && hasKey) {
+    const providerName = provider.charAt(0).toUpperCase() + provider.slice(1);
+    const model = config.llm.model || 'default';
+    try {
+      await verifyLLM(config.llm);
+      llmVerified = true;
+      profileRows.push(['LLM', `${providerName} (${model}) ${ok}`]);
+    } catch (err) {
+      profileRows.push(['LLM', `${providerName} (${model}) ${fail} ${dim(err.message)}`]);
+    }
+  } else {
+    profileRows.push(['LLM', provider ? yellow(`${provider} (no API key)`) : yellow('not configured')]);
+  }
+
+  // Agents
+  if (config?.agents && typeof config.agents === 'object' && !Array.isArray(config.agents)) {
+    const names = Object.keys(config.agents);
+    profileRows.push(['Agents', names.join(', ') || dim('none')]);
+  } else {
+    profileRows.push(['Agents', dim('single-agent mode')]);
+  }
+
+  // PIN
+  profileRows.push(['PIN', config?.security?.pin_hash ? 'enabled' : dim('not set')]);
+
+  // Print profile rows aligned
+  const maxProfileLabel = Math.max(...profileRows.map(r => r[0].length));
+  for (const [label, value] of profileRows) {
+    console.log(`  ${label.padEnd(maxProfileLabel + 2)}${value}`);
+  }
+
+  // ── Health ──────────────────────────────────────
+  console.log('\n' + dim('── Health ') + dim('─'.repeat(43)));
+
   const checks = [];
 
   function check(name, fn) {
     try {
       const result = fn();
-      checks.push({ name, ok: result.ok, detail: result.detail });
+      checks.push({ name, ok: result.ok, detail: result.detail, warnings: result.warnings });
     } catch (err) {
       checks.push({ name, ok: false, detail: err.message });
     }
   }
 
-  // Node.js version
-  check('Node.js >= 20', () => {
+  // Node.js
+  check('Node.js', () => {
     const major = parseInt(process.versions.node.split('.')[0], 10);
     return { ok: major >= 20, detail: `v${process.versions.node}` };
   });
 
-  // ~/.multis exists
-  check('~/.multis directory', () => {
-    return { ok: fs.existsSync(MULTIS_DIR), detail: MULTIS_DIR };
+  // Config
+  check('Config', () => {
+    if (!fs.existsSync(CONFIG_PATH)) return { ok: false, detail: 'not found — run multis init' };
+    if (!config) return { ok: false, detail: 'invalid JSON' };
+    if (!config.owner_id) return { ok: false, detail: 'no owner — run multis init' };
+    return { ok: true, detail: `owner: ${config.owner_id}, ${config.allowed_users?.length || 0} user(s)` };
   });
 
-  // config.json valid
-  check('config.json valid', () => {
-    if (!fs.existsSync(CONFIG_PATH)) return { ok: false, detail: 'not found' };
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
-    return { ok: true, detail: `owner: ${config.owner_id || 'none'}` };
-  });
-
-  // Owner + paired users
-  let config = null;
-  try { config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')); } catch { /* */ }
-
-  check('Owner configured', () => {
-    return { ok: !!config?.owner_id, detail: config?.owner_id ? `ID: ${config.owner_id}` : 'not set' };
-  });
-
-  check('Paired users', () => {
-    const count = config?.allowed_users?.length || 0;
-    return { ok: count > 0, detail: `${count} user(s)` };
-  });
-
-  // Telegram
-  check('Telegram bot token', () => {
-    const token = config?.telegram_bot_token || config?.platforms?.telegram?.bot_token || process.env.TELEGRAM_BOT_TOKEN;
-    return { ok: !!token, detail: token ? `${token.slice(0, 8)}...` : 'not set' };
-  });
-
-  // Beeper
-  check('Beeper Desktop API', () => {
-    const enabled = config?.platforms?.beeper?.enabled;
-    if (!enabled) return { ok: true, detail: 'disabled (optional)' };
-    // Quick reachability check
-    try {
-      const net = require('net');
-      const url = config.platforms.beeper.url || 'http://localhost:23373';
-      const port = parseInt(url.split(':').pop(), 10);
-      return { ok: true, detail: `enabled, port ${port}` };
-    } catch {
-      return { ok: false, detail: 'enabled but unreachable' };
-    }
-  });
-
-  // LLM
-  // LLM check — async, verify actual connectivity
-  {
-    const provider = config?.llm?.provider;
-    const hasKey = config?.llm?.apiKey || provider === 'ollama';
-    if (!provider || !hasKey) {
-      checks.push({ name: 'LLM provider', ok: false, detail: `${provider || 'none'}${hasKey ? '' : ' (no API key)'}` });
-    } else {
-      try {
-        await verifyLLM(config.llm);
-        checks.push({ name: 'LLM provider', ok: true, detail: `${provider} — verified` });
-      } catch (err) {
-        checks.push({ name: 'LLM provider', ok: false, detail: `${provider} — ${err.message}` });
-      }
-    }
-  }
-
-  // Agents
-  check('Agents', () => {
-    if (!config?.agents) return { ok: true, detail: 'not configured (single-agent mode)' };
-    if (typeof config.agents !== 'object' || Array.isArray(config.agents)) {
-      return { ok: false, detail: '"agents" must be an object' };
-    }
-
-    const warnings = [];
-    const agentNames = [];
-
-    for (const [name, agent] of Object.entries(config.agents)) {
-      if (!agent || typeof agent !== 'object') {
-        warnings.push(`"${name}" invalid`);
-        continue;
-      }
-      if (!agent.persona) {
-        warnings.push(`"${name}" missing persona`);
-        continue;
-      }
-      if (agent.model && typeof agent.model !== 'string') {
-        warnings.push(`"${name}" model must be a string`);
-      }
-      agentNames.push(name);
-    }
-
-    // Check defaults reference valid agents
-    if (config.defaults && typeof config.defaults === 'object') {
-      const validModes = ['off', 'business', 'silent'];
-      for (const [mode, agentName] of Object.entries(config.defaults)) {
-        if (!validModes.includes(mode)) {
-          warnings.push(`default "${mode}" is not a valid mode`);
-        } else if (!agentNames.includes(agentName)) {
-          warnings.push(`default "${mode}" points to unknown agent "${agentName}"`);
-        }
-      }
-    }
-
-    // Check chat_agents reference valid agents
-    if (config.chat_agents && typeof config.chat_agents === 'object') {
-      for (const [chatId, agentName] of Object.entries(config.chat_agents)) {
-        if (!agentNames.includes(agentName)) {
-          warnings.push(`chat_agents["${chatId}"] points to unknown agent "${agentName}"`);
-        }
-      }
-    }
-
-    if (warnings.length > 0) {
-      const detail = `${agentNames.length} defined (${agentNames.join(', ')})\n` +
-        warnings.map(w => `           WARNING — ${w}`).join('\n');
-      return { ok: false, detail };
-    }
-
-    const defaultsStr = config.defaults
-      ? Object.entries(config.defaults).map(([m, a]) => `${m}→${a}`).join(', ')
-      : 'none';
-    return { ok: true, detail: `${agentNames.length} defined (${agentNames.join(', ')}) — defaults: ${defaultsStr}` };
-  });
-
-  // SQLite DB
-  check('SQLite database', () => {
+  // Database
+  check('Database', () => {
     const dbPath = PATHS.db();
-    if (!fs.existsSync(dbPath)) return { ok: true, detail: 'not created yet (OK)' };
+    if (!fs.existsSync(dbPath)) return { ok: true, detail: 'not created yet' };
     try {
       const Database = require('better-sqlite3');
       const db = new Database(dbPath, { readonly: true });
       const total = db.prepare('SELECT COUNT(*) as c FROM chunks').get();
-      const byType = db.prepare('SELECT document_type, COUNT(*) as c FROM chunks GROUP BY document_type').all();
+      const byType = db.prepare('SELECT element_type, COUNT(*) as c FROM chunks GROUP BY element_type').all();
       db.close();
-      const typeStr = byType.map(r => `${r.document_type}: ${r.c}`).join(', ');
+      const typeStr = byType.map(r => `${r.element_type}: ${r.c}`).join(', ');
       return { ok: true, detail: `${total.c} chunks (${typeStr || 'empty'})` };
     } catch (err) {
       return { ok: false, detail: err.message };
     }
   });
 
-  // Audit log
-  check('Audit log', () => {
-    const auditPath = PATHS.auditLog();
-    return { ok: true, detail: fs.existsSync(auditPath) ? 'exists' : 'will be created on first event' };
-  });
-
-  // Memory directories
-  check('Memory directories', () => {
+  // Memory
+  check('Memory', () => {
     const memDir = PATHS.memory();
-    if (!fs.existsSync(memDir)) return { ok: true, detail: 'not created yet (OK)' };
+    if (!fs.existsSync(memDir)) return { ok: true, detail: 'not created yet' };
     const dirs = fs.readdirSync(memDir, { withFileTypes: true }).filter(d => d.isDirectory());
     return { ok: true, detail: `${dirs.length} chat(s)` };
   });
 
-  // PIN
-  check('PIN authentication', () => {
-    const pinSet = !!config?.security?.pin_hash;
-    return {
-      ok: true,
-      detail: pinSet ? 'enabled (recovery: remove pin_hash from config.json)' : 'not set (optional)'
-    };
-  });
+  // Agents config validation
+  if (config?.agents && typeof config.agents === 'object' && !Array.isArray(config.agents)) {
+    check('Agents', () => {
+      const warnings = [];
+      const agentNames = [];
+
+      for (const [name, agent] of Object.entries(config.agents)) {
+        if (!agent || typeof agent !== 'object') { warnings.push(`"${name}" invalid`); continue; }
+        if (!agent.persona) { warnings.push(`"${name}" missing persona`); continue; }
+        agentNames.push(name);
+      }
+
+      if (config.defaults && typeof config.defaults === 'object') {
+        const validModes = ['off', 'business', 'silent', 'personal'];
+        for (const [mode, agentName] of Object.entries(config.defaults)) {
+          if (!validModes.includes(mode)) {
+            warnings.push(`default "${mode}" is not a valid mode`);
+          } else if (!agentNames.includes(agentName)) {
+            warnings.push(`default "${mode}" points to unknown agent "${agentName}"`);
+          }
+        }
+      }
+
+      if (config.chat_agents && typeof config.chat_agents === 'object') {
+        for (const [chatId, agentName] of Object.entries(config.chat_agents)) {
+          if (!agentNames.includes(agentName)) {
+            warnings.push(`chat_agents["${chatId}"] → unknown agent "${agentName}"`);
+          }
+        }
+      }
+
+      return { ok: warnings.length === 0, detail: `${agentNames.length} validated`, warnings };
+    });
+  }
 
   // Governance
-  check('Governance config', () => {
+  check('Governance', () => {
     const govPath = PATHS.governance();
     if (!fs.existsSync(govPath)) return { ok: false, detail: 'governance.json not found' };
     const gov = JSON.parse(fs.readFileSync(govPath, 'utf-8'));
     return { ok: true, detail: `allowlist: ${gov.allowlist?.length || 0}, denylist: ${gov.denylist?.length || 0}` };
   });
 
-  // Tools config
-  check('Tools config', () => {
+  // Tools
+  check('Tools', () => {
     const toolsPath = PATHS.tools();
-    if (!fs.existsSync(toolsPath)) return { ok: true, detail: 'not found (will use defaults)' };
+    if (!fs.existsSync(toolsPath)) return { ok: true, detail: 'defaults' };
     try {
       const tools = JSON.parse(fs.readFileSync(toolsPath, 'utf-8'));
       const entries = Object.entries(tools.tools || {});
       const enabled = entries.filter(([, v]) => v.enabled !== false).length;
-      return { ok: true, detail: `${enabled}/${entries.length} tools enabled` };
+      return { ok: true, detail: `${enabled}/${entries.length} enabled` };
     } catch (err) {
       return { ok: false, detail: `parse error: ${err.message}` };
     }
   });
 
-  // Print results
-  console.log('\nmultis doctor\n');
-  let failures = 0;
-  for (const c of checks) {
-    const icon = c.ok ? '[OK]' : '[FAIL]';
-    console.log(`  ${icon}  ${c.name} — ${c.detail}`);
-    if (!c.ok) failures++;
+  // Audit log
+  check('Audit log', () => {
+    const auditPath = PATHS.auditLog();
+    return { ok: true, detail: fs.existsSync(auditPath) ? 'exists' : 'not yet created' };
+  });
+
+  // Print passing checks
+  const passing = checks.filter(c => c.ok);
+  const failing = checks.filter(c => !c.ok);
+  const maxCheckLabel = Math.max(...checks.map(c => c.name.length));
+
+  for (const c of passing) {
+    console.log(`  ${ok}  ${c.name.padEnd(maxCheckLabel + 2)}${dim(c.detail)}`);
   }
-  console.log(`\n${checks.length - failures}/${checks.length} checks passed.`);
-  if (failures > 0) process.exit(1);
+
+  // ── Issues ──────────────────────────────────────
+  // Collect all issues: failed checks + warnings from passing checks
+  const issues = [];
+  for (const c of failing) {
+    issues.push({ name: c.name, detail: c.detail });
+  }
+  for (const c of checks) {
+    if (c.warnings) {
+      for (const w of c.warnings) {
+        issues.push({ name: c.name, detail: w });
+      }
+    }
+  }
+
+  // LLM failure is already shown in profile, but add to issues if not verified
+  if (provider && hasKey && !llmVerified) {
+    issues.push({ name: 'LLM', detail: 'verification failed (see profile above)' });
+  }
+
+  if (issues.length > 0) {
+    console.log('\n' + dim('── Issues ') + dim('─'.repeat(43)));
+    for (const issue of issues) {
+      console.log(`  ${fail}  ${issue.name.padEnd(maxCheckLabel + 2)}${issue.detail}`);
+    }
+  }
+
+  // Summary
+  const totalChecks = checks.length + (provider && hasKey ? 1 : 0); // include LLM
+  const totalPassing = passing.length + (llmVerified ? 1 : 0);
+  console.log(`\n${totalPassing}/${totalChecks} checks passed.`);
+  if (issues.length > 0) process.exit(1);
 }
 
 // ---------------------------------------------------------------------------
