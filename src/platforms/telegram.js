@@ -24,6 +24,10 @@ class TelegramPlatform extends Platform {
     this.bot.on('message', async (ctx) => {
       if (!this._messageCallback) return;
 
+      // Drop stale messages (e.g. queued during hibernate/sleep)
+      const msgAge = Date.now() / 1000 - ctx.message.date;
+      if (msgAge > 120) return;
+
       // Handle document uploads separately
       if (ctx.message.document) {
         await this._handleDocument(ctx);
