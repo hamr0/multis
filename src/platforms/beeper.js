@@ -55,6 +55,7 @@ class BeeperPlatform extends Platform {
     this._initialized = true;
 
     // Start polling
+    this._lastPollTime = Date.now();
     this._pollTimer = setInterval(() => this._poll(), this.pollInterval);
     console.log(`Beeper: polling every ${this.pollInterval}ms for / commands`);
   }
@@ -107,7 +108,17 @@ class BeeperPlatform extends Platform {
     if (!this._initialized) return;
     if (this._polling) return; // prevent overlapping polls
     this._polling = true;
+    const now = Date.now();
     try {
+      // Detect hibernate/sleep: if gap since last poll is >30s (expect ~3s), re-seed
+      if (this._lastPollTime && (now - this._lastPollTime) > 30000) {
+        console.log(`Beeper: poll gap detected (${Math.round((now - this._lastPollTime) / 1000)}s) — re-seeding`);
+        await this._seedLastSeen();
+        this._lastPollTime = now;
+        this._polling = false;
+        return; // skip this cycle, process fresh on next poll
+      }
+
       const data = await this._api('GET', '/v1/chats?limit=20');
       const chats = data.items || [];
 
@@ -135,8 +146,11 @@ class BeeperPlatform extends Platform {
           const isSelf = this._isSelf(msg);
           const text = msg.text || '';
 
-          // Skip our own responses to avoid cascade
+          // Skip our own responses, bot chats, and bot-to-bot loops
           if (text.startsWith('[multis]')) continue;
+          const chatTitle = chat.title || chat.name || '';
+          if (/bot$/i.test(chatTitle) || /^bot/i.test(chatTitle)) continue;
+          if (this._isLooping(chatId, messages)) continue;
 
           if (!this._messageCallback) continue;
 
@@ -200,7 +214,7 @@ class BeeperPlatform extends Platform {
         this._seen = new Set(arr.slice(-250));
       }
 
-      // Clear poll error flag on success
+      this._lastPollTime = now;
       this._pollErrorLogged = false;
     } catch (err) {
       if (!this._pollErrorLogged) {
@@ -210,6 +224,14 @@ class BeeperPlatform extends Platform {
     } finally {
       this._polling = false;
     }
+  }
+
+  _isLooping(chatId, messages) {
+    // If the 2 most recent messages in this chat are [multis] responses,
+    // we're in a bot-to-bot loop — stop responding
+    const recent = messages.slice(0, 2);
+    const multisCount = recent.filter(m => (m.text || '').startsWith('[multis]')).length;
+    return multisCount >= 2;
   }
 
   _isSelf(msg) {
