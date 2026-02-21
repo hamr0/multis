@@ -226,6 +226,7 @@ Full design: `docs/02-features/agent-evolution.md`
 
 ### C2. Other Features
 
+- [ ] `fetch_url` tool — lightweight vanilla `https.get` + HTML-to-text for agent web lookups (~30 lines). Covers 90% of cases where agent needs to check a web page for a customer answer. Heavy browser automation (mcprune/Playwright) deferred until fetch proves insufficient.
 - [ ] Tier 2 PDF parsing (font-size heading detection)
 - [ ] File upload indexing on Beeper (not just Telegram)
 - [ ] ACT-R activation visible in `/search` results

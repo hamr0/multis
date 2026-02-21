@@ -1,6 +1,6 @@
 # Testing Guide
 
-> Last updated: 2026-02-11 | 243 tests | 0 failures
+> Last updated: 2026-02-21 | 357 tests | 0 failures
 
 ## Running Tests
 
