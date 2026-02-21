@@ -156,6 +156,7 @@ class BeeperPlatform extends Platform {
 
           // Detect self/personal chats (single participant or DM type)
           const isPersonalChat = this._personalChats.has(chatId);
+
           const mode = this._getChatMode(chatId);
 
           // Determine how to route this message
@@ -197,6 +198,11 @@ class BeeperPlatform extends Platform {
               routeAs,
             });
 
+            // Pass through file attachments for indexing
+            if (msg.attachments?.length > 0) {
+              normalized._attachments = msg.attachments;
+            }
+
             try {
               await this._messageCallback(normalized, this);
             } catch (err) {
@@ -237,6 +243,18 @@ class BeeperPlatform extends Platform {
   _isSelf(msg) {
     const sender = msg.senderID || msg.sender || '';
     return this.selfIds.has(sender);
+  }
+
+  /**
+   * Download an asset from Beeper Desktop API.
+   * @param {string} mxcUrl - mxc:// URI (possibly with encryptedFileInfoJSON param)
+   * @returns {string} local file path
+   */
+  async downloadAsset(mxcUrl) {
+    const result = await this._api('POST', '/v1/assets/download', { url: mxcUrl });
+    if (result.error) throw new Error(`Download failed: ${result.error}`);
+    // srcURL is "file:///path" — strip protocol
+    return result.srcURL.replace(/^file:\/\//, '');
   }
 
   _getChatMode(chatId) {

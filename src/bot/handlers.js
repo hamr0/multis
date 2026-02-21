@@ -173,6 +173,12 @@ function createMessageRouter(config, deps = {}) {
       return;
     }
 
+    // Handle Beeper file attachments
+    if (msg._attachments?.length > 0) {
+      await handleBeeperFileIndex(msg, platform, config, indexer);
+      return;
+    }
+
     // Interactive replies (PIN, checkpoint, mode picker) must be checked before routeAs
     // so they aren't swallowed by natural/silent/business routing
     const text = msg.text || '';
@@ -234,6 +240,27 @@ function createMessageRouter(config, deps = {}) {
       }
       return;
     }
+    // Handle pending file index scope reply (1 = public, 2 = admin)
+    if (config._pendingIndex?.[msg.senderId] && /^[12]$/.test(text.trim())) {
+      const pending = config._pendingIndex[msg.senderId];
+      delete config._pendingIndex[msg.senderId];
+      const scope = text.trim() === '1' ? 'public' : 'admin';
+      try {
+        await platform.send(msg.chatId, `Downloading and indexing: ${pending.fileName} (${scope})...`);
+        const localPath = await platform.downloadAsset(pending.srcURL);
+        const count = await indexer.indexFile(localPath, scope);
+        await platform.send(msg.chatId, `Indexed ${count} chunks from ${pending.fileName} [${scope}]`);
+        logAudit({ action: 'index_upload', user_id: msg.senderId, filename: pending.fileName, chunks: count, scope, platform: 'beeper' });
+      } catch (err) {
+        await platform.send(msg.chatId, `Index error: ${err.message}`);
+      }
+      return;
+    }
+    // Clear stale pending index if user sends something else
+    if (config._pendingIndex?.[msg.senderId]) {
+      delete config._pendingIndex[msg.senderId];
+    }
+
     // Clear stale pending mode if user sends something else
     if (config._pendingMode?.[msg.senderId]) {
       delete config._pendingMode[msg.senderId];
@@ -1297,11 +1324,56 @@ async function routeHelp(msg, platform, config) {
       '/jobs - List active scheduled jobs (owner)',
       '/cancel <id> - Cancel a scheduled job (owner)',
       '/plan <goal> - Break a goal into steps and execute (owner)',
-      'Send a file to index it (owner, Telegram only)',
+      'Send a file to index it (owner, Telegram/Beeper)',
       'Use @agentname to invoke a specific agent per-message'
     );
   }
   await platform.send(msg.chatId, cmds.join('\n'));
+}
+
+async function handleBeeperFileIndex(msg, platform, config, indexer) {
+  if (!isOwner(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, 'Owner only. File indexing not available.');
+    return;
+  }
+
+  const supported = ['pdf', 'docx', 'md', 'txt'];
+  const attachment = msg._attachments.find(a => {
+    const ext = (a.fileName || '').split('.').pop().toLowerCase();
+    return supported.includes(ext);
+  });
+
+  if (!attachment) {
+    await platform.send(msg.chatId, `Unsupported file type.\nSupported: ${supported.join(', ')}`);
+    return;
+  }
+
+  const fileName = attachment.fileName;
+  const srcURL = attachment.srcURL || attachment.id;
+
+  // Parse scope from text: "/index public", "/index admin", "/index kb"
+  const text = (msg.text || '').trim();
+  const indexMatch = text.match(/^\/index\s+(public|kb|admin)\s*$/i);
+  let scope = indexMatch ? indexMatch[1].toLowerCase() : null;
+  if (scope === 'kb') scope = 'public';
+
+  if (!scope) {
+    // Ask for scope
+    if (!config._pendingIndex) config._pendingIndex = {};
+    config._pendingIndex[msg.senderId] = { fileName, srcURL };
+    await platform.send(msg.chatId, `Got "${fileName}". Index as:\n1. Public (kb)\n2. Admin only\nReply 1 or 2.`);
+    return;
+  }
+
+  try {
+    await platform.send(msg.chatId, `Downloading and indexing: ${fileName} (${scope})...`);
+    const localPath = await platform.downloadAsset(srcURL);
+    const count = await indexer.indexFile(localPath, scope);
+    await platform.send(msg.chatId, `Indexed ${count} chunks from ${fileName} [${scope}]`);
+    logAudit({ action: 'index_upload', user_id: msg.senderId, filename: fileName, chunks: count, scope, platform: 'beeper' });
+  } catch (err) {
+    await platform.send(msg.chatId, `Index error: ${err.message}`);
+  }
 }
 
 async function handleDocumentUpload(msg, platform, config, indexer) {
