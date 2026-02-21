@@ -336,6 +336,17 @@ function createMessageRouter(config, deps = {}) {
   };
 
   router.registerPlatform = (name, instance) => platformRegistry.set(name, instance);
+
+  // Initialize scheduler with centralized tick handler (call after platforms registered)
+  router.initScheduler = () => {
+    const tick = createSchedulerTick({
+      platformRegistry, config, provider, indexer, getMem, memCfg,
+      allTools, toolsConfig, runtimePlatform, maxToolRounds
+    });
+    const scheduler = getScheduler(tick);
+    return scheduler;
+  };
+
   return router;
 }
 
@@ -1154,6 +1165,54 @@ async function routeAgents(msg, platform, agentRegistry) {
 // Scheduler commands: /remind, /cron, /jobs, /cancel
 // ---------------------------------------------------------------------------
 
+/**
+ * Factory: centralized tick handler for scheduler jobs.
+ * Resolves platform from registry at fire time, not from a closure.
+ * Agentic jobs run through runAgentLoop with owner's full toolset.
+ */
+function createSchedulerTick({ platformRegistry, config, provider, indexer, getMem, memCfg, allTools, toolsConfig, runtimePlatform, maxToolRounds }) {
+  return async (job) => {
+    const platform = platformRegistry.get(job.platformName) || platformRegistry.values().next().value;
+    if (!platform) {
+      console.error(`[scheduler] No platform for job ${job.id} (${job.platformName})`);
+      return;
+    }
+
+    if (!job.agentic) {
+      await platform.send(job.chatId, `Reminder: ${job.action}`);
+      return;
+    }
+
+    // Agentic path — run full agent loop as owner
+    if (!provider) {
+      await platform.send(job.chatId, `Job [${job.id}] failed: LLM not configured.`);
+      return;
+    }
+
+    try {
+      const admin = true; // agentic jobs always run as owner
+      const userTools = getToolsForUser(allTools || [], admin, toolsConfig);
+      const mem = getMem ? getMem(job.chatId, { isAdmin: admin }) : null;
+      const memoryMd = mem ? mem.loadMemory() : '';
+      const roles = undefined; // admin sees all scopes
+      const chunks = indexer ? indexer.search(job.action, 5, { roles }) : [];
+      const system = buildMemorySystemPrompt(memoryMd, chunks);
+
+      const answer = await runAgentLoop(provider, [{ role: 'user', content: job.action }], userTools, {
+        system,
+        maxRounds: maxToolRounds || config?.llm?.max_tool_rounds || 5,
+        ctx: { senderId: config.owner_id, chatId: job.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform },
+        config
+      });
+      await platform.send(job.chatId, answer);
+      logAudit({ action: 'agentic_tick', jobId: job.id, jobAction: job.action });
+    } catch (err) {
+      await platform.send(job.chatId, `Job [${job.id}] failed: ${err.message}`);
+      console.error(`[scheduler] Agentic job ${job.id} error: ${err.message}`);
+    }
+  };
+}
+
 async function routeRemind(msg, platform, config, provider, toolDeps) {
   if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only command.');
@@ -1161,16 +1220,22 @@ async function routeRemind(msg, platform, config, provider, toolDeps) {
   }
   const parsed = parseRemind(msg.parseCommand()?.args);
   if (!parsed) {
-    await platform.send(msg.chatId, 'Usage: /remind <duration> <action>\nExample: /remind 2h check inbox');
+    await platform.send(msg.chatId, 'Usage: /remind <duration> <action>\nExample: /remind 2h check inbox\nAdd --agent for AI-powered reminders.');
     return;
   }
 
-  const scheduler = getScheduler(async (job) => {
-    await platform.send(msg.chatId, `Reminder: ${job.action}`);
+  const scheduler = getScheduler();
+  const job = scheduler.add({
+    schedule: parsed.schedule,
+    action: parsed.action,
+    type: 'one-shot',
+    agentic: parsed.agentic || false,
+    chatId: String(msg.chatId),
+    platformName: msg.platform
   });
-  const job = scheduler.add({ schedule: parsed.schedule, action: parsed.action, type: 'one-shot' });
-  await platform.send(msg.chatId, `Reminder set: "${parsed.action}" in ${parsed.schedule} [${job.id}]`);
-  logAudit({ action: 'remind', user_id: msg.senderId, schedule: parsed.schedule, jobAction: parsed.action });
+  const tag = parsed.agentic ? ' [agent]' : '';
+  await platform.send(msg.chatId, `Reminder set: "${parsed.action}" in ${parsed.schedule}${tag} [${job.id}]`);
+  logAudit({ action: 'remind', user_id: msg.senderId, schedule: parsed.schedule, jobAction: parsed.action, agentic: parsed.agentic });
 }
 
 async function routeCron(msg, platform, config, provider, toolDeps) {
@@ -1180,16 +1245,22 @@ async function routeCron(msg, platform, config, provider, toolDeps) {
   }
   const parsed = parseCron(msg.parseCommand()?.args);
   if (!parsed) {
-    await platform.send(msg.chatId, 'Usage: /cron <cron-expression> <action>\nExample: /cron 0 9 * * 1-5 morning briefing');
+    await platform.send(msg.chatId, 'Usage: /cron <cron-expression> <action>\nExample: /cron 0 9 * * 1-5 morning briefing\nAdd --agent for AI-powered jobs.');
     return;
   }
 
-  const scheduler = getScheduler(async (job) => {
-    await platform.send(msg.chatId, `Scheduled: ${job.action}`);
+  const scheduler = getScheduler();
+  const job = scheduler.add({
+    schedule: parsed.schedule,
+    action: parsed.action,
+    type: 'recurring',
+    agentic: parsed.agentic || false,
+    chatId: String(msg.chatId),
+    platformName: msg.platform
   });
-  const job = scheduler.add({ schedule: parsed.schedule, action: parsed.action, type: 'recurring' });
-  await platform.send(msg.chatId, `Cron job added: "${parsed.action}" [${job.id}]`);
-  logAudit({ action: 'cron', user_id: msg.senderId, schedule: parsed.schedule, jobAction: parsed.action });
+  const tag = parsed.agentic ? ' [agent]' : '';
+  await platform.send(msg.chatId, `Cron job added: "${parsed.action}"${tag} [${job.id}]`);
+  logAudit({ action: 'cron', user_id: msg.senderId, schedule: parsed.schedule, jobAction: parsed.action, agentic: parsed.agentic });
 }
 
 async function routeJobs(msg, platform, config) {
@@ -1452,8 +1523,8 @@ async function routeHelp(msg, platform, config) {
       '/mode - List chat modes / /mode <business|silent|off> [target] (owner)',
       '/agent [name] - Show/set agent for this chat (owner)',
       '/agents - List all agents (owner)',
-      '/remind <duration> <action> - Set a reminder (owner)',
-      '/cron <expression> <action> - Recurring scheduled task (owner)',
+      '/remind <duration> <action> [--agent] - Set a reminder (owner)',
+      '/cron <expression> <action> [--agent] - Recurring scheduled task (owner)',
       '/jobs - List active scheduled jobs (owner)',
       '/cancel <id> - Cancel a scheduled job (owner)',
       '/plan <goal> - Break a goal into steps and execute (owner)',
@@ -1768,6 +1839,7 @@ function handleMessage(config) {
 module.exports = {
   // Platform-agnostic
   createMessageRouter,
+  createSchedulerTick,
   buildAgentRegistry,
   resolveAgent,
   // Legacy Telegraf handlers

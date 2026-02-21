@@ -49,6 +49,9 @@ async function main() {
     process.exit(1);
   }
 
+  // Initialize scheduler after platforms registered (centralized tick handler)
+  handler.initScheduler();
+
   logAudit({ action: 'bot_start', platforms: platforms.map(p => p.name), paired_users: config.allowed_users.length });
 
   for (const p of platforms) {

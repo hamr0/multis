@@ -177,6 +177,16 @@ Start from scratch as if you're a new user. Validates the full install → first
 - [ ] Logs older than 30 days cleaned on startup? (create a fake old log to test)
 - [ ] Admin memory chunks survive past 90 days? (365-day retention)
 
+### A9. Agentic Reminders
+
+- [ ] `/remind 1m test plain` → plain text fires in chat
+- [ ] `/remind 1m what time is it --agent` → agent responds with actual answer
+- [ ] `/cron */2 * * * * system check --agent` → recurring agentic job
+- [ ] `/jobs` shows `[agent]` tag on agentic jobs
+- [ ] `/cancel` removes agentic job
+- [ ] Agentic job with tools (e.g., "search docs for X") uses RAG
+- [ ] Error handling: job fails gracefully if no LLM provider configured
+
 ### A8. Bug & Friction Log
 
 Keep a running list here as you test. Each entry: what happened, expected vs actual.
@@ -225,11 +235,11 @@ Only tackle these if dogfooding reveals they matter.
 ### C1. Automation Extensions (nice-to-have)
 
 Scheduler (Tier 2A) is done — `/remind`, `/cron`, `/jobs`, `/cancel` via bare-agent `Scheduler`.
+Agentic reminders (Tier 1) done — `--agent` flag runs full agent loop on tick. Supersedes heartbeat for most ambient awareness use cases.
 
-- [ ] **Tier 2B: Heartbeat** (~65 lines) — periodic awareness, active hours, timezone-aware
-  - [ ] `src/scheduler/heartbeat.js` — interval check, build prompt from checklist, run agent loop
-  - [ ] Config: `heartbeat.enabled`, `interval_minutes`, `active_hours`, `checklist`
-- [ ] **Tier 2C: Hooks** (~70 lines) — event-driven shell scripts (only if dogfooding demands it)
+- [ ] **Watch Triggers** (~80 lines) — file watcher, HTTP webhook, polling (see blueprint §16 Tier 2)
+- [ ] **Background Agent** (~120 lines) — self-directed periodic review with StateMachine (see blueprint §16 Tier 3)
+- [ ] **Hooks** (~70 lines) — event-driven shell scripts (only if dogfooding demands it)
   - [ ] `src/hooks/runner.js` — discover `~/.multis/hooks/`, match event, spawn with timeout
   - [ ] Events: `message:business`, `escalation`, `capture`, `index`, `cron:fail`
 

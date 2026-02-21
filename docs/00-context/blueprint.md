@@ -1019,3 +1019,48 @@ Broadcast groups, agent handoffs, parallel execution with result merging. Only r
 **Per-Agent Tool Restrictions** — `"allowed_tools"` / `"denied_tools"` in agent config. ~30 lines in tools/registry.js.
 
 **Shared Context Across Chats** — Cross-chat timeline at `user:<userId>/context.md`. ~60 lines in memory/manager.js.
+
+---
+
+### 16. Proactive Agent Tiers
+
+Three tiers of proactive behavior, from simple to autonomous.
+
+**Tier 1: Agentic Reminders (DONE)**
+
+`/remind` and `/cron` accept `--agent` flag. When a job fires with `agentic: true`, the tick handler runs `runAgentLoop` instead of sending plain text. The agent has the owner's full toolset (search docs, recall memory, exec, etc.) and sends the result to the originating chat.
+
+- Jobs store `chatId` and `platformName` — resolved at fire time, not from closure
+- Agentic jobs always run as owner (only owner can create them)
+- Memory/RAG context loaded for the job's chatId at fire time
+- Max 5 tool rounds (configurable via `config.llm.max_tool_rounds`)
+- Errors caught per-job, logged, sent to chat as "Job [id] failed: ..."
+- Backward-compatible: old jobs without `agentic` field fall back to plain text
+
+```
+/remind 2h check inbox                    → plain text
+/remind 2h summarize today's messages --agent  → agentic
+/cron 0 9 * * 1-5 morning briefing --agent     → daily agentic job
+```
+
+Key files: `src/bot/scheduler.js` (parsing), `src/bot/handlers.js` (`createSchedulerTick`, `routeRemind`, `routeCron`).
+
+**Tier 2: Watch Triggers (future)**
+
+Event-driven jobs that fire on external signals, not just time:
+
+- **File watcher** — `fs.watch` on a path, fires agent when file changes
+- **HTTP webhook** — stdlib `http.createServer` on a local port, fires on POST
+- **Polling** — cron + `fetch_url`, fires when content changes (diff-based)
+
+Each trigger type creates a job with `type: 'watch'` and a `trigger` config object. Same tick handler — just different scheduling mechanism.
+
+**Tier 3: Background Agent (future)**
+
+Self-directed periodic review with task persistence:
+
+- StateMachine for task lifecycle (pending → active → done → archived)
+- Meta-prompt: "review pending tasks, check for anything needing attention"
+- Mandatory checkpoint for outbound messages (no unsupervised sends)
+- Runs on configurable interval (e.g., every 4 hours during active hours)
+- `config.background_agent.enabled`, `interval_hours`, `active_hours`, `checklist`

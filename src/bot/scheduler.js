@@ -35,7 +35,10 @@ function parseRemind(args) {
   if (!args) return null;
   const match = args.match(/^(\d+[smhd])\s+(.+)$/i);
   if (!match) return null;
-  return { schedule: match[1], action: match[2] };
+  let action = match[2];
+  const agentic = action.includes('--agent');
+  if (agentic) action = action.replace(/\s*--agent\s*/, ' ').trim();
+  return { schedule: match[1], action, agentic };
 }
 
 /**
@@ -48,7 +51,10 @@ function parseCron(args) {
   // Cron has 5 fields: min hour dom month dow
   const match = args.match(/^(\S+\s+\S+\s+\S+\s+\S+\s+\S+)\s+(.+)$/);
   if (!match) return null;
-  return { schedule: match[1], action: match[2] };
+  let action = match[2];
+  const agentic = action.includes('--agent');
+  if (agentic) action = action.replace(/\s*--agent\s*/, ' ').trim();
+  return { schedule: match[1], action, agentic };
 }
 
 /**
@@ -56,7 +62,8 @@ function parseCron(args) {
  */
 function formatJob(job) {
   const type = job.type === 'recurring' ? 'recurring' : 'one-shot';
-  return `[${job.id}] ${type} | ${job.schedule} | ${job.action}`;
+  const agent = job.agentic ? ' [agent]' : '';
+  return `[${job.id}] ${type} | ${job.schedule} | ${job.action}${agent}`;
 }
 
 module.exports = { getScheduler, parseRemind, parseCron, formatJob };

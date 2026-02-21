@@ -611,7 +611,19 @@ Shell commands (`/exec`) are filtered through a governance system:
 /cancel abc123       # Cancel a specific job
 ```
 
-Jobs are in-memory and don't survive restarts. After `multis restart`, you'll need to set them up again.
+Jobs persist to disk and survive restarts.
+
+### AI-Powered Jobs
+
+Add `--agent` to any reminder or cron job to run the full AI agent instead of just sending text. The agent can use tools (search docs, recall memory, run commands, etc.) and sends the result to your chat.
+
+```
+/remind 2h summarize today's messages --agent
+/cron 0 9 * * 1-5 morning briefing --agent
+/remind 1h check if backup completed --agent
+```
+
+Without `--agent`, jobs send the action text as a plain reminder (backward-compatible).
 
 ---
 
