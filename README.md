@@ -23,11 +23,11 @@
 
 ```bash
 npm install
-cp .env.example .env    # add your bot token + LLM API key
-node src/index.js       # start the bot
+npx multis init         # interactive setup wizard
+multis start            # run as background daemon
 ```
 
-Pair with your bot on Telegram using the pairing code shown on startup.
+See the **[Customer Guide](docs/customer-guide.md)** for full setup instructions, command reference, and troubleshooting.
 
 ## How It Works
 
