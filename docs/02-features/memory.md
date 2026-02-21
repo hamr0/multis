@@ -318,7 +318,7 @@ runCapture(chatId, mem, llm, indexer, opts)
 └──────────────────────────────────────┘
 ```
 
-This system prompt is combined with the rolling window messages for `generateWithMessages()`.
+This system prompt is combined with the rolling window messages for `provider.generate()`.
 
 ### 4.2 Standalone RAG (no conversation history)
 

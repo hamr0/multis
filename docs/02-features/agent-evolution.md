@@ -59,17 +59,17 @@ multis already has a working agent loop. The LLM decides when to use tools.
 
 ```
 user message → resolveAgent → buildMemorySystemPrompt
-  → runAgentLoop(llm, messages, toolSchemas, tools)
-    → LLM returns tool_use → executeTool → feed result back → loop
+  → bare-agent Loop(provider, messages, adaptedTools)
+    → LLM returns tool_use → adapter executes with ctx → feed result back → loop
     → LLM returns text → done
   → send response → memory capture (if threshold)
 ```
 
 **What's built:**
-- `runAgentLoop()` — multi-round tool calling with max iterations (`handlers.js:586`)
+- bare-agent `Loop` — multi-round tool calling with max iterations (replaces `runAgentLoop`)
 - `src/tools/definitions.js` — 25+ tools across filesystem, shell, desktop, Android
 - `src/tools/registry.js` — platform filtering, owner-only gating, config overrides
-- `src/tools/executor.js` — dispatch + audit logging
+- `src/tools/adapter.js` — converts multis tools to bare-agent format with ctx closure + audit
 - Multi-agent: persona registry, @mention routing, per-chat assignment, mode defaults
 - Governance: allowlist/denylist on exec, path restrictions on file tools
 

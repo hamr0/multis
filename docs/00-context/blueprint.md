@@ -187,15 +187,27 @@ Question → FTS5 search (top 5) → buildRAGPrompt(question, chunks) → LLM �
 
 ### LLM providers
 
-All support `options.system` natively:
+Providers are handled by `bare-agent` library. Configuration in `~/.multis/config.json`:
 
-| Provider | System prompt | Config | Base URL |
-|----------|--------------|--------|----------|
-| Anthropic | `body.system` field | `ANTHROPIC_API_KEY` | Hardcoded `api.anthropic.com` |
-| OpenAI | `role: 'system'` message | `OPENAI_API_KEY` | Configurable `baseUrl` (default `api.openai.com`) |
-| Ollama | `body.system` field | No key needed, local | Configurable (`OLLAMA_URL`) |
+```json
+{
+  "llm": {
+    "provider": "anthropic",
+    "model": "claude-haiku-4-5-20251001",
+    "apiKey": "sk-..."
+  }
+}
+```
 
-**OpenAI-compatible APIs:** Any endpoint that speaks the OpenAI chat completions API works — set `baseUrl` in config (e.g. `https://openrouter.ai/api/v1` for OpenRouter, Together, Groq, GLM, vLLM, etc.). Stored as `provider: "openai"` with custom `baseUrl`.
+| Provider | Config key | Notes |
+|----------|-----------|-------|
+| Anthropic | `apiKey` required | Default provider |
+| OpenAI | `apiKey` required | Supports custom `baseUrl` for compatible APIs |
+| Ollama | No key needed | Local, set `baseUrl` if non-default |
+
+**OpenAI-compatible APIs:** Set `provider: "openai"` with custom `baseUrl` (OpenRouter, Together, Groq, vLLM, etc.).
+
+**Adapter:** `src/llm/provider-adapter.js` maps config to bare-agent provider instances.
 
 ---
 
@@ -745,7 +757,7 @@ All behavioral settings are configurable. Sane defaults applied when missing.
 
 ## 12. Agent Tools
 
-The LLM agent has access to tools via a tool-calling loop. Tools are defined in `src/tools/definitions.js`, filtered by platform and owner status via `src/tools/registry.js`, executed via `src/tools/executor.js`.
+The LLM agent has access to tools via bare-agent's Loop. Tools are defined in `src/tools/definitions.js`, filtered by platform and owner status via `src/tools/registry.js`, adapted to bare-agent format via `src/tools/adapter.js`.
 
 ### Tool categories
 

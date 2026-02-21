@@ -715,8 +715,9 @@ async function runInit() {
  * Uses the raw provider to send a tiny request.
  */
 async function verifyLLM(llmConfig) {
-  const { createLLMClient } = require('../src/llm/client');
-  const client = createLLMClient(llmConfig);
+  const { createProvider, simpleGenerate } = require('../src/llm/provider-adapter');
+  const provider = createProvider(llmConfig);
+  const client = simpleGenerate(provider);
   await client.generate('Say "ok".', { maxTokens: 8 });
 }
 

@@ -42,7 +42,9 @@ src/
 ├── config.js             # Load/save ~/.multis/config.json, .env overrides
 ├── bot/
 │   ├── telegram.js       # Telegraf bot setup + legacy handlers
-│   └── handlers.js       # Platform-agnostic message router + all commands
+│   ├── handlers.js       # Platform-agnostic message router + all commands
+│   ├── checkpoint.js     # Human approval gate for irreversible tool actions
+│   └── scheduler.js      # /remind, /cron, /jobs, /cancel via bare-agent Scheduler
 ├── platforms/
 │   ├── base.js           # Platform abstract class
 │   ├── message.js        # Normalized Message class (routeAs, isCommand, parseCommand)
@@ -51,8 +53,11 @@ src/
 ├── governance/
 │   ├── validate.js       # Command allowlist/denylist + path restrictions
 │   └── audit.js          # Append-only JSON audit log
-├── skills/
-│   └── executor.js       # execCommand, readFile, listSkills
+├── tools/
+│   ├── definitions.js    # 25+ tool definitions across desktop, Android, universal
+│   ├── registry.js       # Platform filtering, owner-only gating, config overrides
+│   ├── adapter.js        # Converts multis tools to bare-agent format with ctx closure
+│   └── platform.js       # Runtime platform detection (linux/macos/android)
 ├── indexer/
 │   ├── chunk.js          # DocChunk data class
 │   ├── chunker.js        # Hierarchical text chunking (2000ch, 200 overlap)
@@ -60,14 +65,11 @@ src/
 │   ├── store.js          # SQLite store with FTS5 + activation columns
 │   └── index.js          # DocumentIndexer facade (indexFile, search, getStats)
 ├── llm/
-│   ├── base.js           # LLMProvider abstract class
-│   ├── anthropic.js      # Anthropic Claude (native system prompt)
-│   ├── openai.js         # OpenAI GPT (system role message)
-│   ├── ollama.js         # Ollama local (native system field)
-│   ├── client.js         # createLLMClient factory
+│   ├── provider-adapter.js # Maps multis config to bare-agent providers
 │   └── prompts.js        # buildRAGPrompt — formats chunks into LLM prompts
-├── memory/               # (empty — POC5)
-├── retrieval/            # (empty — FTS5 in indexer/store.js covers POC3-4)
+├── memory/
+│   ├── manager.js        # ChatMemoryManager — per-chat file I/O
+│   └── capture.js        # LLM-summarized durable notes on window overflow
 └── cli/
     └── setup-beeper.js   # Beeper Desktop token setup wizard
 ```

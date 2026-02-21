@@ -111,7 +111,7 @@ POC 1-5 done (bot, skills, indexing, RAG, memory). POC 6 next (daemon + CLI + se
 ## Adding Features
 
 - New command: add handler in handlers.js, add case to createMessageRouter switch, update help text
-- New LLM provider: extend LLMProvider in llm/base.js, add to llm/client.js factory, add env var to config.js
+- New LLM provider: bare-agent handles providers; configure provider/model/apiKey in config.json `llm` block
 - New platform: extend platforms/base.js, add to index.js startup
 
 ## Deep Reference

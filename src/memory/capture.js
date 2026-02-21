@@ -17,7 +17,7 @@ Rules:
  * Run memory capture: summarize recent messages and store as durable notes.
  * @param {string} chatId - Chat identifier
  * @param {import('./manager').ChatMemoryManager} mem - Memory manager instance
- * @param {import('../llm/base').LLMProvider} llm - LLM provider
+ * @param {Object} llm - LLM provider with generate() method
  * @param {import('../indexer/index').DocumentIndexer} indexer - Document indexer
  * @param {Object} options - { keepLast: 5 }
  */

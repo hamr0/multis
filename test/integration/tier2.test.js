@@ -39,6 +39,16 @@ describe('parseRemind', () => {
   it('returns null for missing duration', () => {
     assert.strictEqual(parseRemind('check inbox'), null);
   });
+
+  it('returns null for invalid duration format', () => {
+    assert.strictEqual(parseRemind('2x do something'), null);
+    assert.strictEqual(parseRemind('abc do something'), null);
+  });
+
+  it('parses seconds and days', () => {
+    assert.deepStrictEqual(parseRemind('30s ping'), { schedule: '30s', action: 'ping' });
+    assert.deepStrictEqual(parseRemind('1d review'), { schedule: '1d', action: 'review' });
+  });
 });
 
 describe('parseCron', () => {
@@ -55,6 +65,10 @@ describe('parseCron', () => {
   it('returns null for incomplete cron', () => {
     // Only 3 fields, not 5
     assert.strictEqual(parseCron('0 9 * check'), null);
+  });
+
+  it('returns null for 5 fields but no action', () => {
+    assert.strictEqual(parseCron('0 9 * * 1-5'), null);
   });
 });
 
@@ -139,6 +153,16 @@ describe('Checkpoint approval replies', () => {
 
   it('handleApprovalReply returns false when no pending', () => {
     assert.strictEqual(handleApprovalReply('nobody', 'yes'), false);
+  });
+
+  it('handleApprovalReply ignores non-yes/no text when no pending', () => {
+    assert.strictEqual(handleApprovalReply('nobody', 'maybe'), false);
+  });
+
+  it('hasPendingApproval returns false for different senderIds', () => {
+    assert.strictEqual(hasPendingApproval('user-a'), false);
+    assert.strictEqual(hasPendingApproval('user-b'), false);
+    assert.strictEqual(hasPendingApproval(''), false);
   });
 });
 
