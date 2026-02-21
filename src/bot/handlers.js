@@ -4,7 +4,7 @@ const { addAllowedUser, isOwner, saveConfig, getMultisDir, PATHS } = require('..
 const { execCommand, readFile, listSkills } = require('../skills/executor');
 const { DocumentIndexer } = require('../indexer/index');
 const { createProvider, simpleGenerate } = require('../llm/provider-adapter');
-const { buildRAGPrompt, buildMemorySystemPrompt } = require('../llm/prompts');
+const { buildRAGPrompt, buildMemorySystemPrompt, buildBusinessPrompt } = require('../llm/prompts');
 const { getMemoryManager } = require('../memory/manager');
 const { runCapture } = require('../memory/capture');
 const { PinManager, hashPin } = require('../security/pin');
@@ -125,8 +125,6 @@ function createMessageRouter(config, deps = {}) {
   const memoryManagers = deps.memoryManagers || new Map();
   const _memBaseDir = deps.memoryBaseDir || PATHS.memory();
   const pinManager = deps.pinManager || new PinManager(config);
-  const escalationRetries = deps.escalationRetries || new Map();
-
   // Helper: getMemoryManager with baseDir (follows getMultisDir for test isolation)
   const getMem = (chatId, opts = {}) =>
     getMemoryManager(memoryManagers, chatId, { ...opts, baseDir: _memBaseDir });
@@ -215,7 +213,7 @@ function createMessageRouter(config, deps = {}) {
       pinManager.clearPending(msg.senderId);
       // Re-route the stored command
       msg = stored.msg;
-      await executeCommand(stored.command, stored.args, msg, platform, config, indexer, provider, memoryManagers, memCfg, pinManager, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
+      await executeCommand(stored.command, stored.args, msg, platform, config, indexer, provider, memoryManagers, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
       return;
     }
 
@@ -274,6 +272,12 @@ function createMessageRouter(config, deps = {}) {
       delete config._pendingMode[msg.senderId];
     }
 
+    // Handle pending /business setup wizard
+    if (config._pendingBusiness?.[msg.senderId]) {
+      await handleBusinessWizardStep(msg, platform, config, text.trim());
+      return;
+    }
+
     // Silent mode: archive to memory, no response
     if (msg.routeAs === 'silent') {
       const mem = getMem(msg.chatId, { isAdmin: false });
@@ -289,7 +293,7 @@ function createMessageRouter(config, deps = {}) {
     if (msg.routeAs === 'natural' || msg.routeAs === 'business') {
       // Business: anyone can get a response (customers via Beeper)
       if (msg.routeAs !== 'business' && !isPaired(msg, config)) return;
-      await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
+      await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
       return;
     }
 
@@ -328,14 +332,14 @@ function createMessageRouter(config, deps = {}) {
       }
     }
 
-    await executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry });
+    await executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry });
   };
 
   router.registerPlatform = (name, instance) => platformRegistry.set(name, instance);
   return router;
 }
 
-async function executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, escalationRetries, agentRegistry, toolDeps) {
+async function executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, toolDeps) {
     switch (command) {
       case 'status':
         await routeStatus(msg, platform, config);
@@ -362,7 +366,7 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
         await platform.send(msg.chatId, `Available skills:\n${listSkills()}`);
         break;
       case 'ask':
-        await routeAsk(msg, platform, config, indexer, provider, args, getMem, memCfg, escalationRetries, agentRegistry, toolDeps);
+        await routeAsk(msg, platform, config, indexer, provider, args, getMem, memCfg, agentRegistry, toolDeps);
         break;
       case 'memory':
         await routeMemory(msg, platform, config, getMem);
@@ -400,13 +404,16 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
       case 'plan':
         await routePlan(msg, platform, config, provider, args, toolDeps);
         break;
+      case 'business':
+        await routeBusiness(msg, platform, config, args);
+        break;
       case 'help':
         await routeHelp(msg, platform, config);
         break;
       default:
         // Telegram plain text (no recognized command) → implicit ask
         if (msg.platform === 'telegram' && !msg.text.startsWith('/')) {
-          await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, escalationRetries, agentRegistry, toolDeps);
+          await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, agentRegistry, toolDeps);
         }
         break;
     }
@@ -688,7 +695,7 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   return result.text || '(no response)';
 }
 
-async function routeAsk(msg, platform, config, indexer, provider, question, getMem, memCfg, escalationRetries, agentRegistry, toolDeps = {}) {
+async function routeAsk(msg, platform, config, indexer, provider, question, getMem, memCfg, agentRegistry, toolDeps = {}) {
   if (!question) {
     await platform.send(msg.chatId, 'Usage: /ask <question>');
     return;
@@ -729,54 +736,23 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     const roles = admin ? undefined : ['public', `user:${msg.chatId}`];
     const chunks = indexer.search(question, 5, { roles });
 
-    // Business escalation for non-admin chats
-    // Only escalate when KB has documents — if KB is empty, let the LLM answer freely
-    const kbHasDocs = indexer.getStats().totalChunks > 0;
-    if (msg.routeAs === 'business' && !admin && escalationRetries && kbHasDocs) {
-      const esc = config.business?.escalation || {};
-      const keywords = esc.escalate_keywords || [];
-      const maxRetries = esc.max_retries_before_escalate || 2;
+    // Business keyword escalation for non-admin chats
+    if (msg.routeAs === 'business' && !admin) {
+      const keywords = config.business?.escalation?.escalate_keywords || [];
       const questionLower = question.toLowerCase();
       const keywordMatch = keywords.some(k => questionLower.includes(k.toLowerCase()));
 
       if (keywordMatch) {
-        // Immediate escalation on keyword
         const reply = "I'm checking with the team on this. Someone will follow up shortly.";
         await platform.send(msg.chatId, reply);
         if (mem) { mem.appendMessage('assistant', reply); mem.appendToLog('assistant', reply); }
-        if (config.business?.admin_chat) {
-          await platform.send(config.business.admin_chat, `[Escalation] Chat ${msg.chatId}: "${question}" (keyword match)`);
+        const adminChat = config.business?.escalation?.admin_chat || config.business?.admin_chat;
+        if (adminChat) {
+          await platform.send(adminChat, `[Escalation] Chat ${msg.chatId}: "${question}" (keyword match)`);
         }
         logAudit({ action: 'escalate', chatId: msg.chatId, reason: 'keyword', question });
-        escalationRetries.delete(msg.chatId);
         return;
       }
-
-      if (chunks.length === 0) {
-        const retries = (escalationRetries.get(msg.chatId) || 0) + 1;
-        escalationRetries.set(msg.chatId, retries);
-
-        if (retries >= maxRetries) {
-          const reply = "I'm checking with the team on this. Someone will follow up shortly.";
-          await platform.send(msg.chatId, reply);
-          if (mem) { mem.appendMessage('assistant', reply); mem.appendToLog('assistant', reply); }
-          if (config.business?.admin_chat) {
-            await platform.send(config.business.admin_chat, `[Escalation] Chat ${msg.chatId}: "${question}" (${retries} unanswered)`);
-          }
-          logAudit({ action: 'escalate', chatId: msg.chatId, reason: 'retries', retries, question });
-          escalationRetries.delete(msg.chatId);
-          return;
-        }
-
-        const reply = "I don't have information on that. Could you rephrase or provide more details?";
-        await platform.send(msg.chatId, reply);
-        if (mem) { mem.appendMessage('assistant', reply); mem.appendToLog('assistant', reply); }
-        logAudit({ action: 'ask_clarify', chatId: msg.chatId, retries, question });
-        return;
-      }
-
-      // Successful answer — reset retry counter
-      escalationRetries.delete(msg.chatId);
     }
 
     // Resolve agent (handles @mention, per-chat, mode default, fallback)
@@ -784,7 +760,12 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
       ? resolveAgent(question, msg.chatId, config, agentRegistry)
       : { agent: { provider, persona: null }, name: 'default', text: question };
     const agentProvider = resolved.agent.provider || resolved.agent.llm || provider;
-    const agentPersona = resolved.agent.persona;
+    let agentPersona = resolved.agent.persona;
+
+    // Business mode: use structured business prompt when configured
+    if (msg.routeAs === 'business' && !admin && config.business?.name) {
+      agentPersona = buildBusinessPrompt(config);
+    }
     const cleanQuestion = resolved.text;
 
     // Build messages array from recent conversation
@@ -1304,6 +1285,148 @@ async function routePlan(msg, platform, config, provider, goal, toolDeps) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// /business command + setup wizard
+// ---------------------------------------------------------------------------
+
+async function routeBusiness(msg, platform, config, args) {
+  if (!isOwner(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, 'Owner only command.');
+    return;
+  }
+
+  const sub = (args || '').trim().toLowerCase();
+
+  if (sub === 'show') {
+    const b = config.business || {};
+    if (!b.name) {
+      await platform.send(msg.chatId, 'No business persona configured. Run /business setup to create one.');
+      return;
+    }
+    const lines = [`Name: ${b.name}`];
+    if (b.greeting) lines.push(`Greeting: ${b.greeting}`);
+    if (b.topics?.length > 0) {
+      lines.push('Topics:');
+      b.topics.forEach((t, i) => {
+        const esc = t.escalate ? ' [escalate]' : '';
+        lines.push(`  ${i + 1}. ${t.name}${t.description ? ' — ' + t.description : ''}${esc}`);
+      });
+    }
+    if (b.rules?.length > 0) {
+      lines.push('Rules:');
+      b.rules.forEach(r => lines.push(`  - ${r}`));
+    }
+    await platform.send(msg.chatId, lines.join('\n'));
+    return;
+  }
+
+  if (sub === 'clear') {
+    config.business = { ...config.business, name: null, greeting: null, topics: [], rules: [] };
+    saveConfig(config);
+    await platform.send(msg.chatId, 'Business persona cleared.');
+    logAudit({ action: 'business_clear', user_id: msg.senderId });
+    return;
+  }
+
+  if (sub === 'setup') {
+    if (!config._pendingBusiness) config._pendingBusiness = {};
+    config._pendingBusiness[msg.senderId] = { step: 'name', data: {} };
+    await platform.send(msg.chatId, 'Business setup wizard.\n\nWhat is the business name? (e.g. "Acme Support Bot")');
+    return;
+  }
+
+  await platform.send(msg.chatId, 'Usage: /business setup | show | clear');
+}
+
+async function handleBusinessWizardStep(msg, platform, config, input) {
+  const pending = config._pendingBusiness[msg.senderId];
+  const lower = input.toLowerCase();
+
+  if (lower === 'cancel') {
+    delete config._pendingBusiness[msg.senderId];
+    await platform.send(msg.chatId, 'Business setup cancelled.');
+    return;
+  }
+
+  switch (pending.step) {
+    case 'name':
+      pending.data.name = input;
+      pending.step = 'greeting';
+      await platform.send(msg.chatId, `Name: ${input}\n\nGreeting message for customers? (or "skip")`);
+      break;
+
+    case 'greeting':
+      if (lower !== 'skip') pending.data.greeting = input;
+      pending.step = 'topics';
+      pending.data.topics = [];
+      await platform.send(msg.chatId, 'Add a topic name (e.g. "Pricing", "Returns"). Send "done" when finished.');
+      break;
+
+    case 'topics':
+      if (lower === 'done') {
+        pending.step = 'rules';
+        pending.data.rules = [];
+        await platform.send(msg.chatId, 'Add a custom rule (e.g. "Always respond in Spanish"). Send "done" when finished.');
+        break;
+      }
+      // Topic name entered — ask for description
+      pending._currentTopic = input;
+      pending.step = 'topic_desc';
+      await platform.send(msg.chatId, `Description for "${input}"? (or "skip")`);
+      break;
+
+    case 'topic_desc': {
+      const topic = { name: pending._currentTopic };
+      if (lower !== 'skip') topic.description = input;
+      pending.data.topics.push(topic);
+      delete pending._currentTopic;
+      pending.step = 'topics';
+      await platform.send(msg.chatId, `Added: ${topic.name}. Next topic? (or "done")`);
+      break;
+    }
+
+    case 'rules':
+      if (lower === 'done') {
+        pending.step = 'confirm';
+        const summary = formatBusinessSummary(pending.data);
+        await platform.send(msg.chatId, `${summary}\n\nSave this? (yes/no)`);
+        break;
+      }
+      pending.data.rules.push(input);
+      await platform.send(msg.chatId, 'Added. Next rule? (or "done")');
+      break;
+
+    case 'confirm':
+      if (lower === 'yes' || lower === 'y') {
+        config.business = { ...config.business, ...pending.data };
+        saveConfig(config);
+        delete config._pendingBusiness[msg.senderId];
+        await platform.send(msg.chatId, 'Business persona saved.');
+        logAudit({ action: 'business_setup', user_id: msg.senderId, name: pending.data.name });
+      } else {
+        delete config._pendingBusiness[msg.senderId];
+        await platform.send(msg.chatId, 'Discarded. Run /business setup to start over.');
+      }
+      break;
+  }
+}
+
+function formatBusinessSummary(data) {
+  const lines = [`Business persona:\n  Name: ${data.name}`];
+  if (data.greeting) lines.push(`  Greeting: ${data.greeting}`);
+  if (data.topics?.length > 0) {
+    lines.push('  Topics:');
+    data.topics.forEach(t => {
+      lines.push(`    - ${t.name}${t.description ? ': ' + t.description : ''}`);
+    });
+  }
+  if (data.rules?.length > 0) {
+    lines.push('  Rules:');
+    data.rules.forEach(r => lines.push(`    - ${r}`));
+  }
+  return lines.join('\n');
+}
+
 async function routeHelp(msg, platform, config) {
   const cmds = [
     'multis commands:',
@@ -1334,6 +1457,7 @@ async function routeHelp(msg, platform, config) {
       '/jobs - List active scheduled jobs (owner)',
       '/cancel <id> - Cancel a scheduled job (owner)',
       '/plan <goal> - Break a goal into steps and execute (owner)',
+      '/business setup|show|clear - Configure business persona (owner)',
       'Send a file to index it (owner, Telegram/Beeper)',
       'Use @agentname to invoke a specific agent per-message'
     );

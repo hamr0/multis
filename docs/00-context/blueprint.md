@@ -575,13 +575,11 @@ Customer asks a question
 ```
 
 ### What triggers escalation
-- Low confidence (no good KB matches after retries)
+- Keyword match (configurable list: "refund", "complaint", etc.) — immediate escalation
 - Customer explicitly asks for human ("can I talk to someone")
-- Sensitive topics (configurable keyword list)
-- Repeated questions (same topic after `max_retries_before_escalate` — bot isn't helping)
 - Any request that involves action (change order, schedule meeting, send something)
 
-**KB-empty bypass:** When the knowledge base has zero indexed documents (`totalChunks === 0`), escalation is skipped entirely. The LLM answers freely using its general knowledge. This prevents false escalations during initial setup before any documents are indexed.
+**No more retry-based escalation:** The LLM always responds, even with 0 KB matches. Business persona prompt guides the LLM to stay on-topic and admit when it doesn't know. This replaces the old canned "rephrase" messages that made the bot feel like a dumb FAQ lookup.
 
 ### Human in the loop — always
 - Bot never promises action on behalf of admin
@@ -589,6 +587,12 @@ Customer asks a question
 - If customer requests follow-up: bot acknowledges, sends note to admin via `admin_chat`
 - Admin decides whether to act, remind, or ignore
 - All escalation and clarification replies are saved to memory (appendMessage + appendToLog) so conversation history stays complete even on non-LLM paths
+
+### Business persona (`/business setup`)
+
+Conversational wizard configures `config.business` fields: name, greeting, topics, rules, allowed_urls. The `buildBusinessPrompt()` function compiles these into a system prompt that replaces the default agent persona in business mode.
+
+`allowed_urls` are reference links included in the prompt — the LLM cites them to customers when relevant. **Future: URL indexing** — fetch `allowed_urls` and index as KB chunks so the LLM has actual page content, not just links. Requires HTML-to-text conversion (`mozilla/readability` or similar). Could also work as a standalone `/index <url> <scope>` command beyond business mode.
 
 ---
 
@@ -774,11 +778,20 @@ All behavioral settings are configurable. Sane defaults applied when missing.
     "prompt_injection_detection": true
   },
   "business": {
+    "name": "Acme Support",
+    "greeting": "Hi! How can I help you today?",
+    "topics": [
+      { "name": "Pricing", "description": "Plans and billing" },
+      { "name": "Returns", "description": "Return policy", "escalate": true }
+    ],
+    "rules": ["Always respond in English"],
+    "allowed_urls": [
+      { "label": "Pricing", "url": "https://acme.com/pricing" },
+      "https://acme.com/faq"
+    ],
     "escalation": {
       "admin_chat": "tg-12345",
-      "max_retries_before_escalate": 2,
-      "escalate_keywords": ["refund", "complaint", "urgent", "human", "manager"],
-      "allowed_urls": []
+      "escalate_keywords": ["refund", "complaint", "urgent", "human", "manager"]
     }
   },
   "governance": { "enabled": true }

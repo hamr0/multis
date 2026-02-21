@@ -8,6 +8,15 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 - Beeper file indexing: send PDF/DOCX/MD/TXT via Note-to-self with `/index <scope>` to download and index
 - Interactive scope prompt when no scope specified (reply 1 for public, 2 for admin)
 - `BeeperPlatform.downloadAsset()` for Beeper Desktop API file downloads
+- `/business setup|show|clear` command with conversational wizard for configuring business persona
+- `buildBusinessPrompt()` compiles structured config (name, greeting, topics, rules, allowed_urls) into system prompt
+- Business mode LLM always responds — no more canned "rephrase" messages on 0 KB matches
+- `allowed_urls` field in business config for reference links in customer responses
+
+### Changed
+- Removed retry-based escalation (`max_retries_before_escalate`, `escalationRetries` Map)
+- Keyword escalation still works — "refund", "complaint" etc. fast-track to admin
+- `admin_chat` moved into `escalation` sub-object (legacy location still migrated)
 
 ### Fixed
 - Removed stale DEBUG log from Beeper adapter

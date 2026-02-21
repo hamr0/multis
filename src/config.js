@@ -190,13 +190,24 @@ function loadConfig() {
 
   // Merge defaults for business section
   if (!config.business) config.business = {};
+  config.business = {
+    name: null,
+    greeting: null,
+    topics: [],
+    rules: [],
+    allowed_urls: [],
+    ...config.business
+  };
   if (!config.business.escalation) config.business.escalation = {};
   config.business.escalation = {
-    max_retries_before_escalate: 2,
     escalate_keywords: ['refund', 'complaint', 'manager', 'supervisor', 'urgent', 'emergency'],
-    allowed_urls: [],
+    admin_chat: config.business.admin_chat || null,
     ...config.business.escalation
   };
+  // Migrate legacy admin_chat to escalation sub-object
+  if (config.business.admin_chat && !config.business.escalation.admin_chat) {
+    config.business.escalation.admin_chat = config.business.admin_chat;
+  }
 
   // Merge defaults for memory section
   if (!config.memory) config.memory = {};

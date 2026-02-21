@@ -31,12 +31,15 @@
     "prompt_injection_detection": true
   },
   "business": {
+    "name": null,
+    "greeting": null,
+    "topics": [],
+    "rules": [],
+    "allowed_urls": [],
     "escalation": {
-      "max_retries_before_escalate": 2,
       "escalate_keywords": ["refund", "complaint", "manager", "supervisor", "urgent", "emergency"],
-      "allowed_urls": []
-    },
-    "admin_chat": null
+      "admin_chat": null
+    }
   },
   "memory": {
     "enabled": true,

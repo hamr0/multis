@@ -84,4 +84,69 @@ function buildMemorySystemPrompt(memoryMd, chunks, persona) {
   return parts.join('\n');
 }
 
-module.exports = { buildRAGPrompt, buildMemorySystemPrompt };
+/**
+ * Build a business persona system prompt from structured config.
+ * @param {object} config - Full app config (uses config.business)
+ * @returns {string} - System prompt for business mode
+ */
+function buildBusinessPrompt(config) {
+  const b = config.business || {};
+  const parts = [];
+
+  // Identity
+  if (b.name) {
+    parts.push(`You are ${b.name}.`);
+  } else {
+    parts.push('You are a business assistant.');
+  }
+
+  // Greeting
+  if (b.greeting) {
+    parts.push(`When a customer first messages, greet them with: "${b.greeting}"`);
+  }
+
+  // Topics
+  if (b.topics && b.topics.length > 0) {
+    parts.push('\nYou can help with the following topics:');
+    b.topics.forEach((t, i) => {
+      const desc = t.description ? ` — ${t.description}` : '';
+      const esc = t.escalate ? ' [escalate to admin if asked]' : '';
+      parts.push(`${i + 1}. ${t.name}${desc}${esc}`);
+    });
+    parts.push('\nDo NOT answer questions outside of these topics. If a customer asks about something not listed, politely say you can only help with the topics above.');
+  }
+
+  // Rules
+  parts.push('\nRules:');
+  parts.push('- Never make up information. If you don\'t know, say so.');
+  parts.push('- Cite sources from the knowledge base when available.');
+  parts.push('- Be professional, concise, and helpful.');
+  if (b.rules && b.rules.length > 0) {
+    for (const rule of b.rules) {
+      parts.push(`- ${rule}`);
+    }
+  }
+
+  // Reference URLs
+  if (b.allowed_urls && b.allowed_urls.length > 0) {
+    parts.push('\nUseful links you can share with customers:');
+    b.allowed_urls.forEach(u => {
+      if (typeof u === 'string') {
+        parts.push(`- ${u}`);
+      } else if (u.url) {
+        parts.push(`- ${u.label || u.url}: ${u.url}`);
+      }
+    });
+    parts.push('Direct customers to these links when relevant.');
+  }
+
+  // Escalation
+  const keywords = b.escalation?.escalate_keywords;
+  if (keywords && keywords.length > 0) {
+    parts.push(`\nIf the customer mentions any of these topics, tell them you're checking with the team: ${keywords.join(', ')}.`);
+  }
+
+  return parts.join('\n');
+}
+
+module.exports = { buildRAGPrompt, buildMemorySystemPrompt, buildBusinessPrompt };

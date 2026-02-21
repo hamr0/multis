@@ -243,8 +243,7 @@ describe('Business escalation', () => {
       allowed_users: ['user1', 'cust1'],
       owner_id: 'user1',
       business: {
-        escalation: { escalate_keywords: ['refund', 'complaint'], max_retries_before_escalate: 2 },
-        admin_chat: 'admin_chat'
+        escalation: { escalate_keywords: ['refund', 'complaint'], admin_chat: 'admin_chat' }
       }
     });
     const platform = mockPlatform();
@@ -262,55 +261,52 @@ describe('Business escalation', () => {
     assert.match(adminMsg.text, /keyword/);
   });
 
-  it('no results + retries triggers escalation', async () => {
+  it('0 chunks still calls LLM (no canned escalation)', async () => {
     const env = createTestEnv({
       allowed_users: ['user1', 'cust1'],
       owner_id: 'user1',
       business: {
-        escalation: { escalate_keywords: [], max_retries_before_escalate: 2 },
-        admin_chat: 'admin_chat'
+        escalation: { escalate_keywords: [] }
       }
     });
     const platform = mockPlatform();
-    const llm = mockLLM('answer');
-    const indexer = stubIndexer([], { totalChunks: 10 }); // KB has docs, no match for query
+    const llm = mockLLM('I can help with that');
+    const indexer = stubIndexer([], { totalChunks: 10 }); // KB has docs, no match
     const router = createMessageRouter(env.config, { llm, indexer });
 
-    const m1 = msg('obscure question', { senderId: 'cust1', chatId: 'cust_chat', routeAs: 'business' });
-    await router(m1, platform);
-    // First miss → clarify
-    assert.match(platform.lastTo('cust_chat').text, /rephrase/i);
+    const m = msg('obscure question', { senderId: 'cust1', chatId: 'cust_chat', routeAs: 'business' });
+    await router(m, platform);
 
-    const m2 = msg('still obscure', { senderId: 'cust1', chatId: 'cust_chat', routeAs: 'business' });
-    await router(m2, platform);
-    // Second miss → escalate
-    assert.match(platform.lastTo('cust_chat').text, /checking with the team/i);
-    assert.ok(platform.lastTo('admin_chat'));
+    // LLM was called instead of canned response
+    assert.strictEqual(llm.calls.length, 1);
+    assert.match(platform.lastTo('cust_chat').text, /I can help with that/);
   });
 
-  it('successful answer resets retry counter', async () => {
+  it('business prompt used when config.business.name is set', async () => {
     const env = createTestEnv({
       allowed_users: ['user1', 'cust1'],
       owner_id: 'user1',
       business: {
-        escalation: { escalate_keywords: [], max_retries_before_escalate: 2 },
-        admin_chat: 'admin_chat'
+        name: 'Acme Support',
+        greeting: 'Welcome to Acme!',
+        topics: [{ name: 'Pricing', description: 'Plans and billing' }],
+        escalation: { escalate_keywords: [] }
       }
     });
     const platform = mockPlatform();
-    const llm = mockLLM('found it');
-    const chunks = [{ chunkId: 1, content: 'answer', name: 'faq', documentType: 'md', sectionPath: ['faq'], score: 1.0 }];
-    const indexer = stubIndexer(chunks, { totalChunks: 10 });
-    const escalationRetries = new Map();
-    escalationRetries.set('cust_chat', 1); // one prior miss
-    const router = createMessageRouter(env.config, { llm, indexer, escalationRetries });
+    const llm = mockLLM('business answer');
+    const indexer = stubIndexer();
+    const router = createMessageRouter(env.config, { llm, indexer });
 
-    const m = msg('question with answer', { senderId: 'cust1', chatId: 'cust_chat', routeAs: 'business' });
+    const m = msg('how much does it cost', { senderId: 'cust1', chatId: 'cust_chat', routeAs: 'business' });
     await router(m, platform);
 
-    // Got an answer, retry counter reset
-    assert.match(platform.lastTo('cust_chat').text, /found it/);
-    assert.strictEqual(escalationRetries.has('cust_chat'), false);
+    // System prompt should contain business persona
+    const call = llm.calls[0];
+    const systemMsg = call.messages.find(m => m.role === 'system');
+    assert.ok(systemMsg, 'should have system message');
+    assert.match(systemMsg.content, /Acme Support/);
+    assert.match(systemMsg.content, /Pricing/);
   });
 });
 
@@ -1018,6 +1014,167 @@ describe('Beeper file indexing', () => {
 
     await router(m, platform);
     assert.match(platform.lastTo('chat1').text, /Owner only/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /business command + wizard
+// ---------------------------------------------------------------------------
+
+describe('/business command', () => {
+  it('/business show with no persona says not configured', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/business show'), platform);
+    assert.match(platform.sent[0].text, /No business persona/);
+  });
+
+  it('/business show displays current config', async () => {
+    const env = createTestEnv({
+      allowed_users: ['user1'], owner_id: 'user1',
+      business: { name: 'TestBiz', greeting: 'Hi!', topics: [{ name: 'Sales', description: 'Buy stuff' }], rules: ['Be nice'] }
+    });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/business show'), platform);
+    const text = platform.sent[0].text;
+    assert.match(text, /TestBiz/);
+    assert.match(text, /Hi!/);
+    assert.match(text, /Sales/);
+    assert.match(text, /Be nice/);
+  });
+
+  it('/business clear resets persona', async () => {
+    const env = createTestEnv({
+      allowed_users: ['user1'], owner_id: 'user1',
+      business: { name: 'TestBiz', greeting: 'Hi!', topics: [], rules: [] }
+    });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/business clear'), platform);
+    assert.match(platform.sent[0].text, /cleared/i);
+    assert.strictEqual(env.config.business.name, null);
+  });
+
+  it('/business setup wizard full flow', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    // Start wizard
+    await router(msg('/business setup'), platform);
+    assert.match(platform.lastTo('chat1').text, /business name/i);
+
+    // Name
+    await router(msg('Acme Corp'), platform);
+    assert.match(platform.lastTo('chat1').text, /Greeting/i);
+
+    // Greeting
+    await router(msg('Welcome!'), platform);
+    assert.match(platform.lastTo('chat1').text, /topic/i);
+
+    // Add a topic
+    await router(msg('Pricing'), platform);
+    assert.match(platform.lastTo('chat1').text, /Description/i);
+
+    // Topic description
+    await router(msg('Plans and billing'), platform);
+    assert.match(platform.lastTo('chat1').text, /Next topic/i);
+
+    // Done with topics
+    await router(msg('done'), platform);
+    assert.match(platform.lastTo('chat1').text, /rule/i);
+
+    // Done with rules
+    await router(msg('done'), platform);
+    assert.match(platform.lastTo('chat1').text, /Save/i);
+
+    // Confirm
+    await router(msg('yes'), platform);
+    assert.match(platform.lastTo('chat1').text, /saved/i);
+    assert.strictEqual(env.config.business.name, 'Acme Corp');
+    assert.strictEqual(env.config.business.greeting, 'Welcome!');
+    assert.strictEqual(env.config.business.topics.length, 1);
+    assert.strictEqual(env.config.business.topics[0].name, 'Pricing');
+  });
+
+  it('/business setup cancel aborts', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/business setup'), platform);
+    await router(msg('cancel'), platform);
+    assert.match(platform.lastTo('chat1').text, /cancelled/i);
+    assert.ok(!env.config.business?.name, 'name should not be set after cancel');
+  });
+
+  it('/business rejected for non-owner', async () => {
+    const env = createTestEnv({ allowed_users: ['user1', 'user2'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/business setup', { senderId: 'user2' }), platform);
+    assert.match(platform.sent[0].text, /Owner only/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildBusinessPrompt unit tests
+// ---------------------------------------------------------------------------
+
+describe('buildBusinessPrompt', () => {
+  const { buildBusinessPrompt } = require('../../src/llm/prompts');
+
+  it('builds prompt with name and greeting', () => {
+    const prompt = buildBusinessPrompt({ business: { name: 'Acme', greeting: 'Hello!' } });
+    assert.match(prompt, /You are Acme/);
+    assert.match(prompt, /Hello!/);
+  });
+
+  it('includes topics with descriptions', () => {
+    const prompt = buildBusinessPrompt({
+      business: { name: 'Test', topics: [{ name: 'Billing', description: 'Payment info' }] }
+    });
+    assert.match(prompt, /1\. Billing — Payment info/);
+    assert.match(prompt, /Do NOT answer questions outside/);
+  });
+
+  it('includes custom rules', () => {
+    const prompt = buildBusinessPrompt({
+      business: { name: 'Test', rules: ['Speak French'] }
+    });
+    assert.match(prompt, /Speak French/);
+  });
+
+  it('includes allowed_urls as reference links', () => {
+    const prompt = buildBusinessPrompt({
+      business: {
+        name: 'Test',
+        allowed_urls: [
+          'https://example.com/faq',
+          { label: 'Pricing', url: 'https://example.com/pricing' }
+        ]
+      }
+    });
+    assert.match(prompt, /https:\/\/example\.com\/faq/);
+    assert.match(prompt, /Pricing: https:\/\/example\.com\/pricing/);
+  });
+
+  it('includes escalation keywords', () => {
+    const prompt = buildBusinessPrompt({
+      business: { name: 'Test', escalation: { escalate_keywords: ['refund', 'complaint'] } }
+    });
+    assert.match(prompt, /refund, complaint/);
+  });
+
+  it('falls back to generic when no name', () => {
+    const prompt = buildBusinessPrompt({ business: {} });
+    assert.match(prompt, /business assistant/);
   });
 });
 

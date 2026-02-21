@@ -76,15 +76,17 @@ describe('loadConfig — default merging', () => {
     assert.strictEqual(loaded.security.pin_lockout_minutes, 60, 'should fill in missing default');
   });
 
-  it('merges business.escalation defaults', () => {
+  it('merges business defaults', () => {
     delete require.cache[require.resolve('../src/config')];
     const { loadConfig } = require('../src/config');
     const config = loadConfig();
 
-    assert.strictEqual(config.business.escalation.max_retries_before_escalate, 2);
+    assert.strictEqual(config.business.name, null);
+    assert.ok(Array.isArray(config.business.topics));
+    assert.ok(Array.isArray(config.business.rules));
+    assert.ok(Array.isArray(config.business.allowed_urls));
     assert.ok(Array.isArray(config.business.escalation.escalate_keywords));
     assert.ok(config.business.escalation.escalate_keywords.includes('refund'));
-    assert.ok(Array.isArray(config.business.escalation.allowed_urls));
   });
 
   it('merges memory defaults', () => {

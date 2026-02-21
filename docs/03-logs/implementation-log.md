@@ -103,3 +103,14 @@
 - `BeeperPlatform.downloadAsset()` method, `_attachments` on normalized Message
 - Removed DEBUG log from beeper.js
 - 6 new integration tests, 344 total passing
+
+## 2026-02-21: Business Persona + Structured Config
+- `buildBusinessPrompt(config)` compiles config.business into LLM system prompt
+- `/business setup` wizard: name → greeting → topics → rules → confirm → save
+- `/business show` displays current config, `/business clear` resets
+- Removed retry-based escalation (escalationRetries Map, max_retries_before_escalate)
+- 0 KB matches now calls LLM instead of canned "rephrase" response
+- Keyword escalation preserved (refund, complaint etc. → admin notification)
+- `allowed_urls` in business config: reference links for LLM to cite (fetching deferred)
+- `admin_chat` migrated into `escalation` sub-object
+- 13 new tests (6 wizard, 6 buildBusinessPrompt, 1 0-chunks-calls-LLM), 357 total passing
