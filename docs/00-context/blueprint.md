@@ -74,6 +74,8 @@ Message arrives
 - **Mode lookup**: `config.platforms.beeper.chat_modes[chatId]` → fallback to `default_mode`
 - **Self messages in personal chats**: routed as natural language (routeAs: 'natural')
 - **Incoming messages in business chats**: auto-responded (routeAs: 'business')
+- **File indexing via chat**: admin sends a file (PDF/DOCX/MD/TXT) with `/index <scope>` in Note-to-self → bot downloads via `POST /v1/assets/download`, indexes locally. If no scope specified, bot asks "Reply 1 (public) or 2 (admin)". Uses `_attachments` on the normalized Message (same pattern as Telegram's `_document`)
+- **Hibernate/sleep re-seed**: if poll gap exceeds 30s (expected ~3s), re-seeds `_seen` set from current messages to avoid reprocessing stale messages after wake
 
 ---
 
@@ -168,6 +170,11 @@ This is acceptable — there's no reason to set a mode on a chat with zero activ
 
 ```
 File → Parser (PDF/DOCX/MD/TXT) → Sections → Chunker → SQLite FTS5
+
+Sources:
+  ├─ /index <path> <scope>     — local file path (all platforms)
+  ├─ Telegram file upload       — bot downloads via getFileLink(), indexes as kb
+  └─ Beeper file attachment     — bot downloads via POST /v1/assets/download, scope from text or interactive prompt
 ```
 
 - **Chunk size:** 2000 chars, 200 overlap, sentence-boundary-aware
@@ -208,6 +215,31 @@ Providers are handled by `bare-agent` library. Configuration in `~/.multis/confi
 **OpenAI-compatible APIs:** Set `provider: "openai"` with custom `baseUrl` (OpenRouter, Together, Groq, vLLM, etc.).
 
 **Adapter:** `src/llm/provider-adapter.js` maps config to bare-agent provider instances.
+
+### bare-agent integration
+
+The agent loop and resilience layer are provided by `bare-agent`:
+
+| Component | bare-agent class | What it does |
+|-----------|-----------------|--------------|
+| **Loop** | `Loop` | LLM → tool_use → execute → loop (max N rounds). Drives all `/ask` and `/plan` interactions |
+| **Retry** | `Retry` | Automatic retry on 429/5xx with configurable max attempts and timeout |
+| **CircuitBreaker** | `CircuitBreaker` | Shared per-process, opens after N failures, resets after cooldown. Wraps the provider |
+| **Checkpoint** | `Checkpoint` | Human-in-the-loop approval before dangerous tool calls (e.g. `exec`). Sends yes/no prompt to chat |
+| **Planner** | `Planner` | Breaks a goal into steps. Used by `/plan` command |
+| **Scheduler** | `Scheduler` | Time-triggered jobs, persists to `~/.multis/data/scheduler.json`, 60s poll interval |
+
+Config for retry and circuit breaker in `config.json`:
+
+```json
+{
+  "llm": {
+    "max_tool_rounds": 5,
+    "retry": { "maxAttempts": 3, "timeout": 30000 },
+    "circuit_breaker": { "threshold": 5, "resetAfter": 30000 }
+  }
+}
+```
 
 ---
 
@@ -543,25 +575,39 @@ Customer asks a question
 ```
 
 ### What triggers escalation
-- Low confidence (no good KB matches)
+- Low confidence (no good KB matches after retries)
 - Customer explicitly asks for human ("can I talk to someone")
 - Sensitive topics (configurable keyword list)
-- Repeated questions (same topic 3x — bot isn't helping)
+- Repeated questions (same topic after `max_retries_before_escalate` — bot isn't helping)
 - Any request that involves action (change order, schedule meeting, send something)
+
+**KB-empty bypass:** When the knowledge base has zero indexed documents (`totalChunks === 0`), escalation is skipped entirely. The LLM answers freely using its general knowledge. This prevents false escalations during initial setup before any documents are indexed.
 
 ### Human in the loop — always
 - Bot never promises action on behalf of admin
 - Bot never creates reminders or commitments autonomously
 - If customer requests follow-up: bot acknowledges, sends note to admin via `admin_chat`
 - Admin decides whether to act, remind, or ignore
+- All escalation and clarification replies are saved to memory (appendMessage + appendToLog) so conversation history stays complete even on non-LLM paths
 
 ---
 
-## 9. Cron Scheduler (POC6)
+## 9. Scheduler (DONE)
 
-Built-in scheduler, runs inside the daemon process. **Admin-only.**
+Built-in scheduler via bare-agent's `Scheduler`, runs inside the daemon process. **Admin-only.** Persists to `~/.multis/data/scheduler.json`, polls every 60s.
 
-### Core jobs
+### Commands
+
+| Command | What it does | Example |
+|---------|-------------|---------|
+| `/remind <duration> <action>` | One-shot reminder | `/remind 2h check inbox` |
+| `/cron <expression> <action>` | Recurring scheduled task | `/cron 0 9 * * 1-5 morning briefing` |
+| `/jobs` | List active scheduled jobs | |
+| `/cancel <id>` | Cancel a scheduled job | `/cancel job-abc123` |
+
+Duration format: `1m`, `5m`, `1h`, `2h`, `1d`, etc. Cron uses standard 5-field expressions.
+
+### Core jobs (planned)
 
 | Job | Frequency | What it does |
 |-----|-----------|-------------|
@@ -569,22 +615,8 @@ Built-in scheduler, runs inside the daemon process. **Admin-only.**
 | **Memory pruning** | Daily | Prune memory.md sections + FTS chunks older than `retention_days` |
 | **Activation decay** | On access (or periodic if needed) | Recalculate activation scores |
 
-### Admin-defined jobs
-
-| Example | Schedule | Payload |
-|---------|----------|---------|
-| Morning brief | `0 7 * * *` | "Summarize overnight across all business chats" |
-| Reminder | One-shot | "Follow up with Alice" → deliver to admin chat |
-| Weekly digest | `0 9 * * 1` | "Summary of all customer conversations this week" |
-
-Created via `/remind <time> <message>` or `/cron <schedule> <action>` — owner-only.
-
 ### Customer reminders
 Customers cannot create cron jobs. If a customer requests a follow-up, the bot sends a note to admin. Admin decides whether to create a reminder.
-
-### Storage
-- Jobs: `~/.multis/data/cron/jobs.json`
-- Run history: `~/.multis/data/cron/runs/<jobId>.jsonl`
 
 ---
 
@@ -757,7 +789,7 @@ All behavioral settings are configurable. Sane defaults applied when missing.
 
 ## 12. Agent Tools
 
-The LLM agent has access to tools via bare-agent's Loop. Tools are defined in `src/tools/definitions.js`, filtered by platform and owner status via `src/tools/registry.js`, adapted to bare-agent format via `src/tools/adapter.js`.
+The LLM agent has access to tools via bare-agent's `Loop`. Tools are defined in `src/tools/definitions.js`, filtered by platform and owner status via `src/tools/registry.js`, adapted to bare-agent format via `src/tools/adapter.js`. Dangerous tools (default: `exec`) require human approval via bare-agent's `Checkpoint` — the bot asks "Allow [tool]? (yes/no)" and waits 60s for a reply before proceeding.
 
 ### Tool categories
 
@@ -926,7 +958,7 @@ Not needed yet. Current tools (filesystem, shell, knowledge, desktop, Android) c
 
 ## 16. Agent Evolution
 
-The agent system evolves in tiers. Tier 1 is done. Tier 2 is next. Tier 3 is only if the product pivots from personal tool to platform.
+The agent system evolves in tiers. Tier 1 and Tier 2 are done. Tier 3 is only if the product pivots from personal tool to platform.
 
 Full design: **`docs/02-features/agent-evolution.md`** (architecture, schemas, size estimates, what to build vs skip)
 First-principles breakdown: **`docs/02-features/agent-orchestration.md`** (orchestration components explained, actuation layers, why frameworks overcomplicate this)
@@ -939,23 +971,23 @@ LLM decides when to use tools in a multi-round loop. 25+ tools across filesystem
 - `src/tools/definitions.js`, `registry.js`, `executor.js`
 - `resolveAgent()` + `config.agents` for multi-persona
 
-### Tier 2: Autonomous Agent (~250 lines, essential)
+### Tier 2: Autonomous Agent (DONE)
 
-Five components that turn a reactive chatbot into an agent that executes multi-step plans:
+Five components implemented via bare-agent wrappers in `src/bot/`:
 
-| Component | What | Size |
-|-----------|------|------|
-| **Planner prompt** | LLM breaks goals into steps with dependencies before acting | ~20 lines (prompt) |
-| **Task persistence** | JSON file tracking plan steps + status, survives restarts | ~60 lines |
-| **Scheduler** | `/remind`, `/cron`, `/jobs` — time-triggered agent turns | ~100 lines |
-| **Human checkpoints** | Ask user before irreversible actions (book, send, purchase) | ~30 lines |
-| **Retry/timeout** | Backoff on transient API failures, 60s timeout per tool call | ~40 lines |
+| Component | Implementation | Status |
+|-----------|---------------|--------|
+| **Planner** | `bare-agent Planner` → `/plan <goal>` breaks into steps, executes sequentially via `runAgentLoop` | Done |
+| **Scheduler** | `bare-agent Scheduler` → `/remind`, `/cron`, `/jobs`, `/cancel`. Persists to `scheduler.json`, 60s poll | Done |
+| **Human checkpoints** | `bare-agent Checkpoint` → `src/bot/checkpoint.js`. Prompts yes/no before dangerous tool calls (default: `exec`). 60s timeout | Done |
+| **Retry + Circuit Breaker** | `bare-agent Retry` + `CircuitBreaker`. Configurable via `config.llm.retry` and `config.llm.circuit_breaker` | Done |
+| **Agent loop** | `bare-agent Loop` → `runAgentLoop()` in `handlers.js`. LLM → tool_use → execute → loop (max 5 rounds, configurable) | Done |
 
-Scheduler reuses `runAgentLoop` — jobs are agent turns, not hardcoded scripts. Persistent to `~/.multis/data/cron/jobs.json`. Owner-only. Runs inside daemon process.
+All bare-agent integrations are thin wrappers — `scheduler.js`, `checkpoint.js`, `provider-adapter.js` each <50 lines.
 
-**Deferred (nice-to-have, ~135 lines):**
-- Heartbeat (~65 lines) — cron covers 80% of ambient awareness use cases
-- Hooks (~70 lines) — only if dogfooding demands event-driven extensibility
+**Deferred (nice-to-have):**
+- Heartbeat — cron covers 80% of ambient awareness use cases
+- Hooks — only if dogfooding demands event-driven extensibility
 
 **Explicitly skipped:** Message bus (one agent, one process), A2A protocol (no external agents), stream bus (chat is the UI), gateway (daemon IS the gateway). These solve multi-tenant platform problems, not personal assistant problems.
 
