@@ -18,6 +18,11 @@ Thumbs.db
 *.swp
 *.swo
 
+# Aurora (generated)
+.aurora/logs/
+.aurora/indexes/
+.aurora/cache/
+
 # Temporary files
 tmp/
 temp/

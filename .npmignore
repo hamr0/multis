@@ -1,7 +1,16 @@
 .env
 .claude/
+.aurora/
+.idea/
+.vscode/
 .multis-template/
+.beeper-storage/
 test/
 docs/
+scripts/
 *.db
-audit.log
+*.log
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
