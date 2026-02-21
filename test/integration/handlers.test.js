@@ -1,8 +1,18 @@
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const { createMessageRouter, buildAgentRegistry, resolveAgent } = require('../../src/bot/handlers');
 const { PinManager, hashPin } = require('../../src/security/pin');
 const { createTestEnv, mockPlatform, mockLLM, msg } = require('../helpers/setup');
+
+/** Create a real temp file that downloadAsset can "return" so fs.readFileSync works */
+function tmpFile(content = 'test content') {
+  const p = path.join(os.tmpdir(), `multis-test-${Date.now()}`);
+  fs.writeFileSync(p, content);
+  return p;
+}
 
 // ---------------------------------------------------------------------------
 // Pairing
@@ -868,10 +878,10 @@ describe('Beeper file indexing', () => {
   it('file message with /index kb indexes successfully', async () => {
     const env = createTestEnv({ allowed_users: ['self1'], owner_id: 'self1' });
     const platform = mockPlatform();
-    let indexedPath = null, indexedRole = null;
+    let indexedName = null, indexedRole = null;
     const indexer = stubIndexer();
-    indexer.indexFile = async (p, role) => { indexedPath = p; indexedRole = role; return 3; };
-    platform.downloadAsset = async (url) => '/tmp/downloaded/braun-manual.pdf';
+    indexer.indexBuffer = async (buf, name, role) => { indexedName = name; indexedRole = role; return 3; };
+    platform.downloadAsset = async (url) => tmpFile();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
     const m = msg('/index kb', {
@@ -885,12 +895,12 @@ describe('Beeper file indexing', () => {
     }];
 
     await router(m, platform);
-    assert.strictEqual(indexedPath, '/tmp/downloaded/braun-manual.pdf');
+    assert.strictEqual(indexedName, 'braun-manual.pdf'); // original filename preserved
     assert.strictEqual(indexedRole, 'public'); // kb maps to public
     assert.match(platform.lastTo('chat1').text, /Indexed 3 chunks/);
   });
 
-  it('file message without scope asks for scope', async () => {
+  it('file message without scope asks for scope with skip option', async () => {
     const env = createTestEnv({ allowed_users: ['self1'], owner_id: 'self1' });
     const platform = mockPlatform();
     const indexer = stubIndexer();
@@ -908,7 +918,7 @@ describe('Beeper file indexing', () => {
 
     await router(m, platform);
     assert.match(platform.lastTo('chat1').text, /Index as/);
-    assert.match(platform.lastTo('chat1').text, /Reply 1 or 2/);
+    assert.match(platform.lastTo('chat1').text, /3\. Skip/);
     assert.ok(env.config._pendingIndex?.self1, 'should store pending index');
   });
 
@@ -917,11 +927,10 @@ describe('Beeper file indexing', () => {
     const platform = mockPlatform();
     let indexedRole = null;
     const indexer = stubIndexer();
-    indexer.indexFile = async (p, role) => { indexedRole = role; return 5; };
-    platform.downloadAsset = async () => '/tmp/downloaded/report.pdf';
+    indexer.indexBuffer = async (buf, name, role) => { indexedRole = role; return 5; };
+    platform.downloadAsset = async () => tmpFile();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
-    // Simulate pending state
     env.config._pendingIndex = {
       self1: { fileName: 'report.pdf', srcURL: 'mxc://beeper.local/abc123' }
     };
@@ -939,8 +948,8 @@ describe('Beeper file indexing', () => {
     const platform = mockPlatform();
     let indexedRole = null;
     const indexer = stubIndexer();
-    indexer.indexFile = async (p, role) => { indexedRole = role; return 2; };
-    platform.downloadAsset = async () => '/tmp/downloaded/notes.md';
+    indexer.indexBuffer = async (buf, name, role) => { indexedRole = role; return 2; };
+    platform.downloadAsset = async () => tmpFile();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
     env.config._pendingIndex = {
@@ -953,6 +962,24 @@ describe('Beeper file indexing', () => {
     await router(m, platform);
     assert.strictEqual(indexedRole, 'admin');
     assert.match(platform.lastTo('chat1').text, /Indexed 2 chunks.*\[admin\]/);
+  });
+
+  it('scope reply 3 skips indexing', async () => {
+    const env = createTestEnv({ allowed_users: ['self1'], owner_id: 'self1' });
+    const platform = mockPlatform();
+    const indexer = stubIndexer();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
+
+    env.config._pendingIndex = {
+      self1: { fileName: 'report.pdf', srcURL: 'mxc://beeper.local/abc123' }
+    };
+
+    const m = msg('3', {
+      platform: 'beeper', senderId: 'self1', isSelf: true
+    });
+    await router(m, platform);
+    assert.match(platform.lastTo('chat1').text, /Skipped/);
+    assert.strictEqual(env.config._pendingIndex?.self1, undefined);
   });
 
   it('unsupported file type is rejected', async () => {

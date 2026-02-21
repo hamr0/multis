@@ -219,6 +219,34 @@ function createMessageRouter(config, deps = {}) {
       return;
     }
 
+    // Handle pending file index scope reply (1 = public, 2 = admin, 3 = skip)
+    // Must come before pending-mode handler — both match digits, this is more specific
+    if (config._pendingIndex?.[msg.senderId] && /^[123]$/.test(text.trim())) {
+      const pending = config._pendingIndex[msg.senderId];
+      delete config._pendingIndex[msg.senderId];
+      const choice = text.trim();
+      if (choice === '3') {
+        await platform.send(msg.chatId, 'Skipped.');
+        return;
+      }
+      const scope = choice === '1' ? 'public' : 'admin';
+      try {
+        await platform.send(msg.chatId, `Downloading and indexing: ${pending.fileName} (${scope})...`);
+        const localPath = await platform.downloadAsset(pending.srcURL);
+        const buffer = require('fs').readFileSync(localPath);
+        const count = await indexer.indexBuffer(buffer, pending.fileName, scope);
+        await platform.send(msg.chatId, `Indexed ${count} chunks from ${pending.fileName} [${scope}]`);
+        logAudit({ action: 'index_upload', user_id: msg.senderId, filename: pending.fileName, chunks: count, scope, platform: 'beeper' });
+      } catch (err) {
+        await platform.send(msg.chatId, `Index error: ${err.message}`);
+      }
+      return;
+    }
+    // Clear stale pending index if user sends something else
+    if (config._pendingIndex?.[msg.senderId]) {
+      delete config._pendingIndex[msg.senderId];
+    }
+
     // Handle pending mode selection (interactive picker reply)
     if (config._pendingMode?.[msg.senderId] && /^\d+$/.test(text.trim())) {
       const pending = config._pendingMode[msg.senderId];
@@ -239,26 +267,6 @@ function createMessageRouter(config, deps = {}) {
         await platform.send(msg.chatId, `Invalid choice. Pick 1-${pending.matches.length}.`);
       }
       return;
-    }
-    // Handle pending file index scope reply (1 = public, 2 = admin)
-    if (config._pendingIndex?.[msg.senderId] && /^[12]$/.test(text.trim())) {
-      const pending = config._pendingIndex[msg.senderId];
-      delete config._pendingIndex[msg.senderId];
-      const scope = text.trim() === '1' ? 'public' : 'admin';
-      try {
-        await platform.send(msg.chatId, `Downloading and indexing: ${pending.fileName} (${scope})...`);
-        const localPath = await platform.downloadAsset(pending.srcURL);
-        const count = await indexer.indexFile(localPath, scope);
-        await platform.send(msg.chatId, `Indexed ${count} chunks from ${pending.fileName} [${scope}]`);
-        logAudit({ action: 'index_upload', user_id: msg.senderId, filename: pending.fileName, chunks: count, scope, platform: 'beeper' });
-      } catch (err) {
-        await platform.send(msg.chatId, `Index error: ${err.message}`);
-      }
-      return;
-    }
-    // Clear stale pending index if user sends something else
-    if (config._pendingIndex?.[msg.senderId]) {
-      delete config._pendingIndex[msg.senderId];
     }
 
     // Clear stale pending mode if user sends something else
@@ -1361,14 +1369,15 @@ async function handleBeeperFileIndex(msg, platform, config, indexer) {
     // Ask for scope
     if (!config._pendingIndex) config._pendingIndex = {};
     config._pendingIndex[msg.senderId] = { fileName, srcURL };
-    await platform.send(msg.chatId, `Got "${fileName}". Index as:\n1. Public (kb)\n2. Admin only\nReply 1 or 2.`);
+    await platform.send(msg.chatId, `Got "${fileName}". Index as:\n1. Public (kb)\n2. Admin only\n3. Skip\nReply 1, 2, or 3.`);
     return;
   }
 
   try {
     await platform.send(msg.chatId, `Downloading and indexing: ${fileName} (${scope})...`);
     const localPath = await platform.downloadAsset(srcURL);
-    const count = await indexer.indexFile(localPath, scope);
+    const buffer = require('fs').readFileSync(localPath);
+    const count = await indexer.indexBuffer(buffer, fileName, scope);
     await platform.send(msg.chatId, `Indexed ${count} chunks from ${fileName} [${scope}]`);
     logAudit({ action: 'index_upload', user_id: msg.senderId, filename: fileName, chunks: count, scope, platform: 'beeper' });
   } catch (err) {
