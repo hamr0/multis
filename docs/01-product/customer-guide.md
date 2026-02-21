@@ -45,10 +45,14 @@
     - [Changing Your PIN](#changing-your-pin)
     - [Lockout](#lockout)
 15. [Scheduling: Reminders and Cron](#15-scheduling)
-16. [Changing Your LLM Provider](#16-changing-your-llm-provider)
-17. [Adding a Second Admin](#17-adding-a-second-admin)
-18. [Troubleshooting](#18-troubleshooting)
-19. [File Locations](#19-file-locations)
+16. [Hosting Options: Always-On Setup](#16-hosting-options)
+    - [Which Device for Which Use Case](#which-device-for-which-use-case)
+    - [Raspberry Pi Setup (Recommended for Business)](#raspberry-pi-setup)
+    - [VPS Setup (Telegram Only)](#vps-setup)
+17. [Changing Your LLM Provider](#17-changing-your-llm-provider)
+18. [Adding a Second Admin](#18-adding-a-second-admin)
+19. [Troubleshooting](#19-troubleshooting)
+20. [File Locations](#20-file-locations)
 
 ---
 
@@ -611,7 +615,232 @@ Jobs are in-memory and don't survive restarts. After `multis restart`, you'll ne
 
 ---
 
-## 16. Changing Your LLM Provider
+## 16. Hosting Options: Always-On Setup
+
+multis only responds when it's running. If your computer is off or asleep, the bot goes silent. Here's how to keep it always-on depending on your use case.
+
+### Which Device for Which Use Case
+
+**Personal use (Telegram only)** — no Beeper needed:
+
+| Device | Cost | Notes |
+|--------|------|-------|
+| **VPS** (RackNerd, Hetzner, Oracle) | $0-20/year | Best option. Headless, always on. Oracle free tier = $0. |
+| **Android** (spare phone + Termux) | $0 | Runs Node.js. Bonus: SMS, calls, camera via termux-api. Must stay on and charged. |
+| **Laptop** | $0 | Works but sleeps. Fine for daytime use. |
+
+**Business use (Beeper bridges — WhatsApp, Signal, etc.):**
+
+| Device | Cost | Works? |
+|--------|------|--------|
+| **Raspberry Pi** | $35-60 one-time | Best option. Runs Beeper Desktop + multis. Silent, low power, always on. |
+| **Laptop / mini PC** | $0-80 | Works but must stay open and awake. |
+| **VPS** | $10-20/year | No — Beeper Desktop needs a display. No headless mode. |
+| **Android** | $0 | No — Beeper mobile doesn't expose the Desktop API (localhost:23373). |
+
+**Why can't Beeper run on a VPS?** Beeper Desktop is an Electron app (GUI). It needs a display to run. While you could hack around this with a virtual display (Xvfb), it's fragile and unsupported. Beeper's cloud connections sync your chats across their app — they don't expose an API for third-party bots.
+
+**Bottom line:** For business mode with Beeper bridges, the Raspberry Pi is the cheapest and most reliable always-on option.
+
+### Raspberry Pi Setup
+
+A Raspberry Pi 4 (2GB+) or Pi 5 running Raspberry Pi OS with desktop is all you need. Total cost: ~$35-60 for the board + ~$15 for power supply and SD card. Draws ~5W — pennies per month in electricity.
+
+#### What you need
+
+- Raspberry Pi 4 (2GB+ RAM) or Pi 5
+- microSD card (32GB+)
+- USB-C power supply
+- Ethernet cable or WiFi
+- Monitor + keyboard for initial setup (can go headless after)
+
+#### Step 1: Install Raspberry Pi OS (Desktop)
+
+1. Download [Raspberry Pi Imager](https://www.raspberrypi.com/software/) on your laptop
+2. Flash **Raspberry Pi OS (64-bit) with desktop** to the SD card
+3. In Imager settings (gear icon), enable SSH and set your WiFi credentials — this lets you manage it remotely later
+4. Insert the SD card, connect the Pi, power it on
+5. Complete the first-boot setup (locale, password, updates)
+
+#### Step 2: Install Node.js 20
+
+```bash
+# Add NodeSource repository
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
+
+# Install Node.js
+sudo apt-get install -y nodejs
+
+# Verify
+node --version    # should show v20.x.x
+npm --version
+```
+
+#### Step 3: Install Beeper Desktop
+
+Beeper provides an ARM64 AppImage for Linux:
+
+```bash
+# Download the ARM64 AppImage
+curl -L -o ~/Beeper.AppImage \
+  "https://api.beeper.com/desktop/download/linux/arm64/stable/com.automattic.beeper.desktop"
+
+# Make it executable
+chmod +x ~/Beeper.AppImage
+
+# Install FUSE (required for AppImages)
+sudo apt-get install -y fuse libfuse2
+```
+
+Launch Beeper:
+
+```bash
+~/Beeper.AppImage
+```
+
+1. Sign in to your Beeper account
+2. Connect your messaging accounts (WhatsApp, Signal, etc.) through the Beeper UI
+3. Go to **Settings > Developers** and enable the **Desktop API** toggle
+4. Keep Beeper running
+
+#### Step 4: Install and configure multis
+
+```bash
+# Install multis
+npm install -g multis
+
+# Run the setup wizard
+multis init
+```
+
+The wizard will detect Beeper on `localhost:23373` and walk you through connecting Telegram, choosing an LLM provider, and setting a PIN.
+
+#### Step 5: Start multis and auto-start on boot
+
+```bash
+# Start the daemon
+multis start
+
+# Verify it's running
+multis status
+```
+
+To auto-start multis and Beeper on boot, create a systemd user service:
+
+```bash
+mkdir -p ~/.config/systemd/user
+
+# Beeper auto-start
+cat > ~/.config/systemd/user/beeper.service << 'EOF'
+[Unit]
+Description=Beeper Desktop
+After=graphical-session.target
+
+[Service]
+ExecStart=/home/pi/Beeper.AppImage
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+EOF
+
+# multis auto-start (after Beeper)
+cat > ~/.config/systemd/user/multis.service << 'EOF'
+[Unit]
+Description=multis AI assistant
+After=beeper.service
+Wants=beeper.service
+
+[Service]
+ExecStart=/usr/bin/node /usr/lib/node_modules/multis/src/index.js
+Restart=on-failure
+RestartSec=10
+Environment=HOME=/home/pi
+
+[Install]
+WantedBy=default.target
+EOF
+
+# Enable both
+systemctl --user enable beeper multis
+systemctl --user start beeper multis
+
+# Allow user services to run without a login session
+sudo loginctl enable-linger pi
+```
+
+#### Step 6: Go headless (optional)
+
+Once everything is running, you can disconnect the monitor and manage the Pi over SSH:
+
+```bash
+ssh pi@<your-pi-ip>
+
+# Check status
+multis status
+multis doctor
+
+# View logs
+tail -f ~/.multis/logs/daemon.log
+```
+
+The Pi sits on your network, always on, running Beeper + multis. Customers message on WhatsApp, the bot responds automatically.
+
+### VPS Setup
+
+For Telegram-only (personal use), a cheap VPS works perfectly.
+
+**Cheapest options:**
+- **Oracle Cloud Always Free** — 4 ARM cores, 24GB RAM, free forever (if you can get a slot)
+- **RackNerd** — 1GB RAM, ~$10-12/year (Black Friday deals)
+- **BuyVM** — 512MB RAM, $24/year
+- **Hetzner** — 2GB RAM, ~$45/year
+
+```bash
+# SSH into your VPS
+ssh root@your-vps-ip
+
+# Install Node.js 20
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt-get install -y nodejs
+
+# Install multis
+npm install -g multis
+
+# Setup (choose Telegram only, no Beeper)
+multis init
+
+# Start as daemon
+multis start
+```
+
+For auto-restart on reboot, create a systemd service:
+
+```bash
+cat > /etc/systemd/system/multis.service << 'EOF'
+[Unit]
+Description=multis AI assistant
+After=network.target
+
+[Service]
+Type=simple
+User=multis
+ExecStart=/usr/bin/node /usr/lib/node_modules/multis/src/index.js
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl enable multis
+systemctl start multis
+```
+
+---
+
+## 17. Changing Your LLM Provider
 
 ### Option 1: Re-run the wizard
 
@@ -652,7 +881,7 @@ Restart after changing: `multis restart`
 
 ---
 
-## 17. Adding a Second Admin
+## 18. Adding a Second Admin
 
 Currently, multis has a single owner model — the first person to pair becomes the owner. Other paired users can use basic commands (`/ask`, `/search`, `/memory`) but not owner commands.
 
@@ -668,7 +897,7 @@ To make someone the owner, edit `~/.multis/config.json` and set `owner_id` to th
 
 ---
 
-## 18. Troubleshooting
+## 19. Troubleshooting
 
 ### Bot not responding
 
@@ -716,7 +945,7 @@ Beeper: the poller seeds its "seen" set on startup, so old messages aren't repro
 
 ---
 
-## 19. File Locations
+## 20. File Locations
 
 | Path | Purpose |
 |------|---------|
