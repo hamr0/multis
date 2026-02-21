@@ -45,7 +45,7 @@ Handler in src/bot/handlers.js, case in createMessageRouter switch, update help 
 -> docs/04-process/dev-workflow.md (adding commands section)
 
 ## Adding LLM Providers
-Extend LLMProvider in src/llm/base.js, add to client.js factory, add env var to config.js.
+bare-agent handles providers; configure provider/model/apiKey in config.json `llm` block. Adapter: `src/llm/provider-adapter.js`.
 -> docs/04-process/dev-workflow.md (adding providers section)
 
 ## Agent Evolution

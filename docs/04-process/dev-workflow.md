@@ -42,10 +42,11 @@ node src/cli/setup-beeper.js
 
 ## Adding a New LLM Provider
 
-1. Create `src/llm/myprovider.js` extending `LLMProvider` from `base.js`
-2. Implement `generate(prompt, options)` with `options.system` support
-3. Add case to `src/llm/client.js` factory
-4. Add env var handling to `src/config.js`
+bare-agent handles all provider implementations. To use a different provider:
+
+1. Set `provider`, `model`, and `apiKey` in `~/.multis/config.json` `llm` block
+2. OpenAI-compatible APIs: set `provider: "openai"` with custom `baseUrl`
+3. Provider adapter: `src/llm/provider-adapter.js` maps config to bare-agent providers
 
 ## Testing
 

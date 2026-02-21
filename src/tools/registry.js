@@ -83,24 +83,9 @@ const DEFAULT_OWNER_ONLY = {
   brightness: true
 };
 
-/**
- * Convert tool definitions to LLM-compatible tool schemas.
- * Works for Anthropic/OpenAI format.
- * @param {Array} tools — filtered tool list
- * @returns {Array} — [{name, description, input_schema}]
- */
-function toLLMSchemas(tools) {
-  return tools.map(t => ({
-    name: t.name,
-    description: t.description,
-    inputSchema: t.input_schema
-  }));
-}
-
 module.exports = {
   loadToolsConfig,
   buildToolRegistry,
   getToolsForUser,
-  toLLMSchemas,
   DEFAULT_OWNER_ONLY
 };

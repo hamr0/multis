@@ -66,13 +66,23 @@ function mockPlatform() {
 }
 
 /**
- * Mock LLM — returns canned response, tracks calls.
+ * Mock LLM provider — bareagent-compatible.
+ * provider.generate(messages, tools, options) → { text, toolCalls, usage }
+ * Also supports legacy generate(prompt, opts) for backward compat.
  */
 function mockLLM(response = 'Mock answer') {
   const calls = [];
   return {
-    generate: async (prompt, opts) => { calls.push({ type: 'generate', prompt, opts }); return response; },
-    generateWithMessages: async (msgs, opts) => { calls.push({ type: 'generateWithMessages', msgs, opts }); return response; },
+    generate: async (messagesOrPrompt, toolsOrOpts, options) => {
+      // bareagent format: generate(messages, tools, options) → { text, toolCalls, usage }
+      if (Array.isArray(messagesOrPrompt) && messagesOrPrompt[0]?.role) {
+        calls.push({ type: 'generate', messages: messagesOrPrompt, tools: toolsOrOpts, options });
+        return { text: response, toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
+      }
+      // Legacy format: generate(prompt, opts) → string
+      calls.push({ type: 'generate', prompt: messagesOrPrompt, opts: toolsOrOpts });
+      return response;
+    },
     calls
   };
 }

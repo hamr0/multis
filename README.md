@@ -93,7 +93,7 @@ Node.js (vanilla, minimal deps) · Telegraf · better-sqlite3 · pdfjs-dist · m
 src/
 ├── bot/handlers.js       # Message router + all command handlers
 ├── platforms/            # Telegram + Beeper adapters, normalized Message
-├── llm/                  # Anthropic, OpenAI, Ollama providers + RAG prompts
+├── llm/                  # bare-agent provider adapter + RAG prompts
 ├── indexer/              # PDF/DOCX parsing, chunking, SQLite FTS5 store
 ├── governance/           # Command validation + audit logging
 ├── skills/               # Shell exec, file read
