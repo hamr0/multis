@@ -239,7 +239,7 @@ describe('Business escalation', () => {
     });
     const platform = mockPlatform();
     const llm = mockLLM('answer');
-    const indexer = stubIndexer();
+    const indexer = stubIndexer([], { totalChunks: 10 }); // KB has docs, but no match
     const router = createMessageRouter(env.config, { llm, indexer });
 
     const m = msg('I want a refund', { senderId: 'cust1', chatId: 'cust_chat', routeAs: 'business' });
@@ -263,7 +263,7 @@ describe('Business escalation', () => {
     });
     const platform = mockPlatform();
     const llm = mockLLM('answer');
-    const indexer = stubIndexer(); // returns no chunks
+    const indexer = stubIndexer([], { totalChunks: 10 }); // KB has docs, no match for query
     const router = createMessageRouter(env.config, { llm, indexer });
 
     const m1 = msg('obscure question', { senderId: 'cust1', chatId: 'cust_chat', routeAs: 'business' });
@@ -290,7 +290,7 @@ describe('Business escalation', () => {
     const platform = mockPlatform();
     const llm = mockLLM('found it');
     const chunks = [{ chunkId: 1, content: 'answer', name: 'faq', documentType: 'md', sectionPath: ['faq'], score: 1.0 }];
-    const indexer = stubIndexer(chunks);
+    const indexer = stubIndexer(chunks, { totalChunks: 10 });
     const escalationRetries = new Map();
     escalationRetries.set('cust_chat', 1); // one prior miss
     const router = createMessageRouter(env.config, { llm, indexer, escalationRetries });
@@ -864,7 +864,7 @@ describe('Agent routing in /ask', () => {
 // Stub indexer — records search calls, returns configured chunks
 // ---------------------------------------------------------------------------
 
-function stubIndexer(chunks = []) {
+function stubIndexer(chunks = [], stats = {}) {
   const searchCalls = [];
   return {
     search: (query, limit, opts = {}) => {
@@ -874,7 +874,7 @@ function stubIndexer(chunks = []) {
     searchCalls,
     indexFile: async () => 0,
     indexBuffer: async () => 0,
-    getStats: () => ({ indexedFiles: 0, totalChunks: 0, byType: {} }),
-    store: { recordSearchAccess: () => {} }
+    getStats: () => ({ indexedFiles: 0, totalChunks: 0, byType: {}, ...stats }),
+    store: { recordSearchAccess: () => {}, saveChunk: () => {} }
   };
 }

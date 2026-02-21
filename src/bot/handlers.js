@@ -693,7 +693,9 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     const chunks = indexer.search(question, 5, { roles });
 
     // Business escalation for non-admin chats
-    if (msg.routeAs === 'business' && !admin && escalationRetries) {
+    // Only escalate when KB has documents — if KB is empty, let the LLM answer freely
+    const kbHasDocs = indexer.getStats().totalChunks > 0;
+    if (msg.routeAs === 'business' && !admin && escalationRetries && kbHasDocs) {
       const esc = config.business?.escalation || {};
       const keywords = esc.escalate_keywords || [];
       const maxRetries = esc.max_retries_before_escalate || 2;
@@ -702,7 +704,9 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
 
       if (keywordMatch) {
         // Immediate escalation on keyword
-        await platform.send(msg.chatId, "I'm checking with the team on this. Someone will follow up shortly.");
+        const reply = "I'm checking with the team on this. Someone will follow up shortly.";
+        await platform.send(msg.chatId, reply);
+        if (mem) { mem.appendMessage('assistant', reply); mem.appendToLog('assistant', reply); }
         if (config.business?.admin_chat) {
           await platform.send(config.business.admin_chat, `[Escalation] Chat ${msg.chatId}: "${question}" (keyword match)`);
         }
@@ -716,7 +720,9 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
         escalationRetries.set(msg.chatId, retries);
 
         if (retries >= maxRetries) {
-          await platform.send(msg.chatId, "I'm checking with the team on this. Someone will follow up shortly.");
+          const reply = "I'm checking with the team on this. Someone will follow up shortly.";
+          await platform.send(msg.chatId, reply);
+          if (mem) { mem.appendMessage('assistant', reply); mem.appendToLog('assistant', reply); }
           if (config.business?.admin_chat) {
             await platform.send(config.business.admin_chat, `[Escalation] Chat ${msg.chatId}: "${question}" (${retries} unanswered)`);
           }
@@ -725,7 +731,9 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
           return;
         }
 
-        await platform.send(msg.chatId, "I don't have information on that. Could you rephrase or provide more details?");
+        const reply = "I don't have information on that. Could you rephrase or provide more details?";
+        await platform.send(msg.chatId, reply);
+        if (mem) { mem.appendMessage('assistant', reply); mem.appendToLog('assistant', reply); }
         logAudit({ action: 'ask_clarify', chatId: msg.chatId, retries, question });
         return;
       }
