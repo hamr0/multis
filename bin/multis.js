@@ -31,14 +31,14 @@ if (command) {
   runMenu();
 }
 
-function runCommand(cmd) {
+async function runCommand(cmd) {
   switch (cmd) {
     case 'init':    runInit(); break;
-    case 'start':   runStart(); break;
+    case 'start':   await runStart(); break;
     case 'stop':    runStop(); break;
-    case 'restart': runRestart(); break;
+    case 'restart': await runRestart(); break;
     case 'status':  runStatus(); break;
-    case 'doctor':  runDoctor(); break;
+    case 'doctor':  await runDoctor(); break;
     default:
       console.log(`\x1b[31mUnknown command: ${cmd}\x1b[0m\n`);
       console.log('Usage: multis <init|start|stop|restart|status|doctor>');
@@ -92,7 +92,7 @@ async function runMenu() {
     process.exit(1);
   }
   console.log('');
-  runCommand(cmd);
+  await runCommand(cmd);
 }
 
 // ---------------------------------------------------------------------------
@@ -724,7 +724,7 @@ async function verifyLLM(llmConfig) {
 // ---------------------------------------------------------------------------
 // start
 // ---------------------------------------------------------------------------
-function runStart() {
+async function runStart() {
   // Check not already running
   if (isRunning()) {
     const pid = fs.readFileSync(PID_PATH, 'utf-8').trim();
@@ -752,6 +752,18 @@ function runStart() {
   child.unref();
   console.log(`multis started (PID ${child.pid}).`);
   console.log(`Log: ${logPath}`);
+
+  // Check Beeper connectivity if enabled
+  const config = fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')) : null;
+  if (config?.platforms?.beeper?.enabled) {
+    const url = config.platforms.beeper.url || 'http://localhost:23373';
+    const fullUrl = url.startsWith('http') ? url : `http://${url}`;
+    try {
+      await fetch(`${fullUrl}/v1/spec`, { signal: AbortSignal.timeout(2000) });
+    } catch {
+      console.log('\x1b[31m✗\x1b[0m  Beeper API  Desktop not reachable — start Beeper Desktop');
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -783,7 +795,7 @@ function runStop() {
 // ---------------------------------------------------------------------------
 // restart
 // ---------------------------------------------------------------------------
-function runRestart() {
+async function runRestart() {
   if (isRunning()) {
     const pid = parseInt(fs.readFileSync(PID_PATH, 'utf-8').trim(), 10);
     try {
@@ -797,11 +809,12 @@ function runRestart() {
     try { fs.unlinkSync(PID_PATH); } catch { /* ignore */ }
     // Brief pause to let the process exit and release the Telegram polling connection
     const wait = (ms) => new Promise(r => setTimeout(r, ms));
-    wait(1000).then(() => runStart());
+    await wait(1000);
+    await runStart();
     return;
   }
   // Not running — just start
-  runStart();
+  await runStart();
 }
 
 // ---------------------------------------------------------------------------

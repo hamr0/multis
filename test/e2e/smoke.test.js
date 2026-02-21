@@ -50,12 +50,18 @@ describe('Module loading (smoke)', () => {
 
 describe('CLI smoke', () => {
   it('multis doctor exits cleanly', () => {
-    const result = execFileSync(NODE, ['bin/multis.js', 'doctor'], {
-      cwd: ROOT,
-      timeout: 15000,
-      stdio: 'pipe',
-      encoding: 'utf-8',
-    });
+    let result;
+    try {
+      result = execFileSync(NODE, ['bin/multis.js', 'doctor'], {
+        cwd: ROOT,
+        timeout: 15000,
+        stdio: 'pipe',
+        encoding: 'utf-8',
+      });
+    } catch (err) {
+      // doctor exits 1 when checks fail (e.g. Beeper Desktop not running) — that's not a crash
+      result = err.stdout || '';
+    }
     assert.match(result, /checks passed/);
   });
 });
