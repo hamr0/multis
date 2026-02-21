@@ -33,7 +33,7 @@ class BeeperPlatform extends Platform {
     this.token = this._loadToken();
     if (!this.token) {
       console.error('Beeper: no token found. Run: node src/cli/setup-beeper.js');
-      return;
+      return false;
     }
 
     // Verify token and discover self IDs
@@ -47,7 +47,7 @@ class BeeperPlatform extends Platform {
       console.log(`Beeper: connected (${list.length} accounts)`);
     } catch (err) {
       console.error(`Beeper: token invalid or Desktop not running — ${err.message}`);
-      return;
+      return false;
     }
 
     // Seed _lastSeen with current message IDs so we don't process old messages
@@ -58,6 +58,7 @@ class BeeperPlatform extends Platform {
     this._lastPollTime = Date.now();
     this._pollTimer = setInterval(() => this._poll(), this.pollInterval);
     console.log(`Beeper: polling every ${this.pollInterval}ms for / commands`);
+    return true;
   }
 
   async stop() {

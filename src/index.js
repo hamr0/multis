@@ -55,7 +55,10 @@ async function main() {
   logAudit({ action: 'bot_start', platforms: platforms.map(p => p.name), paired_users: config.allowed_users.length });
 
   for (const p of platforms) {
-    await p.start();
+    const ok = await p.start();
+    if (ok === false && p.name === 'beeper') {
+      console.warn('⚠ Beeper Desktop not reachable. Start Beeper Desktop and restart multis.');
+    }
   }
 
   console.log(`Running on: ${platforms.map(p => p.name).join(', ')}`);

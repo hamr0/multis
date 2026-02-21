@@ -883,7 +883,14 @@ async function runDoctor() {
       }
     }
     const netStr = networks.size > 0 ? ` (${[...networks].join(', ')})` : '';
-    profileRows.push(['Beeper', `${host}${netStr}`]);
+    let beeperReachable = false;
+    try {
+      const fullUrl = url.startsWith('http') ? url : `http://${url}`;
+      await fetch(`${fullUrl}/v1/spec`, { signal: AbortSignal.timeout(2000) });
+      beeperReachable = true;
+    } catch { /* Desktop not reachable */ }
+    const beeperStatus = beeperReachable ? ok : fail;
+    profileRows.push(['Beeper', `${host}${netStr} ${beeperStatus}`]);
   } else {
     profileRows.push(['Beeper', dim('disabled')]);
   }
@@ -1038,6 +1045,22 @@ async function runDoctor() {
     const auditPath = PATHS.auditLog();
     return { ok: true, detail: fs.existsSync(auditPath) ? 'exists' : 'not yet created' };
   });
+
+  // Beeper API (async check — can't use sync check() helper)
+  if (config?.platforms?.beeper?.enabled) {
+    const url = config.platforms.beeper.url || 'http://localhost:23373';
+    const fullUrl = url.startsWith('http') ? url : `http://${url}`;
+    let beeperOk = false;
+    try {
+      await fetch(`${fullUrl}/v1/spec`, { signal: AbortSignal.timeout(2000) });
+      beeperOk = true;
+    } catch { /* Desktop not reachable */ }
+    checks.push({
+      name: 'Beeper API',
+      ok: beeperOk,
+      detail: beeperOk ? 'Desktop reachable' : 'Desktop not reachable — start Beeper Desktop'
+    });
+  }
 
   // Print passing checks
   const passing = checks.filter(c => c.ok);
