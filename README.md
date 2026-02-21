@@ -27,7 +27,7 @@ npx multis init         # interactive setup wizard
 multis start            # run as background daemon
 ```
 
-See the **[Customer Guide](docs/customer-guide.md)** for full setup instructions, command reference, and troubleshooting.
+See the **[Customer Guide](docs/01-product/customer-guide.md)** for full setup instructions, command reference, and troubleshooting.
 
 ## How It Works
 
