@@ -682,7 +682,9 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
 
   const loop = new Loop({ provider: wrappedProvider, system, maxRounds, retry, checkpoint, throwOnError: false });
   const result = await loop.run(messages, adapted);
-  if (result.error) throw result.error;
+  if (result.error) {
+    throw result.error instanceof Error ? result.error : new Error(String(result.error));
+  }
   return result.text || '(no response)';
 }
 
@@ -850,7 +852,7 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
       });
     }
   } catch (err) {
-    await platform.send(msg.chatId, `LLM error: ${err.message}`);
+    await platform.send(msg.chatId, `LLM error: ${err.message || err}`);
   }
 }
 
