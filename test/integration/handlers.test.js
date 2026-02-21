@@ -643,7 +643,7 @@ describe('buildAgentRegistry', () => {
     const registry = buildAgentRegistry({ llm: { model: 'test-model' } }, llm);
     assert.strictEqual(registry.size, 1);
     assert.ok(registry.has('default'));
-    assert.strictEqual(registry.get('default').llm, llm);
+    assert.strictEqual(registry.get('default').provider, llm);
     assert.strictEqual(registry.get('default').persona, null);
   });
 
@@ -684,8 +684,8 @@ describe('buildAgentRegistry', () => {
     assert.strictEqual(registry.size, 2);
     assert.strictEqual(registry.get('assistant').persona, 'Helpful assistant');
     assert.strictEqual(registry.get('coder').persona, 'Senior dev');
-    // Same model → reuses same LLM
-    assert.strictEqual(registry.get('coder').llm, llm);
+    // Same model → reuses same provider
+    assert.strictEqual(registry.get('coder').provider, llm);
   });
 
   it('returns fallback when all agents are invalid', () => {
@@ -702,8 +702,8 @@ describe('buildAgentRegistry', () => {
 describe('resolveAgent', () => {
   const llm = mockLLM();
   const registry = new Map([
-    ['assistant', { llm, persona: 'Helpful', model: 'test' }],
-    ['coder', { llm, persona: 'Senior dev', model: 'test' }]
+    ['assistant', { provider: llm, persona: 'Helpful', model: 'test' }],
+    ['coder', { provider: llm, persona: 'Senior dev', model: 'test' }]
   ]);
 
   it('@mention resolves to named agent and strips prefix', () => {
@@ -829,9 +829,11 @@ describe('Agent routing in /ask', () => {
     await router(msg('/ask @coder how do I parse JSON?'), platform);
     // Should have [coder] prefix since multiple agents
     assert.match(platform.lastTo('chat1').text, /\[coder\] code answer/);
-    // System prompt should use coder persona
+    // System prompt should use coder persona (bareagent prepends system message)
     const call = llm.calls[0];
-    assert.match(call.opts.system, /senior developer/i);
+    const systemMsg = call.messages.find(m => m.role === 'system');
+    assert.ok(systemMsg, 'should have system message');
+    assert.match(systemMsg.content, /senior developer/i);
   });
 
   it('single agent does not prefix response', async () => {

@@ -3,15 +3,18 @@ const { logAudit } = require('../governance/audit');
 const { addAllowedUser, isOwner, saveConfig, getMultisDir, PATHS } = require('../config');
 const { execCommand, readFile, listSkills } = require('../skills/executor');
 const { DocumentIndexer } = require('../indexer/index');
-const { createLLMClient } = require('../llm/client');
+const { createProvider, simpleGenerate } = require('../llm/provider-adapter');
 const { buildRAGPrompt, buildMemorySystemPrompt } = require('../llm/prompts');
 const { getMemoryManager } = require('../memory/manager');
 const { runCapture } = require('../memory/capture');
 const { PinManager, hashPin } = require('../security/pin');
 const { detectInjection, logInjectionAttempt } = require('../security/injection');
-const { buildToolRegistry, getToolsForUser, toLLMSchemas, loadToolsConfig } = require('../tools/registry');
-const { executeTool } = require('../tools/executor');
+const { buildToolRegistry, getToolsForUser, loadToolsConfig } = require('../tools/registry');
+const { adaptTools } = require('../tools/adapter');
 const { getPlatform } = require('../tools/platform');
+const { Loop, Retry, CircuitBreaker } = require('bare-agent');
+const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler');
+const { createCheckpoint, handleApprovalReply, hasPendingApproval } = require('./checkpoint');
 
 // ---------------------------------------------------------------------------
 // Agent registry + resolution
@@ -22,8 +25,8 @@ const { getPlatform } = require('../tools/platform');
  * Each agent: { llm, persona, model }. Reuses globalLlm when model matches.
  * Falls back to single-entry map with no persona if config.agents is missing/invalid.
  */
-function buildAgentRegistry(config, globalLlm) {
-  const fallback = new Map([['default', { llm: globalLlm, persona: null, model: config.llm?.model }]]);
+function buildAgentRegistry(config, globalProvider) {
+  const fallback = new Map([['default', { provider: globalProvider, persona: null, model: config.llm?.model }]]);
 
   if (!config.agents) return fallback;
 
@@ -45,16 +48,16 @@ function buildAgentRegistry(config, globalLlm) {
       continue;
     }
 
-    let agentLlm = globalLlm;
-    if (agent.model && agent.model !== globalModel && globalLlm) {
+    let agentProvider = globalProvider;
+    if (agent.model && agent.model !== globalModel && globalProvider) {
       try {
-        agentLlm = createLLMClient({ ...config.llm, model: agent.model });
+        agentProvider = createProvider({ ...config.llm, model: agent.model });
       } catch (err) {
         console.warn(`Agent "${name}" LLM init failed (${err.message}) — using global.`);
       }
     }
 
-    registry.set(name, { llm: agentLlm, persona: agent.persona, model: agent.model || globalModel });
+    registry.set(name, { provider: agentProvider, persona: agent.persona, model: agent.model || globalModel });
   }
 
   if (registry.size === 0) {
@@ -135,12 +138,13 @@ function createMessageRouter(config, deps = {}) {
     ...config.memory
   };
 
-  // Create LLM client if configured (null if no API key)
-  let llm = deps.llm || null;
-  if (!llm) {
+  // Create LLM provider if configured (null if no API key)
+  // Accept deps.provider (new) or deps.llm (legacy test compat)
+  let provider = deps.provider || deps.llm || null;
+  if (!provider) {
     try {
       if (config.llm?.apiKey || config.llm?.provider === 'ollama') {
-        llm = createLLMClient(config.llm);
+        provider = createProvider(config.llm);
       }
     } catch (err) {
       console.warn(`LLM init skipped: ${err.message}`);
@@ -148,7 +152,7 @@ function createMessageRouter(config, deps = {}) {
   }
 
   // Build agent registry
-  const agentRegistry = deps.agentRegistry || buildAgentRegistry(config, llm);
+  const agentRegistry = deps.agentRegistry || buildAgentRegistry(config, provider);
 
   // Build tool registry (platform-filtered, config-filtered)
   const toolsConfig = deps.toolsConfig || loadToolsConfig();
@@ -169,9 +173,14 @@ function createMessageRouter(config, deps = {}) {
       return;
     }
 
-    // Interactive replies (PIN, mode picker) must be checked before routeAs
+    // Interactive replies (PIN, checkpoint, mode picker) must be checked before routeAs
     // so they aren't swallowed by natural/silent/business routing
     const text = msg.text || '';
+
+    // Check for checkpoint approval reply (yes/no)
+    if (hasPendingApproval(msg.senderId) && handleApprovalReply(msg.senderId, text)) {
+      return;
+    }
 
     // Check for PIN input (4-6 digit text from user with pending command)
     if (pinManager.hasPending(msg.senderId) && /^\d{4,6}$/.test(text.trim())) {
@@ -200,7 +209,7 @@ function createMessageRouter(config, deps = {}) {
       pinManager.clearPending(msg.senderId);
       // Re-route the stored command
       msg = stored.msg;
-      await executeCommand(stored.command, stored.args, msg, platform, config, indexer, llm, memoryManagers, memCfg, pinManager, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
+      await executeCommand(stored.command, stored.args, msg, platform, config, indexer, provider, memoryManagers, memCfg, pinManager, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
       return;
     }
 
@@ -245,7 +254,7 @@ function createMessageRouter(config, deps = {}) {
     if (msg.routeAs === 'natural' || msg.routeAs === 'business') {
       // Business: anyone can get a response (customers via Beeper)
       if (msg.routeAs !== 'business' && !isPaired(msg, config)) return;
-      await routeAsk(msg, platform, config, indexer, llm, msg.text, getMem, memCfg, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
+      await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
       return;
     }
 
@@ -284,14 +293,14 @@ function createMessageRouter(config, deps = {}) {
       }
     }
 
-    await executeCommand(command, args, msg, platform, config, indexer, llm, getMem, memCfg, pinManager, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry });
+    await executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, escalationRetries, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry });
   };
 
   router.registerPlatform = (name, instance) => platformRegistry.set(name, instance);
   return router;
 }
 
-async function executeCommand(command, args, msg, platform, config, indexer, llm, getMem, memCfg, pinManager, escalationRetries, agentRegistry, toolDeps) {
+async function executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, escalationRetries, agentRegistry, toolDeps) {
     switch (command) {
       case 'status':
         await routeStatus(msg, platform, config);
@@ -318,7 +327,7 @@ async function executeCommand(command, args, msg, platform, config, indexer, llm
         await platform.send(msg.chatId, `Available skills:\n${listSkills()}`);
         break;
       case 'ask':
-        await routeAsk(msg, platform, config, indexer, llm, args, getMem, memCfg, escalationRetries, agentRegistry, toolDeps);
+        await routeAsk(msg, platform, config, indexer, provider, args, getMem, memCfg, escalationRetries, agentRegistry, toolDeps);
         break;
       case 'memory':
         await routeMemory(msg, platform, config, getMem);
@@ -341,13 +350,28 @@ async function executeCommand(command, args, msg, platform, config, indexer, llm
       case 'pin':
         await routePinChange(msg, platform, config, pinManager);
         break;
+      case 'remind':
+        await routeRemind(msg, platform, config, provider, toolDeps);
+        break;
+      case 'cron':
+        await routeCron(msg, platform, config, provider, toolDeps);
+        break;
+      case 'jobs':
+        await routeJobs(msg, platform, config);
+        break;
+      case 'cancel':
+        await routeCancel(msg, platform, config, args);
+        break;
+      case 'plan':
+        await routePlan(msg, platform, config, provider, args, toolDeps);
+        break;
       case 'help':
         await routeHelp(msg, platform, config);
         break;
       default:
         // Telegram plain text (no recognized command) → implicit ask
         if (msg.platform === 'telegram' && !msg.text.startsWith('/')) {
-          await routeAsk(msg, platform, config, indexer, llm, msg.text, getMem, memCfg, escalationRetries, agentRegistry, toolDeps);
+          await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, escalationRetries, agentRegistry, toolDeps);
         }
         break;
     }
@@ -585,49 +609,55 @@ async function routeDocs(msg, platform, config, indexer) {
   await platform.send(msg.chatId, lines.join('\n') || 'No documents indexed yet.');
 }
 
-/**
- * Agent loop — calls LLM with tools, executes tool calls, feeds results back.
- * Loops until LLM returns text-only or max rounds reached.
- * @returns {Promise<string>} — final text answer
- */
-async function runAgentLoop(llm, messages, toolSchemas, tools, opts = {}) {
-  const { system, maxRounds = 5, ctx } = opts;
-  const loopMessages = [...messages];
-
-  for (let round = 0; round < maxRounds; round++) {
-    const response = await llm.generateWithToolsAndMessages(loopMessages, toolSchemas, { system });
-    const parsed = llm.parseToolResponse(response);
-
-    // No tool calls — return the text
-    if (!parsed.toolCalls || parsed.toolCalls.length === 0) {
-      return parsed.text || '(no response)';
-    }
-
-    // Add assistant message to conversation
-    loopMessages.push(llm.formatAssistantMessage(response));
-
-    // Execute each tool call and feed results back
-    for (const tc of parsed.toolCalls) {
-      const result = await executeTool(tc, tools, ctx);
-      loopMessages.push(llm.formatToolResult(tc.id, result));
-    }
-
-    // If the LLM also returned text alongside tool calls, we continue
-    // to let it process the tool results
+// Shared circuit breaker (one per process, resets on provider recovery)
+let _circuitBreaker = null;
+function getCircuitBreaker(config) {
+  if (!_circuitBreaker) {
+    const cb = config?.llm?.circuit_breaker || {};
+    _circuitBreaker = new CircuitBreaker({
+      threshold: cb.threshold || 5,
+      resetAfter: cb.resetAfter || 30000,
+    });
   }
-
-  // Max rounds reached — do one final text-only call
-  const finalResponse = await llm.generateWithMessages(loopMessages, { system });
-  return finalResponse || '(max tool rounds reached)';
+  return _circuitBreaker;
 }
 
-async function routeAsk(msg, platform, config, indexer, llm, question, getMem, memCfg, escalationRetries, agentRegistry, toolDeps = {}) {
+/**
+ * Agent loop — uses bareagent Loop to call LLM with tools.
+ * Includes retry (429/5xx) and circuit breaker for resilience.
+ * @returns {Promise<string>} — final text answer
+ */
+async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
+  const { system, maxRounds = 5, ctx, config } = opts;
+  const adapted = adaptTools(tools, ctx);
+
+  // Build retry + circuit breaker from config
+  const retryCfg = config?.llm?.retry || {};
+  const retry = new Retry({
+    maxAttempts: retryCfg.maxAttempts || 3,
+    timeout: retryCfg.timeout || 30000,
+  });
+  const cb = getCircuitBreaker(config);
+  const wrappedProvider = cb.wrapProvider(agentProvider, config?.llm?.provider || 'default');
+
+  // Checkpoint for human approval on dangerous tools (if platform context available)
+  const checkpoint = ctx.platform
+    ? createCheckpoint(ctx.platform, ctx.chatId, ctx.senderId, config)
+    : null;
+
+  const loop = new Loop({ provider: wrappedProvider, system, maxRounds, retry, checkpoint, throwOnError: false });
+  const result = await loop.run(messages, adapted);
+  if (result.error) throw result.error;
+  return result.text || '(no response)';
+}
+
+async function routeAsk(msg, platform, config, indexer, provider, question, getMem, memCfg, escalationRetries, agentRegistry, toolDeps = {}) {
   if (!question) {
     await platform.send(msg.chatId, 'Usage: /ask <question>');
     return;
   }
 
-  if (!llm) {
+  if (!provider) {
     await platform.send(msg.chatId, 'LLM not configured. Set an API key in ~/.multis/config.json or .env');
     return;
   }
@@ -707,8 +737,8 @@ async function routeAsk(msg, platform, config, indexer, llm, question, getMem, m
     // Resolve agent (handles @mention, per-chat, mode default, fallback)
     const resolved = agentRegistry && agentRegistry.size > 0
       ? resolveAgent(question, msg.chatId, config, agentRegistry)
-      : { agent: { llm, persona: null }, name: 'default', text: question };
-    const agentLlm = resolved.agent.llm || llm;
+      : { agent: { provider, persona: null }, name: 'default', text: question };
+    const agentProvider = resolved.agent.provider || resolved.agent.llm || provider;
     const agentPersona = resolved.agent.persona;
     const cleanQuestion = resolved.text;
 
@@ -734,19 +764,14 @@ async function routeAsk(msg, platform, config, indexer, llm, question, getMem, m
     // --- Agent loop with tool calling ---
     const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5 } = toolDeps;
     const userTools = getToolsForUser(allTools, admin, tCfg);
-    const toolSchemas = toLLMSchemas(userTools);
-    const hasTools = toolSchemas.length > 0 && agentLlm.generateWithToolsAndMessages;
+    const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform };
 
-    let answer;
-    if (hasTools) {
-      answer = await runAgentLoop(agentLlm, messages, toolSchemas, userTools, {
-        system,
-        maxRounds: maxToolRounds,
-        ctx: { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform }
-      });
-    } else {
-      answer = await agentLlm.generateWithMessages(messages, { system });
-    }
+    const answer = await runAgentLoop(agentProvider, messages, userTools, {
+      system,
+      maxRounds: maxToolRounds,
+      ctx,
+      config
+    });
 
     // Prefix with agent name only when multiple agents exist
     const prefixed = agentRegistry && agentRegistry.size > 1
@@ -773,7 +798,7 @@ async function routeAsk(msg, platform, config, indexer, llm, question, getMem, m
     // Fire-and-forget capture if threshold reached
     if (mem && memCfg && mem.shouldCapture(memCfg.capture_threshold)) {
       const captureRole = admin ? 'admin' : `user:${msg.chatId}`;
-      runCapture(msg.chatId, mem, llm, indexer, {
+      runCapture(msg.chatId, mem, simpleGenerate(provider), indexer, {
         keepLast: 5,
         role: captureRole,
         maxSections: memCfg.memory_max_sections
@@ -1099,6 +1124,141 @@ async function routeAgents(msg, platform, agentRegistry) {
   await platform.send(msg.chatId, lines.join('\n'));
 }
 
+// ---------------------------------------------------------------------------
+// Scheduler commands: /remind, /cron, /jobs, /cancel
+// ---------------------------------------------------------------------------
+
+async function routeRemind(msg, platform, config, provider, toolDeps) {
+  if (!isOwner(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, 'Owner only command.');
+    return;
+  }
+  const parsed = parseRemind(msg.parseCommand()?.args);
+  if (!parsed) {
+    await platform.send(msg.chatId, 'Usage: /remind <duration> <action>\nExample: /remind 2h check inbox');
+    return;
+  }
+
+  const scheduler = getScheduler(async (job) => {
+    await platform.send(msg.chatId, `Reminder: ${job.action}`);
+  });
+  const job = scheduler.add({ schedule: parsed.schedule, action: parsed.action, type: 'one-shot' });
+  await platform.send(msg.chatId, `Reminder set: "${parsed.action}" in ${parsed.schedule} [${job.id}]`);
+  logAudit({ action: 'remind', user_id: msg.senderId, schedule: parsed.schedule, jobAction: parsed.action });
+}
+
+async function routeCron(msg, platform, config, provider, toolDeps) {
+  if (!isOwner(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, 'Owner only command.');
+    return;
+  }
+  const parsed = parseCron(msg.parseCommand()?.args);
+  if (!parsed) {
+    await platform.send(msg.chatId, 'Usage: /cron <cron-expression> <action>\nExample: /cron 0 9 * * 1-5 morning briefing');
+    return;
+  }
+
+  const scheduler = getScheduler(async (job) => {
+    await platform.send(msg.chatId, `Scheduled: ${job.action}`);
+  });
+  const job = scheduler.add({ schedule: parsed.schedule, action: parsed.action, type: 'recurring' });
+  await platform.send(msg.chatId, `Cron job added: "${parsed.action}" [${job.id}]`);
+  logAudit({ action: 'cron', user_id: msg.senderId, schedule: parsed.schedule, jobAction: parsed.action });
+}
+
+async function routeJobs(msg, platform, config) {
+  if (!isOwner(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, 'Owner only command.');
+    return;
+  }
+  const scheduler = getScheduler();
+  const jobs = scheduler.list();
+  if (jobs.length === 0) {
+    await platform.send(msg.chatId, 'No active jobs.');
+    return;
+  }
+  const lines = jobs.map(formatJob);
+  await platform.send(msg.chatId, `Active jobs:\n${lines.join('\n')}`);
+}
+
+async function routeCancel(msg, platform, config, jobId) {
+  if (!isOwner(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, 'Owner only command.');
+    return;
+  }
+  if (!jobId) {
+    await platform.send(msg.chatId, 'Usage: /cancel <job-id>');
+    return;
+  }
+  const scheduler = getScheduler();
+  const removed = scheduler.remove(jobId.trim());
+  if (removed) {
+    await platform.send(msg.chatId, `Job ${jobId} cancelled.`);
+    logAudit({ action: 'cancel_job', user_id: msg.senderId, jobId });
+  } else {
+    await platform.send(msg.chatId, `Job ${jobId} not found.`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Planner command: /plan
+// ---------------------------------------------------------------------------
+
+async function routePlan(msg, platform, config, provider, goal, toolDeps) {
+  if (!isOwner(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, 'Owner only command.');
+    return;
+  }
+  if (!goal) {
+    await platform.send(msg.chatId, 'Usage: /plan <goal>\nExample: /plan organize my documents');
+    return;
+  }
+  if (!provider) {
+    await platform.send(msg.chatId, 'LLM not configured.');
+    return;
+  }
+
+  try {
+    const { Planner, runPlan } = require('bare-agent');
+    const planner = new Planner({ provider });
+
+    await platform.send(msg.chatId, `Planning: "${goal}"...`);
+    const steps = await planner.plan(goal);
+
+    if (!steps || steps.length === 0) {
+      await platform.send(msg.chatId, 'Could not break this into steps. Try rephrasing.');
+      return;
+    }
+
+    // Show the plan
+    const planText = steps.map((s, i) => `${i + 1}. ${s.action}`).join('\n');
+    await platform.send(msg.chatId, `Plan:\n${planText}\n\nExecuting...`);
+
+    // Execute steps sequentially via the agent loop
+    const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5 } = toolDeps;
+    const admin = isOwner(msg.senderId, config, msg);
+    const userTools = getToolsForUser(allTools, admin, tCfg);
+
+    for (const step of steps) {
+      try {
+        const answer = await runAgentLoop(provider, [{ role: 'user', content: step.action }], userTools, {
+          maxRounds: maxToolRounds,
+          ctx: { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, platform },
+          config
+        });
+        await platform.send(msg.chatId, `Step "${step.action}": ${answer}`);
+      } catch (err) {
+        await platform.send(msg.chatId, `Step "${step.action}" failed: ${err.message}`);
+      }
+    }
+
+    await platform.send(msg.chatId, 'Plan complete.');
+    logAudit({ action: 'plan', user_id: msg.senderId, goal, steps: steps.length });
+  } catch (err) {
+    await platform.send(msg.chatId, `Plan error: ${err.message}`);
+  }
+}
+
 async function routeHelp(msg, platform, config) {
   const cmds = [
     'multis commands:',
@@ -1124,6 +1284,11 @@ async function routeHelp(msg, platform, config) {
       '/mode - List chat modes / /mode <business|silent|off> [target] (owner)',
       '/agent [name] - Show/set agent for this chat (owner)',
       '/agents - List all agents (owner)',
+      '/remind <duration> <action> - Set a reminder (owner)',
+      '/cron <expression> <action> - Recurring scheduled task (owner)',
+      '/jobs - List active scheduled jobs (owner)',
+      '/cancel <id> - Cancel a scheduled job (owner)',
+      '/plan <goal> - Break a goal into steps and execute (owner)',
       'Send a file to index it (owner, Telegram only)',
       'Use @agentname to invoke a specific agent per-message'
     );

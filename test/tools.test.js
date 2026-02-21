@@ -6,8 +6,8 @@ const os = require('os');
 
 const { getPlatform } = require('../src/tools/platform');
 const { TOOLS } = require('../src/tools/definitions');
-const { buildToolRegistry, getToolsForUser, toLLMSchemas, DEFAULT_OWNER_ONLY } = require('../src/tools/registry');
-const { executeTool } = require('../src/tools/executor');
+const { buildToolRegistry, getToolsForUser, DEFAULT_OWNER_ONLY } = require('../src/tools/registry');
+const { adaptTools } = require('../src/tools/adapter');
 const { setMultisDir } = require('../src/config');
 
 // ---------------------------------------------------------------------------
@@ -145,23 +145,11 @@ describe('getToolsForUser', () => {
   });
 });
 
-describe('toLLMSchemas', () => {
-  it('converts tools to LLM schema format', () => {
-    const tools = [TOOLS[0]]; // exec
-    const schemas = toLLMSchemas(tools);
-    assert.strictEqual(schemas.length, 1);
-    assert.strictEqual(schemas[0].name, 'exec');
-    assert.ok(schemas[0].description);
-    assert.ok(schemas[0].inputSchema);
-    assert.strictEqual(schemas[0].inputSchema.type, 'object');
-  });
-});
-
 // ---------------------------------------------------------------------------
-// Tool executor
+// Tool adapter (bareagent format)
 // ---------------------------------------------------------------------------
 
-describe('executeTool', () => {
+describe('adaptTools', () => {
   let tmpDir;
 
   beforeEach(() => {
@@ -172,14 +160,25 @@ describe('executeTool', () => {
       fs.mkdirSync(path.join(multisDir, sub), { recursive: true });
     }
     setMultisDir(multisDir);
-    // Write governance that allows everything
     fs.writeFileSync(path.join(multisDir, 'auth', 'governance.json'), JSON.stringify({
       commands: { allowlist: ['.*'], denylist: [], requireConfirmation: [] },
       paths: { allowed: ['.*'], denied: [] }
     }));
   });
 
-  it('executes search_docs tool', async () => {
+  it('converts multis tool format to bareagent format', () => {
+    const tools = [TOOLS[0]]; // exec
+    const ctx = { senderId: 'u', chatId: 'c', isOwner: true, runtimePlatform: 'linux' };
+    const adapted = adaptTools(tools, ctx);
+    assert.strictEqual(adapted.length, 1);
+    assert.strictEqual(adapted[0].name, 'exec');
+    assert.ok(adapted[0].description);
+    assert.ok(adapted[0].parameters);
+    assert.strictEqual(adapted[0].parameters.type, 'object');
+    assert.strictEqual(typeof adapted[0].execute, 'function');
+  });
+
+  it('adapted tool executes with ctx closure', async () => {
     const searchTool = TOOLS.find(t => t.name === 'search_docs');
     const ctx = {
       senderId: 'user1',
@@ -190,37 +189,21 @@ describe('executeTool', () => {
         search: () => [{ sectionPath: ['FAQ'], name: 'doc.pdf', content: 'The answer is 42' }]
       }
     };
-    const result = await executeTool({ name: 'search_docs', input: { query: 'answer' } }, [searchTool], ctx);
+    const adapted = adaptTools([searchTool], ctx);
+    const result = await adapted[0].execute({ query: 'answer' });
     assert.match(result, /42/);
   });
 
-  it('executes remember tool', async () => {
-    const rememberTool = TOOLS.find(t => t.name === 'remember');
-    let saved = null;
-    const ctx = {
-      senderId: 'user1',
-      chatId: 'chat1',
-      isOwner: true,
-      runtimePlatform: 'linux',
-      memoryManager: { appendMemory: (note) => { saved = note; } }
-    };
-    const result = await executeTool({ name: 'remember', input: { note: 'buy milk' } }, [rememberTool], ctx);
-    assert.strictEqual(result, 'Noted.');
-    assert.strictEqual(saved, 'buy milk');
-  });
-
-  it('returns error for unknown tool', async () => {
-    const result = await executeTool({ name: 'nonexistent', input: {} }, [], {});
-    assert.match(result, /Unknown tool/);
-  });
-
-  it('returns error message on exception', async () => {
+  it('adapted tool catches errors', async () => {
     const badTool = {
       name: 'boom',
+      description: 'boom',
+      input_schema: { type: 'object', properties: {} },
       execute: async () => { throw new Error('kaboom'); }
     };
     const ctx = { senderId: 'u', chatId: 'c' };
-    const result = await executeTool({ name: 'boom', input: {} }, [badTool], ctx);
+    const adapted = adaptTools([badTool], ctx);
+    const result = await adapted[0].execute({});
     assert.match(result, /kaboom/);
   });
 });
