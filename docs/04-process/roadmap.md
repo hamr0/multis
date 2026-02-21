@@ -1,6 +1,6 @@
 # Roadmap: Post-POC
 
-> POC 1-6 complete. All 300 tests passing. Next: dogfood, stabilize, ship.
+> POC 1-6 complete. All 357 tests passing. Next: dogfood, stabilize, ship.
 
 ## What's Built (POC 1-6 Summary)
 
@@ -18,7 +18,7 @@
 - **PIN auth**: 4-6 digit, SHA-256 hashed, 24h timeout, 3-fail lockout (`src/security/pin.js`)
 - **Prompt injection detection**: pattern matching + dedicated audit log (`src/security/injection.js`)
 - **Scoped search**: SQL-enforced `WHERE scope IN (...)` — kb, admin, user:chatId
-- **Business escalation**: 4-tier (KB → clarify → escalate → human) in routeAsk
+- **Business persona**: structured config (`config.business`) + `buildBusinessPrompt()` compiles name/greeting/topics/rules into system prompt. `/business setup` conversational wizard, `/business show|clear`. LLM always responds in business mode (no canned escalation on 0 chunks). Keyword escalation preserved.
 - **Retention cleanup**: log cleanup (30d) + FTS pruning (90d user, 365d admin), runs on startup + daily (`src/maintenance/cleanup.js`)
 - **Tool-calling agent loop**: LLM executes actions via tools, multi-round (`src/tools/`, `src/bot/handlers.js:runAgentLoop`)
 - **Tools**: exec, read_file, send_file, grep_files, find_files, search_docs, recall_memory, remember, open_url, media_control, notify, clipboard, screenshot, system_info, wifi, brightness + Android tools
@@ -116,6 +116,22 @@ Start from scratch as if you're a new user. Validates the full install → first
 - [ ] Send message from contact in business-mode chat → auto-responds?
 - [ ] Send message from friend in silent-mode chat → archived but no response?
 
+### A4b. Business Persona
+
+- [ ] `/business setup` — full wizard flow (name → greeting → topics → rules → confirm)
+- [ ] `/business setup` → "cancel" at any step aborts?
+- [ ] `/business setup` → "skip" for greeting skips?
+- [ ] `/business setup` → multiple topics with descriptions?
+- [ ] `/business setup` → "done" on empty topics/rules works?
+- [ ] `/business show` — displays saved persona?
+- [ ] `/business clear` — resets name/greeting/topics/rules?
+- [ ] `/business` (no subcommand) — shows usage?
+- [ ] Non-owner `/business setup` — rejected?
+- [ ] Set business persona → set chat to business mode → send customer message with 0 KB matches → LLM responds naturally (not canned)?
+- [ ] Set business persona → customer sends "refund" → keyword escalation fires, admin notified?
+- [ ] Set business persona with topics → customer asks off-topic → LLM stays within topic boundaries?
+- [ ] `config.json` has correct business block after wizard save?
+
 ### A5. Multi-Agent
 
 - [ ] Add second agent to config.json (e.g. "coder" with different persona)
@@ -191,10 +207,9 @@ After dogfooding, prepare for others to install.
 - [ ] `multis --version` prints version
 
 ### B2. Onboarding Docs
-- [ ] Getting started guide (5-minute path to first `/ask`)
-- [ ] Configuration reference (all config.json fields)
-- [ ] Beeper setup guide (standalone, not just the script)
-- [ ] Troubleshooting / FAQ
+- [x] Customer guide — comprehensive (install, setup, commands, modes, business, indexing, hosting, troubleshooting) → `docs/01-product/customer-guide.md`
+- [ ] Configuration reference (all config.json fields — may fold into customer guide)
+- [ ] Beeper setup guide (standalone, not just the script — covered in customer guide section 6)
 
 ### B3. Stability
 - [ ] CI: GitHub Actions running `npm test` on push
@@ -207,16 +222,10 @@ After dogfooding, prepare for others to install.
 
 Only tackle these if dogfooding reveals they matter.
 
-### C1. Scheduler + Automation (Tier 2 — ~345 lines)
+### C1. Automation Extensions (nice-to-have)
 
-Full design: `docs/02-features/agent-evolution.md`
+Scheduler (Tier 2A) is done — `/remind`, `/cron`, `/jobs`, `/cancel` via bare-agent `Scheduler`.
 
-- [ ] **Tier 2A: Scheduler** (~210 lines) — `/remind`, `/cron`, `/jobs`, `/cancel`
-  - [ ] `src/scheduler/parser.js` — parse remind/cron syntax into job objects
-  - [ ] `src/scheduler/index.js` — tick loop (60s), persist jobs.json, load on startup
-  - [ ] `src/scheduler/runner.js` — build agent turn, run tool loop, deliver via platform.send
-  - [ ] Handler additions in handlers.js — routeRemind, routeCron, routeJobs, routeCancel
-  - [ ] `cron-parser` dep for 5-field cron expressions
 - [ ] **Tier 2B: Heartbeat** (~65 lines) — periodic awareness, active hours, timezone-aware
   - [ ] `src/scheduler/heartbeat.js` — interval check, build prompt from checklist, run agent loop
   - [ ] Config: `heartbeat.enabled`, `interval_minutes`, `active_hours`, `checklist`
@@ -226,11 +235,10 @@ Full design: `docs/02-features/agent-evolution.md`
 
 ### C2. Other Features
 
-- [ ] `fetch_url` tool — lightweight vanilla `https.get` + HTML-to-text for agent web lookups (~30 lines). Covers 90% of cases where agent needs to check a web page for a customer answer. Heavy browser automation (mcprune/Playwright) deferred until fetch proves insufficient.
 - [ ] Tier 2 PDF parsing (font-size heading detection)
-- [ ] File upload indexing on Beeper (not just Telegram)
 - [ ] ACT-R activation visible in `/search` results
-- [ ] `/index` for URLs (fetch + parse web pages)
+- [ ] `fetch_url` tool + `/index` for URLs (see blueprint section 16)
+- [ ] File upload indexing on Beeper — already done (POC6, `handleBeeperFileIndex`)
 
 ---
 

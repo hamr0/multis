@@ -1010,6 +1010,8 @@ Broadcast groups, agent handoffs, parallel execution with result merging. Only r
 
 ### Other Future Enhancements
 
+**`fetch_url` Tool** — Lightweight web lookup for the agent loop. Vanilla `https.get` + HTML-to-text (~30 lines). Agent calls it when KB has no match but an answer might be on a known URL (pricing page, FAQ, docs). Covers 90% of web lookup needs without heavy deps. If JavaScript rendering or interaction is ever needed, upgrade path is mcprune/Playwright (400MB Chromium, full browser automation). Start lightweight, escalate only if fetch proves insufficient.
+
 **Agent Handoffs** — `@billing` mention triggers handoff with context summary. Post-dogfood.
 
 **Concurrent Tasks** — Async task queue for long-running ops. Tool returns `{ status: 'async', taskId }`. Post-dogfood.
