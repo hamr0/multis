@@ -167,13 +167,21 @@ function createMessageRouter(config, deps = {}) {
   const router = async (msg, platform) => {
     // Handle Telegram document uploads
     if (msg._document) {
-      await handleDocumentUpload(msg, platform, config, indexer);
+      if (isOwner(msg.senderId, config, msg)) {
+        await handleDocumentUpload(msg, platform, config, indexer);
+      } else {
+        await handleSilentAttachment(msg, platform, config, indexer, 'telegram');
+      }
       return;
     }
 
     // Handle Beeper file attachments
     if (msg._attachments?.length > 0) {
-      await handleBeeperFileIndex(msg, platform, config, indexer);
+      if (isOwner(msg.senderId, config, msg)) {
+        await handleBeeperFileIndex(msg, platform, config, indexer);
+      } else {
+        await handleSilentAttachment(msg, platform, config, indexer, 'beeper');
+      }
       return;
     }
 
@@ -1616,6 +1624,49 @@ async function handleDocumentUpload(msg, platform, config, indexer) {
   } catch (err) {
     await platform.send(msg.chatId, `Index error: ${err.message}`);
     logAudit({ action: 'index_error', user_id: msg.senderId, filename, error: err.message });
+  }
+}
+
+/**
+ * Silently handle non-admin attachments: index supported docs, ignore the rest.
+ * Never sends a reply to the user.
+ */
+async function handleSilentAttachment(msg, platform, config, indexer, source) {
+  const supported = ['pdf', 'docx', 'md', 'txt'];
+
+  if (source === 'telegram') {
+    const doc = msg._document;
+    if (!doc) return;
+    const filename = doc.file_name || 'unknown';
+    const ext = filename.split('.').pop().toLowerCase();
+    if (!supported.includes(ext)) return;
+
+    try {
+      const scope = `user:${msg.chatId}`;
+      const fileLink = await msg._telegram.getFileLink(doc.file_id);
+      const response = await fetch(fileLink.href);
+      const buffer = Buffer.from(await response.arrayBuffer());
+      const count = await indexer.indexBuffer(buffer, filename, scope);
+      logAudit({ action: 'silent_index', user_id: msg.senderId, filename, chunks: count, scope, platform: 'telegram' });
+    } catch (err) {
+      console.error(`Silent index error (telegram): ${err.message}`);
+    }
+  } else if (source === 'beeper') {
+    const attachment = (msg._attachments || []).find(a => {
+      const ext = (a.fileName || '').split('.').pop().toLowerCase();
+      return supported.includes(ext);
+    });
+    if (!attachment) return;
+
+    try {
+      const scope = `user:${msg.chatId}`;
+      const localPath = await platform.downloadAsset(attachment.srcURL || attachment.id);
+      const buffer = require('fs').readFileSync(localPath);
+      const count = await indexer.indexBuffer(buffer, attachment.fileName, scope);
+      logAudit({ action: 'silent_index', user_id: msg.senderId, filename: attachment.fileName, chunks: count, scope, platform: 'beeper' });
+    } catch (err) {
+      console.error(`Silent index error (beeper): ${err.message}`);
+    }
   }
 }
 

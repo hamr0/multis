@@ -997,7 +997,7 @@ describe('Beeper file indexing', () => {
     assert.match(platform.lastTo('chat1').text, /Unsupported file type/);
   });
 
-  it('non-owner is rejected', async () => {
+  it('non-owner attachment is handled silently (no reply)', async () => {
     const env = createTestEnv({ allowed_users: ['self1', 'other1'], owner_id: 'self1' });
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
@@ -1013,7 +1013,8 @@ describe('Beeper file indexing', () => {
     }];
 
     await router(m, platform);
-    assert.match(platform.lastTo('chat1').text, /Owner only/);
+    // Non-owner attachments are silently handled — no reply sent
+    assert.strictEqual(platform.lastTo('chat1'), undefined);
   });
 });
 
