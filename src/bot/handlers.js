@@ -786,7 +786,10 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
 
     // Build messages array: recent history (excluding the just-appended user msg if already there)
     // Recent already includes the current user message from appendMessage above
-    const messages = recent.map(m => ({ role: m.role, content: m.content }));
+    const messages = recent.map(m => ({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: m.content
+    }));
 
     // If @mention stripped the question, update the last message in recent
     if (cleanQuestion !== question && messages.length > 0) {
