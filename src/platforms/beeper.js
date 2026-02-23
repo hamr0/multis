@@ -160,6 +160,10 @@ class BeeperPlatform extends Platform {
 
           const mode = this._getChatMode(chatId);
 
+          // Off mode: skip non-self messages entirely (no processing, no archiving)
+          // Self messages in personal chats still allowed (owner commands + natural ask)
+          if (mode === 'off' && !isSelf) continue;
+
           // Determine how to route this message
           let routeAs = null;
           let shouldProcess = false;

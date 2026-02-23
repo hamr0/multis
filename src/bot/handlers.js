@@ -177,7 +177,13 @@ function createMessageRouter(config, deps = {}) {
 
     // Handle Beeper file attachments
     if (msg._attachments?.length > 0) {
-      if (isOwner(msg.senderId, config, msg)) {
+      if (msg.routeAs === 'silent') {
+        // silent mode: silently index supported docs, no reply
+        await handleSilentAttachment(msg, platform, config, indexer, 'beeper');
+      } else if (msg.routeAs === 'business' && !isOwner(msg.senderId, config, msg)) {
+        // business mode, non-owner: silently index, no interactive prompt
+        await handleSilentAttachment(msg, platform, config, indexer, 'beeper');
+      } else if (isOwner(msg.senderId, config, msg)) {
         await handleBeeperFileIndex(msg, platform, config, indexer);
       } else {
         await handleSilentAttachment(msg, platform, config, indexer, 'beeper');
