@@ -1,6 +1,6 @@
 # Testing Guide
 
-> Last updated: 2026-02-21 | 357 tests | 0 failures
+> Last updated: 2026-02-23 | 376 tests | 0 failures
 
 ## Running Tests
 
@@ -21,17 +21,17 @@ node --test test/beeper.test.js         # beeper platform only
     / ====== \   Integration: 62 tests
    / ======== \  Handler pipeline, CLI, SQLite smoke
   / ========== \
- / ============ \  Unit: 181 tests
+ / ============ \  Unit: 195 tests
 /________________\ PIN, injection, config, store, memory, cleanup, activation, governance, parsers, beeper
 ```
 
-**Current ratio: 181 unit / 62 integration / 0 automated e2e**
+**Current ratio: 195 unit / 62 integration / 0 automated e2e**
 
 This is the right shape for a single-user local tool. The integration layer catches wiring bugs (like the `escalationRetries` closure bug found during initial test writing). E2E is manual until we ship to others.
 
 ---
 
-## Unit Tests (181 tests, 28 suites)
+## Unit Tests (195 tests, 28 suites)
 
 All in `test/*.test.js`. Each tests a single module in isolation.
 
@@ -76,8 +76,8 @@ All in `test/*.test.js`. Each tests a single module in isolation.
 
 | Suite | Tests | What it covers |
 |-------|-------|----------------|
-| ChatMemoryManager | 5 | pruneMemory (section splitting), admin shared path, manager cache, trimRecent, shouldCapture |
-| runCapture | 2 | LLM summary indexed with scope, skip "no notable information" |
+| ChatMemoryManager | 12 | pruneMemory, countMemorySections, updateProfile, admin shared path, manager cache, trimRecent, shouldCapture |
+| runCapture + runCondenseMemory | 4 | LLM summary indexed with scope, skip "no notable", stage 2 condense to DB, no-op under threshold |
 
 ### `test/governance.test.js` — 14 tests
 

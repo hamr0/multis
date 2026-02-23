@@ -109,6 +109,19 @@ class ChatMemoryManager {
     fs.writeFileSync(this.memoryPath, kept.join('').trimStart());
   }
 
+  countMemorySections() {
+    const content = this.loadMemory();
+    if (!content.trim()) return 0;
+    return (content.match(/^## \d{4}-/gm) || []).length;
+  }
+
+  updateProfile(fields) {
+    const profile = this.loadProfile();
+    Object.assign(profile, fields);
+    this.saveProfile(profile);
+    return profile;
+  }
+
   // --- Daily log (append-only) ---
 
   appendToLog(role, content) {

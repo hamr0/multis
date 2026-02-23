@@ -2,6 +2,25 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [0.10.0] - 2026-02-23
+
+### Added
+- Two-stage memory pipeline: recent → memory.md (stage 1) → DB condensation (stage 2)
+- Silent mode capture: silent chats now trigger memory summarization pipeline
+- Chat metadata persistence: displayName, network saved to profile.json
+- `runCondenseMemory()` for stage 2 memory condensation
+- `countMemorySections()` and `updateProfile()` on ChatMemoryManager
+- `network` field on normalized Message class
+
+### Changed
+- Capture threshold from 20 → 10 messages (was already default, now explicit)
+- Off mode is strict zero-I/O: no logs, no recent, no memory
+- Personal/note-to-self chats can no longer be set to silent or off
+- Off-mode self messages that aren't commands are now skipped in Beeper
+
+### Fixed
+- Silent mode chats never triggered capture despite accumulating messages
+
 ## [0.9.0] - 2026-02-21
 
 ### Added

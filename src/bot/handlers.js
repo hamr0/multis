@@ -6,7 +6,7 @@ const { DocumentIndexer } = require('../indexer/index');
 const { createProvider, simpleGenerate } = require('../llm/provider-adapter');
 const { buildRAGPrompt, buildMemorySystemPrompt, buildBusinessPrompt } = require('../llm/prompts');
 const { getMemoryManager } = require('../memory/manager');
-const { runCapture } = require('../memory/capture');
+const { runCapture, runCondenseMemory } = require('../memory/capture');
 const { PinManager, hashPin } = require('../security/pin');
 const { detectInjection, logInjectionAttempt } = require('../security/injection');
 const { buildToolRegistry, getToolsForUser, loadToolsConfig } = require('../tools/registry');
@@ -265,6 +265,13 @@ function createMessageRouter(config, deps = {}) {
       const idx = parseInt(text.trim(), 10) - 1;
       if (idx >= 0 && idx < pending.matches.length) {
         const chat = pending.matches[idx];
+        // Block silent/off for personal/note-to-self chats
+        const beeperPlat = platformRegistry?.get('beeper');
+        if ((pending.mode === 'silent' || pending.mode === 'off') && beeperPlat?._personalChats?.has(chat.id)) {
+          delete config._pendingMode[msg.senderId];
+          await platform.send(msg.chatId, 'Personal/note-to-self chats cannot be set to silent or off.');
+          return;
+        }
         setChatMode(config, chat.id, pending.mode);
         if (pending.agent) {
           if (!config.chat_agents) config.chat_agents = {};
@@ -292,13 +299,45 @@ function createMessageRouter(config, deps = {}) {
       return;
     }
 
-    // Silent mode: archive to memory, no response
+    // Off mode: defense-in-depth — no logging, no processing
+    if (msg.routeAs === 'off') return;
+
+    // Silent mode: archive to memory, trigger capture pipeline, no response
     if (msg.routeAs === 'silent') {
-      const mem = getMem(msg.chatId, { isAdmin: false });
+      const admin = isOwner(msg.senderId, config, msg);
+      const mem = getMem(msg.chatId, { isAdmin: admin });
       if (mem) {
         const role = msg.isSelf ? 'user' : 'contact';
         mem.appendMessage(role, msg.text);
         mem.appendToLog(role, msg.text);
+
+        // Persist chat metadata (displayName, network, platform)
+        if (msg.chatName || msg.network) {
+          const fields = { platform: msg.platform };
+          if (msg.chatName) fields.displayName = msg.chatName;
+          if (msg.network) fields.network = msg.network;
+          mem.updateProfile(fields);
+        }
+
+        // Fire two-stage capture when threshold reached
+        if (mem.shouldCapture(memCfg.capture_threshold)) {
+          const captureRole = admin ? 'admin' : `user:${msg.chatId}`;
+          runCapture(msg.chatId, mem, simpleGenerate(provider), indexer, {
+            keepLast: 5,
+            role: captureRole,
+            maxSections: memCfg.memory_max_sections
+          }).then(() => {
+            // Stage 2: condense if memory.md sections >= cap
+            const sectionCap = memCfg.memory_section_cap || 5;
+            if (mem.countMemorySections() >= sectionCap) {
+              return runCondenseMemory(msg.chatId, mem, simpleGenerate(provider), indexer, {
+                sectionCap, keepRecent: 3, role: captureRole
+              });
+            }
+          }).catch(err => {
+            console.error(`[capture] Silent background error: ${err.message}`);
+          });
+        }
       }
       return;
     }
@@ -751,10 +790,16 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
   const mem = getMem ? getMem(msg.chatId, { isAdmin: admin }) : null;
 
   try {
-    // Record user message
+    // Record user message + persist chat metadata
     if (mem) {
       mem.appendMessage('user', question);
       mem.appendToLog('user', question);
+      if (msg.chatName || msg.network) {
+        const fields = { platform: msg.platform };
+        if (msg.chatName) fields.displayName = msg.chatName;
+        if (msg.network) fields.network = msg.network;
+        mem.updateProfile(fields);
+      }
     }
 
     // Search for relevant documents (scoped)
@@ -849,13 +894,21 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
       } catch { /* non-critical */ }
     }
 
-    // Fire-and-forget capture if threshold reached
+    // Fire-and-forget two-stage capture if threshold reached
     if (mem && memCfg && mem.shouldCapture(memCfg.capture_threshold)) {
       const captureRole = admin ? 'admin' : `user:${msg.chatId}`;
       runCapture(msg.chatId, mem, simpleGenerate(provider), indexer, {
         keepLast: 5,
         role: captureRole,
         maxSections: memCfg.memory_max_sections
+      }).then(() => {
+        // Stage 2: condense if memory.md sections >= cap
+        const sectionCap = memCfg.memory_section_cap || 5;
+        if (mem.countMemorySections() >= sectionCap) {
+          return runCondenseMemory(msg.chatId, mem, simpleGenerate(provider), indexer, {
+            sectionCap, keepRecent: 3, role: captureRole
+          });
+        }
       }).catch(err => {
         console.error(`[capture] Background error: ${err.message}`);
       });
@@ -957,6 +1010,11 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
         return;
       }
       const chat = match[0];
+      // Block silent/off for personal/note-to-self chats
+      if ((mode === 'silent' || mode === 'off') && beeperPlatform?._personalChats?.has(chat.id)) {
+        await platform.send(msg.chatId, 'Personal/note-to-self chats cannot be set to silent or off.');
+        return;
+      }
       setChatMode(config, chat.id, mode);
       await platform.send(msg.chatId, `${chat.title || chat.id} set to: ${mode}`);
       logAudit({ action: 'mode', user_id: msg.senderId, chatId: chat.id, mode, target });
@@ -1042,6 +1100,11 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
       return;
     }
     const chat = match[0];
+    // Block silent/off for personal/note-to-self chats
+    if ((mode === 'silent' || mode === 'off') && platform._personalChats?.has(chat.id)) {
+      await platform.send(msg.chatId, 'Personal/note-to-self chats cannot be set to silent or off.');
+      return;
+    }
     setChatMode(config, chat.id, mode);
     assignAgent(chat.id);
     const agentNote = agentArg ? `, agent: ${agentArg}` : '';

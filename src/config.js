@@ -215,6 +215,7 @@ function loadConfig() {
     enabled: true,
     recent_window: 20,
     capture_threshold: 10,
+    memory_section_cap: 5,
     decay_rate: 0.05,
     memory_max_sections: 12,
     retention_days: 90,

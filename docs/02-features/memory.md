@@ -224,7 +224,7 @@ Even if a prompt injection tricks the LLM, the SQL query physically cannot retur
 ├── admin/
 │   └── memory.md              ← shared across owner's platforms
 ├── <chatId>/
-│   ├── profile.json           ← { mode, platform, lastActive, created }
+│   ├── profile.json           ← { mode, platform, displayName, network, lastActive, created }
 │   ├── recent.json            ← rolling window of messages
 │   ├── memory.md              ← durable LLM summaries
 │   └── log/
@@ -244,14 +244,16 @@ Handles all per-chat file I/O. Cached by chatId (one manager per chat).
 | `trimRecent(keepLast=5)` | Keep last N messages |
 | `loadMemory()` / `appendMemory(notes)` / `clearMemory()` | Durable `memory.md` |
 | `pruneMemory(maxSections=5)` | Keep last N sections (split by `## YYYY-` headers) |
+| `countMemorySections()` | Count `## YYYY-` section headers in memory.md |
+| `updateProfile(fields)` | Merge fields into profile.json (displayName, network, platform) |
 | `appendToLog(role, content)` | Append to `log/YYYY-MM-DD.md` |
-| `shouldCapture(threshold=20)` | True if rolling window ≥ threshold |
+| `shouldCapture(threshold=10)` | True if rolling window ≥ threshold |
 
 **Admin aggregation:** Owner's memory.md is shared at `admin/memory.md` regardless of platform. Per-chat rolling windows remain separate.
 
 ### 3.3 Capture Flow (`src/memory/capture.js`)
 
-When the rolling window exceeds 20 messages, a background capture fires:
+When the rolling window exceeds 10 messages, a background capture fires:
 
 ```
 runCapture(chatId, mem, llm, indexer, opts)
@@ -273,6 +275,12 @@ runCapture(chatId, mem, llm, indexer, opts)
       - scope: 'admin' or 'user:<chatId>'
 6. Prune memory.md (keep last 5 sections)
 7. Trim recent.json (keep last 5 messages)
+
+Stage 2 — Condense (fires when memory.md >= 5 sections):
+  8. Gather oldest sections (all except last 3)
+  9. LLM condenses them into one summary
+  10. Store condensed summary as DB chunk
+  11. Rewrite memory.md with only the 3 most recent sections
 ```
 
 **Key design decisions:**
@@ -288,6 +296,7 @@ runCapture(chatId, mem, llm, indexer, opts)
 | Raw messages | `log/YYYY-MM-DD.md` (daily) | No | 30 days, auto-cleaned |
 | LLM summaries | `memory.md` (durable) | Via FTS chunk | 90 days (admin: 365d) |
 | LLM summaries | `chunks` table | Yes (FTS5) | 90 days (admin: 365d) |
+| Condensed summaries | `chunks` table | Yes (FTS5) | 90 days (admin: 365d) |
 | Documents | `chunks` table | Yes (FTS5) | Permanent until re-indexed |
 
 ---
@@ -365,13 +374,10 @@ User: "How do I install the widget?"
 7. RECORD ACCESS on 5 returned chunks
    → their activation increases for future queries
 
-8. CHECK CAPTURE THRESHOLD (20 messages):
-   → If exceeded, background:
-     → LLM summarize conversation
-     → Append to memory.md
-     → Index summary as FTS chunk
-     → Prune memory.md to 5 sections
-     → Trim recent.json to 5 messages
+8. CHECK CAPTURE THRESHOLD (10 messages):
+   → If exceeded, two-stage background pipeline:
+     Stage 1: LLM summarize → memory.md + FTS chunk → trim recent to 5
+     Stage 2: if memory.md >= 5 sections → condense oldest to DB, keep 3
 ```
 
 ---

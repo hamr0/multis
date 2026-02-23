@@ -13,6 +13,7 @@ Every chat operates in one of three modes that control how multis handles incomi
 - **Self-messages without prefix:** Ignored
 - **Incoming from others:** Ignored
 - **Use case:** Disable multis for a chat entirely — no archive, no response
+- **Storage:** None — no logs, no recent, no memory, no DB chunks
 
 ### Business
 
@@ -28,7 +29,7 @@ Every chat operates in one of three modes that control how multis handles incomi
 - **Who:** Friends, family, group chats you want to archive
 - **Commands:** Self-messages with prefix still processed as commands
 - **Self-messages without prefix:** Natural language questions
-- **Incoming from others:** Archived to memory (appendMessage + daily log), **no bot response**
+- **Incoming from others:** Archived to memory, **two-stage capture pipeline** (recent → memory.md → DB), **no bot response**
 - **Use case:** Passive archival — messages searchable later, no bot interference
 
 ## Setting a Mode
@@ -128,5 +129,9 @@ Message arrives:
 | Owner commands (exec, read, index) | No | No | No |
 | `/ask` and `/search` | No | Auto (incoming) | No |
 | `/mode` (change modes) | Yes (PIN) | Yes (PIN) | Yes (PIN) |
-| Memory capture | No | Yes | Yes |
+| Memory capture | No | Yes | Yes (two-stage: recent → memory.md → DB) |
 | Bot responds to others | No | Yes | No |
+
+### Restrictions
+
+- Personal/note-to-self chats cannot be set to `silent` or `off` (blocked in `/mode`)

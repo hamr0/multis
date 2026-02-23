@@ -90,6 +90,7 @@ npm test             # node --test test/**/*.test.js
 1. **Platform abstraction**: All platforms implement base.js, emit normalized Message objects to a shared router in handlers.js
 2. **Command routing**: All platforms use `/` prefix. Beeper commands only work from personal/Note-to-self chats. Plain text routes to implicit `/ask` (RAG pipeline)
 3. **Owner model**: First paired user becomes owner. Owner-only commands: exec, read, index. Check with `isOwner(userId, config)`
+4. **Two-stage memory pipeline**: messages → recent.json (cap: 10) → Stage 1: LLM summarize → memory.md → Stage 2: condense to DB when >= 5 sections
 
 ## Config and Secrets
 

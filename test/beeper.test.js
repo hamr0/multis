@@ -404,6 +404,7 @@ describe('BeeperPlatform', () => {
     it('routes self natural language in personal chats', async () => {
       const bp = makeBp(loadBeeper);
       bp._personalChats.add('c1');
+      bp.config.platforms.beeper.chat_modes = { c1: 'business' };
       const received = [];
       bp.onMessage(async (msg) => received.push(msg));
 

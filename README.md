@@ -68,7 +68,7 @@ Borrowed the good parts — daemon architecture, pairing flow, skill.md pattern 
 - **Ask questions** — `/ask` or just type naturally. RAG pipeline searches your docs, passes context to the LLM, answers with citations.
 - **Run commands** — `/exec ls ~/Documents` with governance enforcement (allowlist/denylist)
 - **Index documents** — Upload PDFs and DOCX files, or `/index <path>`. Hierarchical chunking preserves document structure.
-- **Chat modes** — Set any Beeper chat to `personal` (self-use) or `business` (auto-respond to incoming messages)
+- **Chat modes** — Set any Beeper chat to `business` (auto-respond), `silent` (archive + search), or `off` (ignore)
 - **Audit everything** — Append-only tamper-evident log of all commands and actions
 
 ## Roadmap

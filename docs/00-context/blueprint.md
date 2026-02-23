@@ -52,8 +52,10 @@ Message arrives
   │
   ├─ Starts with [multis] → SKIP (our own response)
   │
+  ├─ msg.routeAs === 'off'? → SKIP (defense-in-depth, no logging)
+  │
   ├─ msg.routeAs === 'silent'? (chat in silent mode)
-  │   └─ YES → archive to memory (appendMessage + appendToLog), NO response
+  │   └─ YES → archive to memory + two-stage capture pipeline, NO response
   │
   ├─ Is a command? (/ on all platforms, personal chats only on Beeper)
   │   └─ YES → parse command → switch (ask, mode, exec, read, index, search, ...)
@@ -101,6 +103,17 @@ Three modes, per-chat, switchable anytime via `/mode`. The profile determines th
 | **business** | Commands + natural ask | Auto-respond via LLM | No | Customer support, business contacts. Use `/agent` to assign different agents per chat |
 | **silent** | Ignored | Archived to memory | No | Passive capture — track conversations without bot output |
 | **off** | Ignored | Ignored | No | Completely ignored — no archive, no response |
+
+### Canonical Mode Semantics
+
+| Mode | Who's in it | Logs | Memory/DB | Bot responds | Slash commands |
+|------|-------------|------|-----------|--------------|----------------|
+| business | Customer chats | Yes | Yes | Yes | No (contact can't) |
+| silent | Customer chats | Yes | Yes | No | No (contact can't) |
+| off | Customer chats | No | No | No | No (contact can't) |
+| Note-to-self | Admin (you) | Yes | Yes | Yes | Yes |
+
+Personal/note-to-self chats cannot be set to `silent` or `off`.
 
 Self-chats (note-to-self, WhatsApp self) are auto-detected as **off** (command channel, not a contact).
 
@@ -765,6 +778,7 @@ All behavioral settings are configurable. Sane defaults applied when missing.
   "memory": {
     "recent_window": 20,
     "capture_threshold": 10,
+    "memory_section_cap": 5,
     "memory_max_sections": 12,
     "retention_days": 90,
     "admin_retention_days": 365,

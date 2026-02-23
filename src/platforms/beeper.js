@@ -168,8 +168,11 @@ class BeeperPlatform extends Platform {
           const mode = this._getChatMode(chatId);
 
           // Off mode: skip non-self messages entirely (no processing, no archiving)
-          // Self messages in personal chats still allowed (owner commands + natural ask)
-          if (mode === 'off' && !isSelf) continue;
+          // Self messages: only allow commands in personal chats, skip everything else
+          if (mode === 'off') {
+            if (!isSelf) continue;
+            if (!isPersonalChat || !text.startsWith(this.commandPrefix)) continue;
+          }
 
           // Determine how to route this message
           let routeAs = null;
@@ -208,6 +211,7 @@ class BeeperPlatform extends Platform {
               text,
               raw: msg,
               routeAs,
+              network: chat.network || '',
             });
 
             // Pass through file attachments for indexing

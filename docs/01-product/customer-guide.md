@@ -326,11 +326,11 @@ When a customer message matches an escalation keyword (like "refund" or "complai
 
 ### Silent Mode
 
-The bot archives all messages to memory (for later search/recall) but sends no responses. Useful for chats you want to monitor without the bot interfering.
+The bot archives all messages and periodically summarizes them for later search. No responses. Useful for chats you want to monitor without the bot interfering.
 
 ### Off Mode
 
-The bot completely ignores messages in this chat. No archiving, no responses.
+The bot completely ignores messages in this chat. No archiving, no logs, no memory, no responses.
 
 ### Setting Modes Per Chat
 
@@ -503,6 +503,7 @@ When a conversation reaches 10 messages (configurable), multis automatically:
 2. Saves the summary to the chat's `memory.md`
 3. Indexes the summary for future search
 4. Trims the rolling window to keep the 5 most recent messages
+5. Older summaries are periodically condensed into long-term searchable chunks
 
 This means the bot remembers key facts from past conversations without you manually saving them.
 

@@ -142,6 +142,54 @@ describe('ChatMemoryManager — pruneMemory', () => {
     });
   });
 
+  describe('countMemorySections()', () => {
+    it('returns 0 for empty memory', () => {
+      const mem = makeMem('count-empty');
+      assert.strictEqual(mem.countMemorySections(), 0);
+    });
+
+    it('returns 1 for a single section', () => {
+      const mem = makeMem('count-one');
+      mem.appendMemory('Single note');
+      assert.strictEqual(mem.countMemorySections(), 1);
+    });
+
+    it('returns correct count for multiple sections', () => {
+      const mem = makeMem('count-multi');
+      for (let i = 0; i < 5; i++) {
+        mem.appendMemory(`Note ${i}`);
+      }
+      assert.strictEqual(mem.countMemorySections(), 5);
+    });
+  });
+
+  describe('updateProfile()', () => {
+    it('merges new fields into profile', () => {
+      const mem = makeMem('profile-merge');
+      mem.updateProfile({ displayName: 'Alice', network: 'whatsapp' });
+      const profile = mem.loadProfile();
+      assert.strictEqual(profile.displayName, 'Alice');
+      assert.strictEqual(profile.network, 'whatsapp');
+    });
+
+    it('preserves existing fields when adding new ones', () => {
+      const mem = makeMem('profile-preserve');
+      mem.updateProfile({ displayName: 'Bob' });
+      mem.updateProfile({ network: 'telegram' });
+      const profile = mem.loadProfile();
+      assert.strictEqual(profile.displayName, 'Bob');
+      assert.strictEqual(profile.network, 'telegram');
+    });
+
+    it('overwrites existing fields with new values', () => {
+      const mem = makeMem('profile-overwrite');
+      mem.updateProfile({ displayName: 'Old Name' });
+      mem.updateProfile({ displayName: 'New Name' });
+      const profile = mem.loadProfile();
+      assert.strictEqual(profile.displayName, 'New Name');
+    });
+  });
+
   describe('shouldCapture()', () => {
     it('returns false when under threshold', () => {
       const mem = makeMem('capture-under');
@@ -263,6 +311,101 @@ describe('runCapture — indexes summary, not raw messages', () => {
       "SELECT * FROM chunks WHERE type = 'conv'"
     ).all();
     assert.strictEqual(rows.length, 0, 'Should not index when nothing notable');
+
+    store.close();
+  });
+});
+
+// --- runCondenseMemory tests ---
+
+describe('runCondenseMemory — stage 2 condensation', () => {
+  let tmpDir;
+  let origHome;
+
+  before(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-condense-test-'));
+    origHome = process.env.HOME;
+    process.env.HOME = tmpDir;
+  });
+
+  after(() => {
+    process.env.HOME = origHome;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeMem(chatId) {
+    const baseDir = path.join(tmpDir, '.multis', 'memory', 'chats');
+    return new ChatMemoryManager(chatId, { baseDir });
+  }
+
+  it('condenses old sections to DB and keeps recent 3', async () => {
+    const { runCondenseMemory } = require('../src/memory/capture');
+    const { DocumentStore } = require('../src/indexer/store');
+
+    const dbPath = path.join(tmpDir, 'condense-test.db');
+    const store = new DocumentStore(dbPath);
+    const mem = makeMem('condense-chat');
+
+    // Create 6 sections (above threshold of 5)
+    for (let i = 1; i <= 6; i++) {
+      mem.appendMemory(`Summary note ${i}`);
+    }
+    assert.strictEqual(mem.countMemorySections(), 6);
+
+    const mockLlm = {
+      generate: async (prompt) => '- Condensed summary of old notes'
+    };
+
+    await runCondenseMemory('condense-chat', mem, mockLlm, { store }, {
+      sectionCap: 5, keepRecent: 3, role: 'user:condense-chat'
+    });
+
+    // Should have 3 sections remaining
+    assert.strictEqual(mem.countMemorySections(), 3);
+
+    // Should keep the most recent sections (4, 5, 6)
+    const content = mem.loadMemory();
+    assert.ok(content.includes('Summary note 4'), 'should keep note 4');
+    assert.ok(content.includes('Summary note 5'), 'should keep note 5');
+    assert.ok(content.includes('Summary note 6'), 'should keep note 6');
+    assert.ok(!content.includes('Summary note 1'), 'should have condensed note 1');
+
+    // Should have stored a condensed chunk in DB
+    const rows = store.db.prepare(
+      "SELECT * FROM chunks WHERE type = 'conv'"
+    ).all();
+    assert.ok(rows.length >= 1, 'Should have stored condensed chunk');
+    assert.ok(rows[0].content.includes('Condensed summary'));
+    assert.strictEqual(rows[0].role, 'user:condense-chat');
+
+    store.close();
+  });
+
+  it('does nothing when sections are below threshold', async () => {
+    const { runCondenseMemory } = require('../src/memory/capture');
+    const { DocumentStore } = require('../src/indexer/store');
+
+    const dbPath = path.join(tmpDir, 'condense-noop.db');
+    const store = new DocumentStore(dbPath);
+    const mem = makeMem('condense-noop');
+
+    mem.appendMemory('Only note');
+    const contentBefore = mem.loadMemory();
+
+    const mockLlm = { generate: async () => 'Should not be called' };
+
+    await runCondenseMemory('condense-noop', mem, mockLlm, { store }, {
+      sectionCap: 5, keepRecent: 3, role: 'public'
+    });
+
+    // Memory unchanged
+    assert.strictEqual(mem.loadMemory(), contentBefore);
+
+    // No chunks stored
+    const rows = store.db.prepare(
+      "SELECT * FROM chunks WHERE type = 'conv'"
+    ).all();
+    assert.strictEqual(rows.length, 0);
 
     store.close();
   });
