@@ -51,7 +51,12 @@ class BeeperPlatform extends Platform {
     }
 
     // Seed _lastSeen with current message IDs so we don't process old messages
-    await this._seedLastSeen();
+    try {
+      await this._seedLastSeen();
+    } catch (err) {
+      console.error(`Beeper: seed error — ${err.message}`);
+      return false;
+    }
     this._initialized = true;
 
     // Start polling
@@ -75,33 +80,29 @@ class BeeperPlatform extends Platform {
   }
 
   async _seedLastSeen() {
-    try {
-      const data = await this._api('GET', '/v1/chats?limit=20');
-      const chats = data.items || [];
-      for (const chat of chats) {
-        const chatId = chat.id || chat.chatID;
-        if (!chatId) continue;
-        if (chatId === this._botChatId) continue; // skip Telegram bot chat
+    const data = await this._api('GET', '/v1/chats?limit=20');
+    const chats = data.items || [];
+    for (const chat of chats) {
+      const chatId = chat.id || chat.chatID;
+      if (!chatId) continue;
+      if (chatId === this._botChatId) continue; // skip Telegram bot chat
 
-        // Detect self/note-to-self chats: all participants have isSelf=true
-        const items = chat.participants?.items || chat.members?.items || [];
-        if (items.length > 0 && items.every(p => p.isSelf)) {
-          this._personalChats.add(chatId);
-        }
+      // Detect self/note-to-self chats: all participants have isSelf=true
+      const items = chat.participants?.items || chat.members?.items || [];
+      if (items.length > 0 && items.every(p => p.isSelf)) {
+        this._personalChats.add(chatId);
+      }
 
-        // Seed with limit=5 to match poll window — prevents reprocessing after restart
-        const msgData = await this._api('GET', `/v1/chats/${encodeURIComponent(chatId)}/messages?limit=5`);
-        const messages = msgData.items || [];
-        for (const m of messages) {
-          const id = String(m.id || m.messageID || '');
-          if (id) this._seen.add(id);
-        }
+      // Seed with limit=5 to match poll window — prevents reprocessing after restart
+      const msgData = await this._api('GET', `/v1/chats/${encodeURIComponent(chatId)}/messages?limit=5`);
+      const messages = msgData.items || [];
+      for (const m of messages) {
+        const id = String(m.id || m.messageID || '');
+        if (id) this._seen.add(id);
       }
-      if (this._personalChats.size > 0) {
-        console.log(`Beeper: detected ${this._personalChats.size} personal/self chat(s)`);
-      }
-    } catch (err) {
-      console.error(`Beeper: seed error — ${err.message}`);
+    }
+    if (this._personalChats.size > 0) {
+      console.log(`Beeper: detected ${this._personalChats.size} personal/self chat(s)`);
     }
   }
 
@@ -114,10 +115,16 @@ class BeeperPlatform extends Platform {
       // Detect hibernate/sleep: if gap since last poll is >30s (expect ~3s), re-seed
       if (this._lastPollTime && (now - this._lastPollTime) > 30000) {
         console.log(`Beeper: poll gap detected (${Math.round((now - this._lastPollTime) / 1000)}s) — re-seeding`);
-        await this._seedLastSeen();
-        this._lastPollTime = now;
+        try {
+          await this._seedLastSeen();
+          this._lastPollTime = now;
+        } catch (err) {
+          // Seed failed (Desktop still reconnecting) — don't update _lastPollTime
+          // so next poll retries the re-seed instead of processing stale messages
+          console.error(`Beeper: re-seed failed, will retry — ${err.message}`);
+        }
         this._polling = false;
-        return; // skip this cycle, process fresh on next poll
+        return; // skip this cycle either way
       }
 
       const data = await this._api('GET', '/v1/chats?limit=20');

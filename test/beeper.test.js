@@ -323,11 +323,11 @@ describe('BeeperPlatform', () => {
       assert.ok(!bp._personalChats.has('dmChat'));
     });
 
-    it('handles API errors gracefully', async () => {
+    it('throws on API errors so callers can retry', async () => {
       const { BeeperPlatform } = loadBeeper();
       const bp = new BeeperPlatform(makeConfig());
       bp._api = async () => { throw new Error('network down'); };
-      await bp._seedLastSeen(); // should not throw
+      await assert.rejects(() => bp._seedLastSeen(), { message: 'network down' });
       assert.strictEqual(bp._seen.size, 0);
     });
   });
