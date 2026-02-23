@@ -202,11 +202,26 @@ function loadConfig() {
   config.business.escalation = {
     escalate_keywords: ['refund', 'complaint', 'manager', 'supervisor', 'urgent', 'emergency'],
     admin_chat: config.business.admin_chat || null,
+    admin_pause_minutes: 30,
     ...config.business.escalation
   };
   // Migrate legacy admin_chat to escalation sub-object
   if (config.business.admin_chat && !config.business.escalation.admin_chat) {
     config.business.escalation.admin_chat = config.business.admin_chat;
+  }
+
+  // Ensure config.chats block exists (single source of truth for chat metadata)
+  if (!config.chats) config.chats = {};
+
+  // Migrate chat_modes → config.chats (one-time, backward compatible)
+  const oldModes = config.platforms?.beeper?.chat_modes;
+  if (oldModes && typeof oldModes === 'object') {
+    for (const [chatId, mode] of Object.entries(oldModes)) {
+      if (!config.chats[chatId]) config.chats[chatId] = {};
+      if (!config.chats[chatId].mode) config.chats[chatId].mode = mode;
+    }
+    delete config.platforms.beeper.chat_modes;
+    saveConfig(config);
   }
 
   // Merge defaults for memory section
@@ -254,6 +269,29 @@ function saveConfig(config) {
 }
 
 /**
+ * Backup config.json → config.json.bak before risky writes (e.g. Beeper API discovery).
+ * Simple overwrite of previous backup.
+ */
+function backupConfig() {
+  const configPath = PATHS.config();
+  if (fs.existsSync(configPath)) {
+    fs.copyFileSync(configPath, configPath + '.bak');
+  }
+}
+
+/**
+ * Upsert chat metadata into config.chats[chatId].
+ * Creates entry if missing, merges fields if exists, always updates lastActive.
+ */
+function updateChatMeta(config, chatId, fields) {
+  if (!config.chats) config.chats = {};
+  if (!config.chats[chatId]) config.chats[chatId] = {};
+  Object.assign(config.chats[chatId], fields);
+  config.chats[chatId].lastActive = new Date().toISOString();
+  saveConfig(config);
+}
+
+/**
  * Add a user ID to the allowed users list.
  * First paired user automatically becomes owner.
  */
@@ -284,6 +322,8 @@ function isOwner(userId, config, msg) {
 module.exports = {
   loadConfig,
   saveConfig,
+  backupConfig,
+  updateChatMeta,
   addAllowedUser,
   isOwner,
   generatePairingCode,

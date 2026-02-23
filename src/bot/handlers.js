@@ -1,6 +1,6 @@
 const path = require('path');
 const { logAudit } = require('../governance/audit');
-const { addAllowedUser, isOwner, saveConfig, getMultisDir, PATHS } = require('../config');
+const { addAllowedUser, isOwner, saveConfig, backupConfig, updateChatMeta, getMultisDir, PATHS } = require('../config');
 const { execCommand, readFile, listSkills } = require('../skills/executor');
 const { DocumentIndexer } = require('../indexer/index');
 const { createProvider, simpleGenerate } = require('../llm/provider-adapter');
@@ -15,6 +15,29 @@ const { getPlatform } = require('../tools/platform');
 const { Loop, Retry, CircuitBreaker } = require('bare-agent');
 const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler');
 const { createCheckpoint, handleApprovalReply, hasPendingApproval } = require('./checkpoint');
+
+// ---------------------------------------------------------------------------
+// Admin presence pause — when owner messages in a business chat, bot pauses
+// ---------------------------------------------------------------------------
+const _adminPaused = new Map(); // chatId → resumeAt timestamp
+
+function setAdminPause(chatId, minutes) {
+  _adminPaused.set(chatId, Date.now() + minutes * 60 * 1000);
+}
+
+function isAdminPaused(chatId) {
+  const resumeAt = _adminPaused.get(chatId);
+  if (!resumeAt) return false;
+  if (Date.now() >= resumeAt) {
+    _adminPaused.delete(chatId);
+    return false;
+  }
+  return true;
+}
+
+function clearAdminPauses() {
+  _adminPaused.clear();
+}
 
 // ---------------------------------------------------------------------------
 // Agent registry + resolution
@@ -295,8 +318,15 @@ function createMessageRouter(config, deps = {}) {
 
     // Handle pending /business setup wizard
     if (config._pendingBusiness?.[msg.senderId]) {
-      await handleBusinessWizardStep(msg, platform, config, text.trim());
-      return;
+      // /commands during wizard cancel it and fall through to command routing
+      if (text.startsWith('/')) {
+        delete config._pendingBusiness[msg.senderId];
+        await platform.send(msg.chatId, 'Business setup cancelled.');
+        // Fall through — the command will be routed normally below
+      } else {
+        await handleBusinessWizardStep(msg, platform, config, text.trim());
+        return;
+      }
     }
 
     // Off mode: defense-in-depth — no logging, no processing
@@ -311,12 +341,12 @@ function createMessageRouter(config, deps = {}) {
         mem.appendMessage(role, msg.text);
         mem.appendToLog(role, msg.text);
 
-        // Persist chat metadata (displayName, network, platform)
+        // Persist chat metadata to config.chats
         if (msg.chatName || msg.network) {
           const fields = { platform: msg.platform };
-          if (msg.chatName) fields.displayName = msg.chatName;
+          if (msg.chatName) fields.name = msg.chatName;
           if (msg.network) fields.network = msg.network;
-          mem.updateProfile(fields);
+          updateChatMeta(config, msg.chatId, fields);
         }
 
         // Fire two-stage capture when threshold reached
@@ -346,6 +376,26 @@ function createMessageRouter(config, deps = {}) {
     if (msg.routeAs === 'natural' || msg.routeAs === 'business') {
       // Business: anyone can get a response (customers via Beeper)
       if (msg.routeAs !== 'business' && !isPaired(msg, config)) return;
+
+      // Admin presence pause for business chats
+      if (msg.routeAs === 'business') {
+        const admin = isOwner(msg.senderId, config, msg);
+        if (admin) {
+          // Owner typing in business chat → pause bot, archive message
+          const pauseMin = config.business?.escalation?.admin_pause_minutes ?? 30;
+          setAdminPause(msg.chatId, pauseMin);
+          const mem = getMem(msg.chatId, { isAdmin: true });
+          if (mem) { mem.appendMessage('user', msg.text); mem.appendToLog('user', msg.text); }
+          return;
+        }
+        if (isAdminPaused(msg.chatId)) {
+          // Customer messages while admin is active → silently archive, no LLM
+          const mem = getMem(msg.chatId, { isAdmin: false });
+          if (mem) { mem.appendMessage('user', msg.text); mem.appendToLog('user', msg.text); }
+          return;
+        }
+      }
+
       await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
       return;
     }
@@ -796,34 +846,15 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
       mem.appendToLog('user', question);
       if (msg.chatName || msg.network) {
         const fields = { platform: msg.platform };
-        if (msg.chatName) fields.displayName = msg.chatName;
+        if (msg.chatName) fields.name = msg.chatName;
         if (msg.network) fields.network = msg.network;
-        mem.updateProfile(fields);
+        updateChatMeta(config, msg.chatId, fields);
       }
     }
 
     // Search for relevant documents (scoped)
     const roles = admin ? undefined : ['public', `user:${msg.chatId}`];
     const chunks = indexer.search(question, 5, { roles });
-
-    // Business keyword escalation for non-admin chats
-    if (msg.routeAs === 'business' && !admin) {
-      const keywords = config.business?.escalation?.escalate_keywords || [];
-      const questionLower = question.toLowerCase();
-      const keywordMatch = keywords.some(k => questionLower.includes(k.toLowerCase()));
-
-      if (keywordMatch) {
-        const reply = "I'm checking with the team on this. Someone will follow up shortly.";
-        await platform.send(msg.chatId, reply);
-        if (mem) { mem.appendMessage('assistant', reply); mem.appendToLog('assistant', reply); }
-        const adminChat = config.business?.escalation?.admin_chat || config.business?.admin_chat;
-        if (adminChat) {
-          await platform.send(adminChat, `[Escalation] Chat ${msg.chatId}: "${question}" (keyword match)`);
-        }
-        logAudit({ action: 'escalate', chatId: msg.chatId, reason: 'keyword', question });
-        return;
-      }
-    }
 
     // Resolve agent (handles @mention, per-chat, mode default, fallback)
     const resolved = agentRegistry && agentRegistry.size > 0
@@ -863,7 +894,7 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     // --- Agent loop with tool calling ---
     const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5 } = toolDeps;
     const userTools = getToolsForUser(allTools, admin, tCfg);
-    const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform };
+    const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, config };
 
     const answer = await runAgentLoop(agentProvider, messages, userTools, {
       system,
@@ -967,7 +998,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
       const current = config.bot_mode || 'personal';
       let statusMsg = `Bot mode: ${current}`;
       if (hasBeeperChats) {
-        const allChats = await listBeeperChats(beeperPlatform);
+        const allChats = listBeeperChats(beeperPlatform, config);
         if (allChats && allChats.length > 0) {
           const lines = allChats.map(c => {
             const m = getChatMode(config, c.id);
@@ -997,7 +1028,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
     // With target → set per-chat Beeper mode
     const target = parts.slice(1).join(' ');
     if (target && hasBeeperChats) {
-      const match = await findBeeperChat(beeperPlatform, target);
+      const match = await findBeeperChat(beeperPlatform, target, config);
       if (!match) {
         await platform.send(msg.chatId, `No chat found matching "${target}".`);
         return;
@@ -1031,8 +1062,8 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
 
   // Beeper: no args → list chats with current modes (read-only, no PIN needed)
   if (!mode) {
-    if (platform._api) {
-      const allChats = await listBeeperChats(platform);
+    if (config?.chats || platform._api) {
+      const allChats = listBeeperChats(platform, config);
       if (!allChats || allChats.length === 0) {
         await platform.send(msg.chatId, 'No chats found.');
         return;
@@ -1086,7 +1117,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
 
   // Beeper: if target specified, search for chat by name/number
   if (target) {
-    const match = await findBeeperChat(platform, target);
+    const match = await findBeeperChat(platform, target, config);
     if (!match) {
       await platform.send(msg.chatId, `No chat found matching "${target}".`);
       return;
@@ -1115,7 +1146,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
 
   // Beeper: no target — if in self-chat, show interactive picker
   if (msg.isSelf) {
-    const allChats = await listBeeperChats(platform);
+    const allChats = listBeeperChats(platform, config);
     if (!allChats || allChats.length === 0) {
       await platform.send(msg.chatId, 'No chats found.');
       return;
@@ -1142,16 +1173,15 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
 }
 
 function setChatMode(config, chatId, mode) {
-  if (!config.platforms) config.platforms = {};
-  if (!config.platforms.beeper) config.platforms.beeper = {};
-  if (!config.platforms.beeper.chat_modes) config.platforms.beeper.chat_modes = {};
-  config.platforms.beeper.chat_modes[chatId] = mode;
+  if (!config.chats) config.chats = {};
+  if (!config.chats[chatId]) config.chats[chatId] = {};
+  config.chats[chatId].mode = mode;
+  config.chats[chatId].lastActive = new Date().toISOString();
   saveConfig(config);
 }
 
 function getChatMode(config, chatId) {
-  const modes = config.platforms?.beeper?.chat_modes;
-  const stored = modes?.[chatId];
+  const stored = config.chats?.[chatId]?.mode;
   // Ignore stale 'personal' values (was renamed to profile, not a valid mode)
   if (stored && stored !== 'personal') return stored;
   if (config.platforms?.beeper?.default_mode) return config.platforms.beeper.default_mode;
@@ -1160,26 +1190,52 @@ function getChatMode(config, chatId) {
   return botMode === 'personal' ? 'silent' : 'business';
 }
 
-async function listBeeperChats(platform) {
-  if (!platform._api) return null;
-  try {
-    const botChatId = platform._botChatId || null;
-    const data = await platform._api('GET', '/v1/chats?limit=20');
-    const chats = data.items || [];
-    return chats.map(c => ({
-      id: c.id || c.chatID,
-      title: c.title || c.name || '',
+/**
+ * List chats from config.chats (filter by platform=beeper), sorted by lastActive desc.
+ * No Beeper API call needed — works even when Desktop is down.
+ */
+function listBeeperChats(platformOrConfig, config) {
+  // Accept either (platform, config) or (config) for backward compat
+  const cfg = config || platformOrConfig;
+  if (!cfg?.chats) return [];
+  const botChatId = (typeof platformOrConfig === 'object' && platformOrConfig._botChatId) ? platformOrConfig._botChatId : null;
+  return Object.entries(cfg.chats)
+    .filter(([id, c]) => c.platform === 'beeper' && id !== botChatId)
+    .map(([id, c]) => ({
+      id,
+      title: c.name || '',
       network: c.network || '',
-    })).filter(c => c.id && c.id !== botChatId);
-  } catch {
-    return null;
-  }
+    }))
+    .sort((a, b) => {
+      const aTime = cfg.chats[a.id]?.lastActive || '';
+      const bTime = cfg.chats[b.id]?.lastActive || '';
+      return bTime.localeCompare(aTime);
+    });
 }
 
-async function findBeeperChat(platform, search) {
-  if (!platform._api) return null;
-  // Search wider than the picker — find chats beyond the recent 20
+/**
+ * Find a Beeper chat by name. Searches config.chats first.
+ * Falls back to Beeper API for discovery of new/unseen chats, upserting into config.chats.
+ */
+async function findBeeperChat(platform, search, config) {
+  const q = search.toLowerCase();
+
+  // Search config.chats first
+  if (config?.chats) {
+    const matches = Object.entries(config.chats)
+      .filter(([id, c]) => c.platform === 'beeper')
+      .filter(([id, c]) =>
+        (c.name && c.name.toLowerCase().includes(q)) ||
+        id.toLowerCase().includes(q)
+      )
+      .map(([id, c]) => ({ id, title: c.name || '', network: c.network || '' }));
+    if (matches.length > 0) return matches;
+  }
+
+  // Fall back to Beeper API for undiscovered chats
+  if (!platform?._api) return null;
   try {
+    backupConfig();
     const botChatId = platform._botChatId || null;
     const data = await platform._api('GET', '/v1/chats?limit=100');
     const chats = (data.items || []).map(c => ({
@@ -1187,7 +1243,18 @@ async function findBeeperChat(platform, search) {
       title: c.title || c.name || '',
       network: c.network || '',
     })).filter(c => c.id && c.id !== botChatId);
-    const q = search.toLowerCase();
+
+    // Upsert discovered chats into config.chats
+    if (config) {
+      for (const c of chats) {
+        if (!config.chats) config.chats = {};
+        if (!config.chats[c.id]) {
+          config.chats[c.id] = { name: c.title, network: c.network, platform: 'beeper', lastActive: new Date().toISOString() };
+        }
+      }
+      saveConfig(config);
+    }
+
     const matches = chats.filter(c =>
       (c.title && c.title.toLowerCase().includes(q)) ||
       (c.id && c.id.toLowerCase().includes(q))
@@ -1501,13 +1568,23 @@ async function handleBusinessWizardStep(msg, platform, config, input) {
 
   switch (pending.step) {
     case 'name':
+      if (input.length < 2 || input.length > 100) {
+        await platform.send(msg.chatId, 'Name must be 2-100 characters. Try again:');
+        break;
+      }
       pending.data.name = input;
       pending.step = 'greeting';
       await platform.send(msg.chatId, `Name: ${input}\n\nGreeting message for customers? (or "skip")`);
       break;
 
     case 'greeting':
-      if (lower !== 'skip') pending.data.greeting = input;
+      if (lower !== 'skip') {
+        if (input.length > 500) {
+          await platform.send(msg.chatId, 'Greeting must be under 500 characters. Try again (or "skip"):');
+          break;
+        }
+        pending.data.greeting = input;
+      }
       pending.step = 'topics';
       pending.data.topics = [];
       await platform.send(msg.chatId, 'Add a topic name (e.g. "Pricing", "Returns"). Send "done" when finished.');
@@ -1520,6 +1597,10 @@ async function handleBusinessWizardStep(msg, platform, config, input) {
         await platform.send(msg.chatId, 'Add a custom rule (e.g. "Always respond in Spanish"). Send "done" when finished.');
         break;
       }
+      if (input.length > 200) {
+        await platform.send(msg.chatId, 'Topic name must be under 200 characters. Try again:');
+        break;
+      }
       // Topic name entered — ask for description
       pending._currentTopic = input;
       pending.step = 'topic_desc';
@@ -1528,7 +1609,13 @@ async function handleBusinessWizardStep(msg, platform, config, input) {
 
     case 'topic_desc': {
       const topic = { name: pending._currentTopic };
-      if (lower !== 'skip') topic.description = input;
+      if (lower !== 'skip') {
+        if (input.length > 200) {
+          await platform.send(msg.chatId, 'Description must be under 200 characters. Try again (or "skip"):');
+          break;
+        }
+        topic.description = input;
+      }
       pending.data.topics.push(topic);
       delete pending._currentTopic;
       pending.step = 'topics';
@@ -1538,18 +1625,37 @@ async function handleBusinessWizardStep(msg, platform, config, input) {
 
     case 'rules':
       if (lower === 'done') {
-        pending.step = 'confirm';
-        const summary = formatBusinessSummary(pending.data);
-        await platform.send(msg.chatId, `${summary}\n\nSave this? (yes/no)`);
+        pending.step = 'admin_chat';
+        await platform.send(msg.chatId, 'Which chat should receive escalation notifications?\nPaste a chat ID, or "skip" to set later.');
+        break;
+      }
+      if (input.length > 200) {
+        await platform.send(msg.chatId, 'Rule must be under 200 characters. Try again:');
         break;
       }
       pending.data.rules.push(input);
       await platform.send(msg.chatId, 'Added. Next rule? (or "done")');
       break;
 
+    case 'admin_chat':
+      if (lower !== 'skip') {
+        pending.data.admin_chat = input;
+      }
+      pending.step = 'confirm';
+      {
+        const summary = formatBusinessSummary(pending.data);
+        await platform.send(msg.chatId, `${summary}\n\nSave this? (yes/no)`);
+      }
+      break;
+
     case 'confirm':
       if (lower === 'yes' || lower === 'y') {
+        const adminChat = pending.data.admin_chat;
+        delete pending.data.admin_chat;
         config.business = { ...config.business, ...pending.data };
+        if (adminChat) {
+          config.business.escalation = { ...config.business.escalation, admin_chat: adminChat };
+        }
         saveConfig(config);
         delete config._pendingBusiness[msg.senderId];
         await platform.send(msg.chatId, 'Business persona saved.');
@@ -1575,6 +1681,7 @@ function formatBusinessSummary(data) {
     lines.push('  Rules:');
     data.rules.forEach(r => lines.push(`    - ${r}`));
   }
+  if (data.admin_chat) lines.push(`  Escalation chat: ${data.admin_chat}`);
   return lines.join('\n');
 }
 
@@ -1965,6 +2072,7 @@ module.exports = {
   createSchedulerTick,
   buildAgentRegistry,
   resolveAgent,
+  clearAdminPauses,
   // Legacy Telegraf handlers
   handleStart,
   handleStatus,

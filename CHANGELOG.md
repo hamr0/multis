@@ -2,6 +2,31 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [0.11.0] - 2026-02-23
+
+### Added
+- `config.chats` as single source of truth for chat metadata (name, network, platform, mode, lastActive)
+- `escalate` tool: LLM-driven escalation sends notifications to admin_chat with customer name and reason
+- Admin presence pause: owner typing in business chat pauses bot for configurable duration (default 30min)
+- `/business setup` wizard: admin_chat step, input validation (name 2-100 chars, greeting max 500, topics/rules max 200)
+- Config backup: `config.json.bak` created before Beeper API discovery writes
+- `updateChatMeta()` for upserting chat entries into config.chats
+
+### Changed
+- Business escalation: replaced keyword short-circuit with LLM-driven escalation via `escalate` tool — all business messages now flow through LLM
+- `/business setup` wizard: `/commands` typed during wizard now cancel and re-route (no longer swallowed as input)
+- `setChatMode()` / `getChatMode()` read/write from `config.chats[chatId].mode` instead of `config.platforms.beeper.chat_modes`
+- `listBeeperChats()` reads from `config.chats` (no Beeper API call needed)
+- `findBeeperChat()` searches `config.chats` first, falls back to Beeper API for unknown chats
+- `buildBusinessPrompt()` escalation guidance rewritten: LLM uses escalate tool, responds naturally and empathetically
+
+### Removed
+- `profile.json` per-chat files: `loadProfile()`, `saveProfile()`, `updateProfile()`, `profilePath` removed from ChatMemoryManager
+- Keyword short-circuit block in business routing (replaced by LLM + escalate tool)
+
+### Fixed
+- Admin pause: nullish coalescing (`??`) instead of OR (`||`) for `admin_pause_minutes` — 0 is now valid
+
 ## [0.10.0] - 2026-02-23
 
 ### Added

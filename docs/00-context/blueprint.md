@@ -64,7 +64,9 @@ Message arrives
   │   └─ YES → routeAsk(msg.text) — implicit question
   │
   ├─ msg.routeAs === 'business'? (incoming message in business-mode chat)
-  │   └─ YES → routeAsk(msg.text) — auto-respond
+  │   ├─ Owner message? → set admin pause, archive, RETURN (bot pauses)
+  │   ├─ Admin paused? → archive silently, RETURN (bot still paused)
+  │   └─ YES → routeAsk(msg.text) — auto-respond (LLM has escalate tool)
   │
   └─ else → IGNORE
 ```
@@ -73,7 +75,7 @@ Message arrives
 
 - **Startup health check**: on server start, check if Beeper Desktop is running (hit `localhost:23373`). If not reachable, log warning and disable Beeper platform gracefully — don't crash. Re-check periodically or on-demand. (TODO: implement in polish pass or POC6 daemon)
 - **Self-chat detection**: at startup, identify chats with type=single + ≤1 participant
-- **Mode lookup**: `config.platforms.beeper.chat_modes[chatId]` → fallback to `default_mode`
+- **Mode lookup**: `config.chats[chatId].mode` → fallback to `default_mode`
 - **Self messages in personal chats**: routed as natural language (routeAs: 'natural')
 - **Incoming messages in business chats**: auto-responded (routeAs: 'business')
 - **File indexing via chat**: admin sends a file (PDF/DOCX/MD/TXT) with `/index <scope>` in Note-to-self → bot downloads via `POST /v1/assets/download`, indexes locally. If no scope specified, bot asks "Reply 1 (public) or 2 (admin)". Uses `_attachments` on the normalized Message (same pattern as Telegram's `_document`)
@@ -172,7 +174,7 @@ This is acceptable — there's no reason to set a mode on a chat with zero activ
 | **personal** | silent (archive only) | off (owner sets mode manually) |
 | **business** | business (auto-respond) | off (owner sets mode manually) |
 
-**Persisted to:** `config.platforms.beeper.chat_modes[chatId]`
+**Persisted to:** `config.chats[chatId].mode`
 **Fallback chain:** per-chat mode → beeper `default_mode` → profile (`bot_mode`) default → 'off'
 
 ---
@@ -264,20 +266,20 @@ Every chat gets its own memory. No global state. No cross-chat contamination.
 
 ```
 ~/.multis/data/memory/chats/<chatId>/
-├── profile.json      # mode, name, platform, preferences
 ├── recent.json       # rolling window (last ~20 messages)
 ├── memory.md         # LLM-summarized durable notes (append-only, pruned at retention)
 └── log/
     └── YYYY-MM-DD.md # raw daily log (append-only, auto-cleaned at 30 days)
 ```
 
+Chat metadata (name, network, platform, mode, lastActive) is stored in `config.chats[chatId]` — a single source of truth in config.json, not per-chat files.
+
 Admin identity aggregation — admin talks from multiple platforms (Telegram, Beeper Note to Self, WhatsApp self-chat). All admin chats share a unified admin memory:
 
 ```
 ~/.multis/data/memory/chats/
-  ├── admin/                    # shared admin memory + profile
-  │   ├── memory.md            # unified durable notes across all admin chats
-  │   └── profile.json         # admin preferences
+  ├── admin/                    # shared admin memory
+  │   └── memory.md            # unified durable notes across all admin chats
   ├── tg-12345/                # telegram chat (admin) — own rolling window
   │   ├── recent.json
   │   └── log/
@@ -287,7 +289,6 @@ Admin identity aggregation — admin talks from multiple platforms (Telegram, Be
   └── beeper-customer-abc/     # customer chat — fully isolated
       ├── recent.json
       ├── memory.md            # their memory only
-      ├── profile.json
       └── log/
 ```
 
@@ -295,7 +296,7 @@ Admin identity aggregation — admin talks from multiple platforms (Telegram, Be
 
 | File | Written by | Read by | Purpose |
 |------|-----------|---------|---------|
-| `profile.json` | Router (on mode change, activity) | Router | Chat metadata + preferences |
+| `config.chats[chatId]` | Router (`updateChatMeta`) | Router, `/mode`, `listBeeperChats` | Chat metadata (name, network, platform, mode, lastActive) |
 | `recent.json` | Router (every message) | LLM calls | Conversation context window |
 | `memory.md` | Capture (LLM) + `/remember` | LLM system prompt | Durable facts for this chat |
 | `log/*.md` | Router (every message) | Human (backup only) | Raw append-only backup, NOT indexed |
@@ -562,44 +563,51 @@ Current 2-role model with flat allowlist is correct for now. ABAC is the upgrade
 
 ## 8. Business Mode Escalation
 
-### 4-tier escalation ladder
+### LLM-driven escalation
+
+All business messages flow through the LLM — no keyword short-circuit. The LLM has an `escalate` tool and decides when to use it based on conversation context.
 
 ```
 Customer asks a question
   │
-  ├─ Tier 1: Knowledge Base (automatic)
-  │   Search role=public chunks via FTS5
-  │   If confident answer found → respond with citation
+  ├─ Admin paused? → archive silently, no response (admin handling it)
   │
-  ├─ Tier 2: Allowed URLs (automatic)
-  │   Check configured URLs (pricing page, FAQ, docs site)
-  │   Fetch on-demand, not pre-indexed (stays fresh)
-  │   If answer found → respond with link
-  │
-  ├─ Tier 3: Clarification (automatic)
-  │   Bot doesn't know → asks customer to rephrase or narrow down
-  │   "Could you clarify what you mean by X?"
-  │
-  └─ Tier 4: Escalate to human (automatic)
-      Bot still unsure, or customer asks for human, or sensitive topic
-      → Tags admin via admin_chat: "[Escalation] Chat: <id>, Customer: <name>, Question: <text>"
-      → Tells customer: "Let me check with the team and get back to you."
-      → Logs escalation in audit
+  └─ LLM responds (always)
+      │
+      ├─ KB match → answer with citation
+      ├─ No KB match → LLM responds naturally from persona
+      ├─ Customer needs human attention → LLM calls escalate tool
+      │   → Sends "[Escalation] <customer name>: <reason>" to admin_chat
+      │   → LLM continues responding naturally and empathetically
+      └─ Off-topic → LLM stays within configured topic boundaries
 ```
 
-### What triggers escalation
-- Keyword match (configurable list: "refund", "complaint", etc.) — immediate escalation
-- Customer explicitly asks for human ("can I talk to someone")
-- Any request that involves action (change order, schedule meeting, send something)
+### Escalate tool
 
-**No more retry-based escalation:** The LLM always responds, even with 0 KB matches. Business persona prompt guides the LLM to stay on-topic and admit when it doesn't know. This replaces the old canned "rephrase" messages that made the bot feel like a dumb FAQ lookup.
+Defined in `src/tools/definitions.js`. Not owner_only — available in business conversations.
+
+- `reason` (required): why this needs human attention
+- `urgency` (optional): `normal` or `urgent`
+- Reads `admin_chat` from `config.business.escalation.admin_chat`
+- Reads customer name from `config.chats[chatId].name`
+- Returns "Admin notified. Continue responding naturally." to the LLM
+
+### What triggers escalation (LLM-decided)
+- Customer asks for a refund, files a complaint, or requests a manager
+- Customer explicitly asks for a human ("can I talk to someone")
+- Any request that involves action the bot cannot perform
+- Configured `escalate_keywords` serve as guidance in the system prompt, not hard-coded triggers
+
+### Admin presence pause
+
+When the owner types directly in a business chat, the bot pauses for `admin_pause_minutes` (default 30, configurable in `config.business.escalation`). Customer messages during the pause are archived silently (appendMessage + appendToLog) but do not trigger LLM responses. The bot resumes automatically when the pause expires.
 
 ### Human in the loop — always
 - Bot never promises action on behalf of admin
 - Bot never creates reminders or commitments autonomously
-- If customer requests follow-up: bot acknowledges, sends note to admin via `admin_chat`
+- If customer requests follow-up: LLM calls escalate tool, admin gets notification
 - Admin decides whether to act, remind, or ignore
-- All escalation and clarification replies are saved to memory (appendMessage + appendToLog) so conversation history stays complete even on non-LLM paths
+- All messages are saved to memory (appendMessage + appendToLog) so conversation history stays complete
 
 ### Business persona (`/business setup`)
 
@@ -765,8 +773,16 @@ All behavioral settings are configurable. Sane defaults applied when missing.
       "url": "http://localhost:23373",
       "poll_interval": 3000,
       "command_prefix": "/",
-      "default_mode": "personal",
-      "chat_modes": {}
+      "default_mode": "personal"
+    }
+  },
+  "chats": {
+    "!example_chat_id": {
+      "name": "Customer Name",
+      "network": "WhatsApp",
+      "platform": "beeper",
+      "mode": "business",
+      "lastActive": "2026-02-23T18:46:29Z"
     }
   },
   "llm": {
@@ -805,7 +821,8 @@ All behavioral settings are configurable. Sane defaults applied when missing.
     ],
     "escalation": {
       "admin_chat": "tg-12345",
-      "escalate_keywords": ["refund", "complaint", "urgent", "human", "manager"]
+      "escalate_keywords": ["refund", "complaint", "urgent", "human", "manager"],
+      "admin_pause_minutes": 30
     }
   },
   "governance": { "enabled": true }

@@ -1,6 +1,6 @@
 # Testing Guide
 
-> Last updated: 2026-02-23 | 376 tests | 0 failures
+> Last updated: 2026-02-23 | 386 tests | 0 failures
 
 ## Running Tests
 
@@ -21,17 +21,17 @@ node --test test/beeper.test.js         # beeper platform only
     / ====== \   Integration: 62 tests
    / ======== \  Handler pipeline, CLI, SQLite smoke
   / ========== \
- / ============ \  Unit: 195 tests
+ / ============ \  Unit: 205 tests
 /________________\ PIN, injection, config, store, memory, cleanup, activation, governance, parsers, beeper
 ```
 
-**Current ratio: 195 unit / 62 integration / 0 automated e2e**
+**Current ratio: 205 unit / 62 integration / 0 automated e2e**
 
 This is the right shape for a single-user local tool. The integration layer catches wiring bugs (like the `escalationRetries` closure bug found during initial test writing). E2E is manual until we ship to others.
 
 ---
 
-## Unit Tests (195 tests, 28 suites)
+## Unit Tests (205 tests, 28 suites)
 
 All in `test/*.test.js`. Each tests a single module in isolation.
 
@@ -76,7 +76,7 @@ All in `test/*.test.js`. Each tests a single module in isolation.
 
 | Suite | Tests | What it covers |
 |-------|-------|----------------|
-| ChatMemoryManager | 12 | pruneMemory, countMemorySections, updateProfile, admin shared path, manager cache, trimRecent, shouldCapture |
+| ChatMemoryManager | 12 | pruneMemory, countMemorySections, profile.json removed, admin shared path, manager cache, trimRecent, shouldCapture |
 | runCapture + runCondenseMemory | 4 | LLM summary indexed with scope, skip "no notable", stage 2 condense to DB, no-op under threshold |
 
 ### `test/governance.test.js` — 14 tests
@@ -131,7 +131,7 @@ Tests the `createMessageRouter` pipeline end-to-end with mock LLM, mock platform
 | Command routing | 5 | /status, /help, /search empty, owner-only rejection, unpaired rejection |
 | RAG pipeline | 4 | /ask with chunks, no LLM configured, scoped search (admin vs non-admin) |
 | PIN auth | 3 | Prompt → correct PIN → execute, wrong PIN + attempts, locked account |
-| Business escalation | 3 | Keyword → immediate, retries → escalate, success → reset counter |
+| Business escalation | 3 | Messages always reach LLM, escalate tool sends notification, admin presence pause |
 | Injection detection | 2 | Flagged but still answered, admin bypasses |
 | Memory commands | 2 | /remember → /memory → /forget lifecycle, /remember no args |
 | Owner commands | 7 | /exec governance, /read file, /index scope enforcement, missing args |
@@ -213,7 +213,7 @@ Not now. Automate when:
 | Scope filtering | 4 | 5 | SQL-level enforcement, user isolation, admin unrestricted |
 | Config loading | 9 | — | Default merging, all config blocks |
 | Command routing | — | 14 | Every command path through createMessageRouter |
-| Business escalation | — | 3 | Keywords, retry threshold, counter reset |
+| Business escalation | — | 3 | LLM-driven escalation, escalate tool, admin pause |
 | SQLite + FTS5 | 4 | 13 | Schema, CRUD, search, activation, re-index, triggers |
 | Memory lifecycle | 7 | 2 | Prune, capture, /remember → /memory → /forget |
 | CLI | — | 7 | All subcommands except init (interactive) |

@@ -322,7 +322,9 @@ The default. The bot responds to your commands and questions. This is for your o
 
 The bot auto-responds to incoming messages from contacts using the LLM and your indexed knowledge base. Used for customer-facing chats where you want the bot to handle questions automatically.
 
-When a customer message matches an escalation keyword (like "refund" or "complaint"), the bot tells the customer it's checking with the team and notifies you in the admin chat.
+When the LLM determines a customer needs human attention (refunds, complaints, requests for a manager, urgent issues), it uses the `escalate` tool to notify you in the admin chat with the customer's name and reason. The bot continues responding naturally and empathetically — no canned "checking with the team" messages.
+
+**Admin presence pause:** When you (the owner) type directly in a business chat, the bot pauses for 30 minutes (configurable) so you can handle the conversation yourself. Customer messages during the pause are archived silently. The bot resumes automatically when the pause expires.
 
 ### Silent Mode
 
@@ -362,16 +364,17 @@ Configure how the bot represents your business to customers.
 
 The wizard walks through:
 
-1. **Business name** — e.g. "Acme Support"
-2. **Greeting** — what the bot says first, e.g. "Welcome to Acme! How can I help?" (or skip)
-3. **Topics** — what the bot can help with. Add topics one by one with optional descriptions:
+1. **Business name** — e.g. "Acme Support" (2-100 characters)
+2. **Greeting** — what the bot says first, e.g. "Welcome to Acme! How can I help?" (max 500 chars, or skip)
+3. **Topics** — what the bot can help with. Add topics one by one with optional descriptions (max 200 chars each):
    - "Pricing" → "Plans, billing, and payment info"
    - "Returns" → "Return policy and refund process"
    - Send "done" when finished
-4. **Rules** — custom instructions, e.g. "Always respond in Spanish", "Never offer discounts" (send "done" when finished)
-5. **Confirm** — review the summary, type "yes" to save
+4. **Rules** — custom instructions (max 200 chars each), e.g. "Always respond in Spanish", "Never offer discounts" (send "done" when finished)
+5. **Admin chat** — which chat should receive escalation notifications. Paste a chat ID, or "skip" to configure later
+6. **Confirm** — review the summary, type "yes" to save
 
-Type "cancel" at any step to abort.
+Type "cancel" at any step to abort. Any `/command` typed during the wizard cancels it and routes the command normally.
 
 ### Viewing and Clearing
 
@@ -389,7 +392,7 @@ When a customer messages a business-mode chat, the bot builds a system prompt fr
 - Numbered topic list with descriptions
 - Rules (default: don't make up info, cite sources, be professional + your custom rules)
 - Topic boundaries: the bot won't answer questions outside listed topics
-- Escalation keywords trigger admin notification
+- Escalation: the LLM has an `escalate` tool and uses it when the customer needs human attention (refunds, complaints, requests for a manager, urgent issues). Escalation keywords are guidance for the LLM, not hard-coded triggers
 
 The bot always calls the LLM — even when no documents match the question. This means the bot responds naturally instead of sending canned "I don't understand" messages.
 
@@ -968,7 +971,7 @@ Beeper: the poller seeds its "seen" set on startup, so old messages aren't repro
 | `~/.multis/auth/beeper-token.json` | Beeper OAuth token |
 | `~/.multis/auth/pin_sessions.json` | Active PIN sessions |
 | `~/.multis/data/documents.db` | SQLite database (FTS5 index, chunks, ACT-R activation) |
-| `~/.multis/data/memory/chats/` | Per-chat memory files (profile, recent, memory.md, daily logs) |
+| `~/.multis/data/memory/chats/` | Per-chat memory files (recent.json, memory.md, daily logs) |
 | `~/.multis/logs/daemon.log` | Daemon stdout/stderr |
 | `~/.multis/logs/audit.log` | Audit trail (all commands, pairings, escalations) |
 | `~/.multis/run/multis.pid` | Daemon PID file |

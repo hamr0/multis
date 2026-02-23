@@ -184,6 +184,32 @@ const TOOLS = [
     }
   },
 
+  {
+    name: 'escalate',
+    description: 'Escalate a conversation to the admin/owner for human attention. Use when you cannot resolve the customer\'s issue, when they request a human, or when the situation requires human judgment (refunds, complaints, urgent matters).',
+    platforms: ['linux', 'macos', 'android'],
+    owner_only: false,
+    input_schema: {
+      type: 'object',
+      properties: {
+        reason: { type: 'string', description: 'Why this needs human attention' },
+        urgency: { type: 'string', enum: ['normal', 'urgent'], description: 'Urgency level (default: normal)' }
+      },
+      required: ['reason']
+    },
+    execute: async ({ reason, urgency }, ctx) => {
+      const adminChat = ctx.config?.business?.escalation?.admin_chat;
+      if (!adminChat) return 'Escalation noted, but no admin chat is configured. Tell the customer someone will follow up.';
+      const customerName = ctx.config?.chats?.[ctx.chatId]?.name || ctx.chatId;
+      const tag = urgency === 'urgent' ? '[URGENT] ' : '';
+      const notification = `${tag}[Escalation] ${customerName}: ${reason}`;
+      if (ctx.platform?.send) {
+        await ctx.platform.send(adminChat, notification);
+      }
+      return 'Admin notified. Continue responding naturally to the customer.';
+    }
+  },
+
   // -------------------------------------------------------------------------
   // Desktop tools (linux + macos)
   // -------------------------------------------------------------------------

@@ -173,10 +173,9 @@ describe('BeeperPlatform', () => {
 
     it('uses per-chat mode override', () => {
       const { BeeperPlatform } = loadBeeper();
-      const bp = new BeeperPlatform(makeConfig({
-        default_mode: 'off',
-        chat_modes: { 'chat_biz': 'business' },
-      }));
+      const cfg = makeConfig({ default_mode: 'off' });
+      cfg.chats = { 'chat_biz': { mode: 'business' } };
+      const bp = new BeeperPlatform(cfg);
       assert.strictEqual(bp._getChatMode('chat_biz'), 'business');
       assert.strictEqual(bp._getChatMode('chat_other'), 'off');
     });
@@ -404,7 +403,8 @@ describe('BeeperPlatform', () => {
     it('routes self natural language in personal chats', async () => {
       const bp = makeBp(loadBeeper);
       bp._personalChats.add('c1');
-      bp.config.platforms.beeper.chat_modes = { c1: 'business' };
+      if (!bp.config.chats) bp.config.chats = {};
+      bp.config.chats.c1 = { mode: 'business' };
       const received = [];
       bp.onMessage(async (msg) => received.push(msg));
 
@@ -420,7 +420,8 @@ describe('BeeperPlatform', () => {
 
     it('routes non-self messages in business mode chats', async () => {
       const bp = makeBp(loadBeeper);
-      bp.config.platforms.beeper.chat_modes = { c1: 'business' };
+      if (!bp.config.chats) bp.config.chats = {};
+      bp.config.chats.c1 = { mode: 'business' };
       const received = [];
       bp.onMessage(async (msg) => received.push(msg));
 

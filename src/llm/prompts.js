@@ -140,10 +140,14 @@ function buildBusinessPrompt(config) {
     parts.push('Direct customers to these links when relevant.');
   }
 
-  // Escalation
+  // Escalation — LLM-driven via escalate tool
+  parts.push('\nEscalation:');
+  parts.push('- You have an "escalate" tool. Use it when the customer needs human attention: refunds, complaints, requests for a manager, urgent issues, or anything you cannot resolve.');
+  parts.push('- After escalating, continue the conversation naturally. Acknowledge the customer\'s concern and let them know someone will follow up.');
+  parts.push('- Do NOT use canned responses like "I\'m checking with the team." Respond empathetically and naturally.');
   const keywords = b.escalation?.escalate_keywords;
   if (keywords && keywords.length > 0) {
-    parts.push(`\nIf the customer mentions any of these topics, tell them you're checking with the team: ${keywords.join(', ')}.`);
+    parts.push(`- Topics that typically warrant escalation: ${keywords.join(', ')}.`);
   }
 
   return parts.join('\n');

@@ -1,6 +1,6 @@
 # Roadmap: Post-POC
 
-> POC 1-6 complete. All 357 tests passing. Next: dogfood, stabilize, ship.
+> POC 1-6 complete. All 386 tests passing. Next: dogfood, stabilize, ship.
 
 ## What's Built (POC 1-6 Summary)
 
@@ -18,7 +18,7 @@
 - **PIN auth**: 4-6 digit, SHA-256 hashed, 24h timeout, 3-fail lockout (`src/security/pin.js`)
 - **Prompt injection detection**: pattern matching + dedicated audit log (`src/security/injection.js`)
 - **Scoped search**: SQL-enforced `WHERE scope IN (...)` — kb, admin, user:chatId
-- **Business persona**: structured config (`config.business`) + `buildBusinessPrompt()` compiles name/greeting/topics/rules into system prompt. `/business setup` conversational wizard, `/business show|clear`. LLM always responds in business mode (no canned escalation on 0 chunks). Keyword escalation preserved.
+- **Business persona**: structured config (`config.business`) + `buildBusinessPrompt()` compiles name/greeting/topics/rules into system prompt. `/business setup` conversational wizard (with admin_chat step, input validation), `/business show|clear`. LLM always responds in business mode. LLM-driven escalation via `escalate` tool (no keyword short-circuit). Admin presence pause.
 - **Retention cleanup**: log cleanup (30d) + FTS pruning (90d user, 365d admin), runs on startup + daily (`src/maintenance/cleanup.js`)
 - **Tool-calling agent loop**: LLM executes actions via tools, multi-round (`src/tools/`, `src/bot/handlers.js:runAgentLoop`)
 - **Tools**: exec, read_file, send_file, grep_files, find_files, search_docs, recall_memory, remember, open_url, media_control, notify, clipboard, screenshot, system_info, wifi, brightness + Android tools
@@ -118,19 +118,23 @@ Start from scratch as if you're a new user. Validates the full install → first
 
 ### A4b. Business Persona
 
-- [ ] `/business setup` — full wizard flow (name → greeting → topics → rules → confirm)
+- [ ] `/business setup` — full wizard flow (name → greeting → topics → rules → admin_chat → confirm)
 - [ ] `/business setup` → "cancel" at any step aborts?
-- [ ] `/business setup` → "skip" for greeting skips?
+- [ ] `/business setup` → "skip" for greeting and admin_chat skips?
 - [ ] `/business setup` → multiple topics with descriptions?
 - [ ] `/business setup` → "done" on empty topics/rules works?
-- [ ] `/business show` — displays saved persona?
+- [ ] `/business setup` → name must be 2-100 chars, greeting max 500, topics/rules max 200?
+- [ ] `/business setup` → typing `/mode` during wizard cancels and routes command?
+- [ ] `/business show` — displays saved persona (including admin_chat)?
 - [ ] `/business clear` — resets name/greeting/topics/rules?
 - [ ] `/business` (no subcommand) — shows usage?
 - [ ] Non-owner `/business setup` — rejected?
 - [ ] Set business persona → set chat to business mode → send customer message with 0 KB matches → LLM responds naturally (not canned)?
-- [ ] Set business persona → customer sends "refund" → keyword escalation fires, admin notified?
+- [ ] Set business persona → customer says "I need a refund" → LLM calls escalate tool, admin notified, bot responds naturally?
 - [ ] Set business persona with topics → customer asks off-topic → LLM stays within topic boundaries?
+- [ ] Admin types in business chat → bot pauses for 30min? Customer messages archived silently?
 - [ ] `config.json` has correct business block after wizard save?
+- [ ] `config.chats` entry created with name/network when customer messages?
 
 ### A5. Multi-Agent
 
@@ -202,6 +206,16 @@ Keep a running list here as you test. Each entry: what happened, expected vs act
 | 7 | Mode | `/mode` on Telegram set mode locally — Telegram is admin channel, modes apply to Beeper | Medium | Fixed (Telegram /mode now explains, doesn't set) |
 | 8 | Beeper | Bot's own Telegram chat appeared in Beeper polling and /mode picker | Low | Fixed (bot_chat_id excluded from polls + lists) |
 | 9 | Init | Beeper command_prefix defaulted to `//` instead of `/` | Low | Fixed |
+| 10 | Escalation | Every escalation gets same canned "I'm checking with the team" — no LLM involvement | High | Fixed (v0.11: LLM-driven escalation via `escalate` tool) |
+| 11 | Escalation | Admin never gets escalation notifications — `admin_chat` not configured, wizard doesn't ask | High | Fixed (v0.11: admin_chat wizard step added) |
+| 12 | Escalation | No handoff — customer keeps pushing, gets same canned message repeatedly | High | Fixed (v0.11: admin presence pause, LLM responds naturally) |
+| 13 | Escalation | Responses aren't natural language — keyword match short-circuits LLM entirely | Medium | Fixed (v0.11: removed keyword short-circuit, all messages flow through LLM) |
+| 14 | Wizard | `/business setup` wizard has stale state bugs, missing validation | Medium | Fixed (v0.11: input validation, /command cancels wizard) |
+| 15 | Wizard | `/mode` typed during wizard swallowed as wizard input | Medium | Fixed (v0.11: /commands cancel wizard and re-route) |
+| 16 | Data | Chat metadata fragmented across config.json, profile.json, and Beeper API | Medium | Fixed (v0.11: `config.chats` as single source of truth, profile.json dropped) |
+| 17 | Memory | Two-stage pipeline capture threshold too high (was 20) | Low | Fixed (v0.10: lowered to 10) |
+| 18 | Memory | Silent mode chats never triggered capture | Medium | Fixed (v0.10: silent mode now triggers capture pipeline) |
+| 19 | Beeper | Off-mode self messages that aren't commands processed unnecessarily | Low | Fixed (v0.10: skipped in Beeper) |
 |   |      |       |          |        |
 
 ---

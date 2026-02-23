@@ -163,30 +163,15 @@ describe('ChatMemoryManager — pruneMemory', () => {
     });
   });
 
-  describe('updateProfile()', () => {
-    it('merges new fields into profile', () => {
-      const mem = makeMem('profile-merge');
-      mem.updateProfile({ displayName: 'Alice', network: 'whatsapp' });
-      const profile = mem.loadProfile();
-      assert.strictEqual(profile.displayName, 'Alice');
-      assert.strictEqual(profile.network, 'whatsapp');
+  describe('profile.json removed', () => {
+    it('ChatMemoryManager no longer has profilePath property', () => {
+      const mem = makeMem('no-profile');
+      assert.strictEqual(mem.profilePath, undefined);
     });
 
-    it('preserves existing fields when adding new ones', () => {
-      const mem = makeMem('profile-preserve');
-      mem.updateProfile({ displayName: 'Bob' });
-      mem.updateProfile({ network: 'telegram' });
-      const profile = mem.loadProfile();
-      assert.strictEqual(profile.displayName, 'Bob');
-      assert.strictEqual(profile.network, 'telegram');
-    });
-
-    it('overwrites existing fields with new values', () => {
-      const mem = makeMem('profile-overwrite');
-      mem.updateProfile({ displayName: 'Old Name' });
-      mem.updateProfile({ displayName: 'New Name' });
-      const profile = mem.loadProfile();
-      assert.strictEqual(profile.displayName, 'New Name');
+    it('ChatMemoryManager no longer has updateProfile method', () => {
+      const mem = makeMem('no-profile-method');
+      assert.strictEqual(typeof mem.updateProfile, 'undefined');
     });
   });
 

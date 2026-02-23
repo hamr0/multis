@@ -3,7 +3,8 @@ const os = require('os');
 const path = require('path');
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert');
-const { createMessageRouter, buildAgentRegistry, resolveAgent } = require('../../src/bot/handlers');
+const { createMessageRouter, buildAgentRegistry, resolveAgent, clearAdminPauses } = require('../../src/bot/handlers');
+const { updateChatMeta, backupConfig } = require('../../src/config');
 const { PinManager, hashPin } = require('../../src/security/pin');
 const { createTestEnv, mockPlatform, mockLLM, msg } = require('../helpers/setup');
 
@@ -238,27 +239,27 @@ describe('PIN auth', () => {
 // ---------------------------------------------------------------------------
 
 describe('Business escalation', () => {
-  it('keyword triggers immediate escalation', async () => {
+  it('business messages always reach LLM (no keyword short-circuit)', async () => {
     const env = createTestEnv({
       allowed_users: ['user1', 'cust1'],
       owner_id: 'user1',
       business: {
+        name: 'TestBiz',
         escalation: { escalate_keywords: ['refund', 'complaint'], admin_chat: 'admin_chat' }
       }
     });
     const platform = mockPlatform();
-    const llm = mockLLM('answer');
-    const indexer = stubIndexer([], { totalChunks: 10 }); // KB has docs, but no match
+    const llm = mockLLM('I understand your concern about the refund.');
+    const indexer = stubIndexer([], { totalChunks: 10 });
     const router = createMessageRouter(env.config, { llm, indexer });
 
     const m = msg('I want a refund', { senderId: 'cust1', chatId: 'cust_chat', routeAs: 'business' });
     await router(m, platform);
 
+    // LLM should be called (no keyword short-circuit)
+    assert.strictEqual(llm.calls.length, 1);
     const custMsg = platform.lastTo('cust_chat');
-    assert.match(custMsg.text, /checking with the team/i);
-    const adminMsg = platform.lastTo('admin_chat');
-    assert.match(adminMsg.text, /\[Escalation\]/);
-    assert.match(adminMsg.text, /keyword/);
+    assert.match(custMsg.text, /refund/i);
   });
 
   it('0 chunks still calls LLM (no canned escalation)', async () => {
@@ -734,7 +735,7 @@ describe('resolveAgent', () => {
   it('mode default used when no per-chat assignment', () => {
     const config = {
       defaults: { off: 'coder' },
-      platforms: { beeper: { chat_modes: { chat1: 'off' } } }
+      chats: { chat1: { mode: 'off' } }
     };
     const result = resolveAgent('hello', 'chat1', config, registry);
     assert.strictEqual(result.name, 'coder');
@@ -1092,6 +1093,10 @@ describe('/business command', () => {
 
     // Done with rules
     await router(msg('done'), platform);
+    assert.match(platform.lastTo('chat1').text, /escalation/i);
+
+    // Admin chat step
+    await router(msg('skip'), platform);
     assert.match(platform.lastTo('chat1').text, /Save/i);
 
     // Confirm
@@ -1166,16 +1171,233 @@ describe('buildBusinessPrompt', () => {
     assert.match(prompt, /Pricing: https:\/\/example\.com\/pricing/);
   });
 
-  it('includes escalation keywords', () => {
+  it('includes escalation keywords as guidance', () => {
     const prompt = buildBusinessPrompt({
       business: { name: 'Test', escalation: { escalate_keywords: ['refund', 'complaint'] } }
     });
     assert.match(prompt, /refund, complaint/);
+    assert.match(prompt, /escalate/i);
   });
 
   it('falls back to generic when no name', () => {
     const prompt = buildBusinessPrompt({ business: {} });
     assert.match(prompt, /business assistant/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Config.chats consolidation
+// ---------------------------------------------------------------------------
+
+describe('config.chats consolidation', () => {
+  it('chat_modes migration populates config.chats on loadConfig', () => {
+    const { loadConfig, setMultisDir } = require('../../src/config');
+    const env = createTestEnv();
+    // Manually write config with old chat_modes
+    const configPath = require('path').join(env.tmpDir, '.multis', 'config.json');
+    const raw = JSON.parse(require('fs').readFileSync(configPath, 'utf8'));
+    raw.platforms = { beeper: { enabled: true, chat_modes: { '!room1': 'business', '!room2': 'silent' } } };
+    require('fs').writeFileSync(configPath, JSON.stringify(raw));
+    const config = loadConfig();
+    assert.strictEqual(config.chats['!room1']?.mode, 'business');
+    assert.strictEqual(config.chats['!room2']?.mode, 'silent');
+    // Old chat_modes should be deleted
+    assert.strictEqual(config.platforms.beeper.chat_modes, undefined);
+    env.cleanup();
+  });
+
+  it('updateChatMeta upserts chat entry', () => {
+    const env = createTestEnv();
+    updateChatMeta(env.config, '!newchat', { name: 'Alice', network: 'whatsapp', platform: 'beeper' });
+    assert.strictEqual(env.config.chats['!newchat'].name, 'Alice');
+    assert.strictEqual(env.config.chats['!newchat'].network, 'whatsapp');
+    assert.ok(env.config.chats['!newchat'].lastActive);
+    // Second call merges
+    updateChatMeta(env.config, '!newchat', { network: 'telegram' });
+    assert.strictEqual(env.config.chats['!newchat'].name, 'Alice');
+    assert.strictEqual(env.config.chats['!newchat'].network, 'telegram');
+    env.cleanup();
+  });
+
+  it('getChatMode reads from config.chats', async () => {
+    const env = createTestEnv({
+      allowed_users: ['user1'], owner_id: 'user1',
+      chats: { '!room1': { mode: 'business', platform: 'beeper' } }
+    });
+    const platform = mockPlatform();
+    const llm = mockLLM('biz answer');
+    const router = createMessageRouter(env.config, { llm, indexer: stubIndexer() });
+    // Business mode message should reach LLM
+    const m = msg('hello', { senderId: 'cust1', chatId: '!room1', routeAs: 'business' });
+    await router(m, platform);
+    assert.strictEqual(llm.calls.length, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Escalate tool
+// ---------------------------------------------------------------------------
+
+describe('Escalate tool', () => {
+  it('escalate tool sends notification to admin_chat', async () => {
+    const { TOOLS } = require('../../src/tools/definitions');
+    const escalateTool = TOOLS.find(t => t.name === 'escalate');
+    assert.ok(escalateTool, 'escalate tool should exist');
+
+    const sent = [];
+    const ctx = {
+      chatId: '!custchat',
+      config: {
+        business: { escalation: { admin_chat: '!adminchat' } },
+        chats: { '!custchat': { name: 'Melanie' } }
+      },
+      platform: { send: async (chatId, text) => sent.push({ chatId, text }) }
+    };
+
+    const result = await escalateTool.execute({ reason: 'wants a refund', urgency: 'urgent' }, ctx);
+    assert.match(result, /Admin notified/);
+    assert.strictEqual(sent.length, 1);
+    assert.strictEqual(sent[0].chatId, '!adminchat');
+    assert.match(sent[0].text, /URGENT/);
+    assert.match(sent[0].text, /Melanie/);
+    assert.match(sent[0].text, /refund/);
+  });
+
+  it('escalate tool handles missing admin_chat gracefully', async () => {
+    const { TOOLS } = require('../../src/tools/definitions');
+    const escalateTool = TOOLS.find(t => t.name === 'escalate');
+    const ctx = {
+      chatId: '!custchat',
+      config: { business: { escalation: {} } },
+      platform: { send: async () => {} }
+    };
+    const result = await escalateTool.execute({ reason: 'needs help' }, ctx);
+    assert.match(result, /no admin chat/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Admin presence pause
+// ---------------------------------------------------------------------------
+
+describe('Admin presence pause', () => {
+  beforeEach(() => clearAdminPauses());
+
+  it('admin message in business chat pauses bot response', async () => {
+    const env = createTestEnv({
+      allowed_users: ['owner1'],
+      owner_id: 'owner1',
+      business: { escalation: { admin_pause_minutes: 30 } }
+    });
+    const platform = mockPlatform();
+    const llm = mockLLM('should not reach');
+    const router = createMessageRouter(env.config, { llm, indexer: stubIndexer() });
+
+    // Owner messages in business chat → bot pauses
+    const adminMsg = msg('I will handle this', { senderId: 'owner1', chatId: 'biz_chat', routeAs: 'business', isSelf: true });
+    await router(adminMsg, platform);
+    assert.strictEqual(llm.calls.length, 0, 'LLM should not be called for admin message');
+
+    // Customer messages while paused → silently archived
+    const custMsg = msg('thanks', { senderId: 'cust1', chatId: 'biz_chat', routeAs: 'business' });
+    await router(custMsg, platform);
+    assert.strictEqual(llm.calls.length, 0, 'LLM should not be called while admin paused');
+    // No response sent to customer
+    assert.strictEqual(platform.lastTo('biz_chat'), undefined);
+  });
+
+  it('bot resumes after admin pause expires', async () => {
+    const env = createTestEnv({
+      allowed_users: ['owner1', 'cust1'],
+      owner_id: 'owner1',
+      business: { name: 'TestBiz', escalation: { admin_pause_minutes: 30 } }
+    });
+    const platform = mockPlatform();
+    const llm = mockLLM('bot response');
+    const router = createMessageRouter(env.config, { llm, indexer: stubIndexer() });
+
+    // Owner messages → pause set
+    const adminMsg = msg('done here', { senderId: 'owner1', chatId: 'biz_chat', routeAs: 'business', isSelf: true });
+    await router(adminMsg, platform);
+
+    // Clear pauses to simulate expiry
+    clearAdminPauses();
+
+    // Customer messages → pause expired, LLM responds
+    const custMsg = msg('one more question', { senderId: 'cust1', chatId: 'biz_chat', routeAs: 'business' });
+    await router(custMsg, platform);
+    assert.strictEqual(llm.calls.length, 1, 'LLM should be called after pause expires');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wizard fixes
+// ---------------------------------------------------------------------------
+
+describe('Wizard fixes', () => {
+  it('/command during wizard cancels and re-routes', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    // Start wizard
+    await router(msg('/business setup'), platform);
+    assert.match(platform.lastTo('chat1').text, /business name/i);
+
+    // Type /help during wizard → cancels wizard, shows help
+    await router(msg('/help'), platform);
+    const messages = platform.sent.filter(m => m.chatId === 'chat1');
+    const cancelMsg = messages.find(m => m.text.includes('cancelled'));
+    assert.ok(cancelMsg, 'should cancel wizard');
+    const helpMsg = messages.find(m => m.text.includes('multis commands'));
+    assert.ok(helpMsg, 'should show help');
+    // Wizard state should be cleared
+    assert.strictEqual(env.config._pendingBusiness?.user1, undefined);
+  });
+
+  it('wizard validates empty business name', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/business setup'), platform);
+    // Send a single character (too short)
+    await router(msg('X'), platform);
+    assert.match(platform.lastTo('chat1').text, /2-100 characters/);
+  });
+
+  it('wizard asks for admin_chat step', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/business setup'), platform);
+    await router(msg('My Biz'), platform);    // name
+    await router(msg('skip'), platform);       // greeting
+    await router(msg('done'), platform);       // topics
+    await router(msg('done'), platform);       // rules → admin_chat step
+    assert.match(platform.lastTo('chat1').text, /escalation/i);
+
+    // Provide admin chat ID
+    await router(msg('!admin_room'), platform);
+    assert.match(platform.lastTo('chat1').text, /Save/i);
+
+    await router(msg('yes'), platform);
+    assert.strictEqual(env.config.business.escalation.admin_chat, '!admin_room');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Config backup
+// ---------------------------------------------------------------------------
+
+describe('Config backup', () => {
+  it('backupConfig creates .bak file', () => {
+    const env = createTestEnv();
+    const configPath = require('path').join(env.tmpDir, '.multis', 'config.json');
+    backupConfig();
+    assert.ok(require('fs').existsSync(configPath + '.bak'), 'backup should exist');
+    env.cleanup();
   });
 });
 

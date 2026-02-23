@@ -16,7 +16,6 @@ class ChatMemoryManager {
     this.isAdmin = !!options.isAdmin;
     const base = options.baseDir || MEMORY_BASE;
     this.dir = path.join(base, this.chatId);
-    this.profilePath = path.join(this.dir, 'profile.json');
     this.recentPath = path.join(this.dir, 'recent.json');
     this.logDir = path.join(this.dir, 'log');
     // Admin chats share a single memory.md across platforms
@@ -33,20 +32,6 @@ class ChatMemoryManager {
   ensureDirectories() {
     if (!fs.existsSync(this.dir)) fs.mkdirSync(this.dir, { recursive: true });
     if (!fs.existsSync(this.logDir)) fs.mkdirSync(this.logDir, { recursive: true });
-  }
-
-  // --- Profile ---
-
-  loadProfile() {
-    if (!fs.existsSync(this.profilePath)) {
-      return { mode: 'off', platform: null, lastActive: null, created: new Date().toISOString() };
-    }
-    return JSON.parse(fs.readFileSync(this.profilePath, 'utf-8'));
-  }
-
-  saveProfile(profile) {
-    profile.lastActive = new Date().toISOString();
-    fs.writeFileSync(this.profilePath, JSON.stringify(profile, null, 2));
   }
 
   // --- Recent messages (rolling window) ---
@@ -113,13 +98,6 @@ class ChatMemoryManager {
     const content = this.loadMemory();
     if (!content.trim()) return 0;
     return (content.match(/^## \d{4}-/gm) || []).length;
-  }
-
-  updateProfile(fields) {
-    const profile = this.loadProfile();
-    Object.assign(profile, fields);
-    this.saveProfile(profile);
-    return profile;
   }
 
   // --- Daily log (append-only) ---
