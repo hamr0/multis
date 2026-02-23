@@ -396,7 +396,7 @@ function createMessageRouter(config, deps = {}) {
         }
       }
 
-      await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
+      await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry });
       return;
     }
 
