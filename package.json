@@ -1,6 +1,6 @@
 {
   "name": "multis",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "A personal chatbot and assistant that runs on your computer",
   "main": "src/index.js",
   "bin": {
