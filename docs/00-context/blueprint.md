@@ -588,7 +588,8 @@ Defined in `src/tools/definitions.js`. Not owner_only — available in business 
 
 - `reason` (required): why this needs human attention
 - `urgency` (optional): `normal` or `urgent`
-- Reads `admin_chat` from `config.business.escalation.admin_chat`
+- Sends to ALL admin channels automatically: Telegram (`config.owner_id`) + Beeper Note-to-self (via `getAdminChatIds()`)
+- Optional override: `config.business.escalation.admin_chat` sends to a single specific chat instead
 - Reads customer name from `config.chats[chatId].name`
 - Returns "Admin notified. Continue responding naturally." to the LLM
 

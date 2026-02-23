@@ -371,10 +371,11 @@ The wizard walks through:
    - "Returns" → "Return policy and refund process"
    - Send "done" when finished
 4. **Rules** — custom instructions (max 200 chars each), e.g. "Always respond in Spanish", "Never offer discounts" (send "done" when finished)
-5. **Admin chat** — which chat should receive escalation notifications. Paste a chat ID, or "skip" to configure later
-6. **Confirm** — review the summary, type "yes" to save
+5. **Confirm** — review the summary, type "yes" to save
 
 Type "cancel" at any step to abort. Any `/command` typed during the wizard cancels it and routes the command normally.
+
+Escalation notifications are sent automatically to all admin channels (Telegram + Beeper Note-to-self) — no manual configuration needed.
 
 ### Viewing and Clearing
 

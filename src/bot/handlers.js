@@ -892,9 +892,9 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     }
 
     // --- Agent loop with tool calling ---
-    const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5 } = toolDeps;
+    const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5, platformRegistry } = toolDeps;
     const userTools = getToolsForUser(allTools, admin, tCfg);
-    const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, config };
+    const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, config, platformRegistry };
 
     const answer = await runAgentLoop(agentProvider, messages, userTools, {
       system,
@@ -1348,7 +1348,7 @@ function createSchedulerTick({ platformRegistry, config, provider, indexer, getM
       const answer = await runAgentLoop(provider, [{ role: 'user', content: job.action }], userTools, {
         system,
         maxRounds: maxToolRounds || config?.llm?.max_tool_rounds || 5,
-        ctx: { senderId: config.owner_id, chatId: job.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform },
+        ctx: { senderId: config.owner_id, chatId: job.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, config, platformRegistry },
         config
       });
       await platform.send(job.chatId, answer);
@@ -1479,7 +1479,7 @@ async function routePlan(msg, platform, config, provider, goal, toolDeps) {
     await platform.send(msg.chatId, `Plan:\n${planText}\n\nExecuting...`);
 
     // Execute steps sequentially via the agent loop
-    const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5 } = toolDeps;
+    const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5, platformRegistry } = toolDeps;
     const admin = isOwner(msg.senderId, config, msg);
     const userTools = getToolsForUser(allTools, admin, tCfg);
 
@@ -1487,7 +1487,7 @@ async function routePlan(msg, platform, config, provider, goal, toolDeps) {
       try {
         const answer = await runAgentLoop(provider, [{ role: 'user', content: step.action }], userTools, {
           maxRounds: maxToolRounds,
-          ctx: { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, platform },
+          ctx: { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, platform, config, platformRegistry },
           config
         });
         await platform.send(msg.chatId, `Step "${step.action}": ${answer}`);
@@ -1625,8 +1625,9 @@ async function handleBusinessWizardStep(msg, platform, config, input) {
 
     case 'rules':
       if (lower === 'done') {
-        pending.step = 'admin_chat';
-        await platform.send(msg.chatId, 'Which chat should receive escalation notifications?\nPaste a chat ID, or "skip" to set later.');
+        pending.step = 'confirm';
+        const summary = formatBusinessSummary(pending.data);
+        await platform.send(msg.chatId, `${summary}\n\nSave this? (yes/no)`);
         break;
       }
       if (input.length > 200) {
@@ -1637,25 +1638,9 @@ async function handleBusinessWizardStep(msg, platform, config, input) {
       await platform.send(msg.chatId, 'Added. Next rule? (or "done")');
       break;
 
-    case 'admin_chat':
-      if (lower !== 'skip') {
-        pending.data.admin_chat = input;
-      }
-      pending.step = 'confirm';
-      {
-        const summary = formatBusinessSummary(pending.data);
-        await platform.send(msg.chatId, `${summary}\n\nSave this? (yes/no)`);
-      }
-      break;
-
     case 'confirm':
       if (lower === 'yes' || lower === 'y') {
-        const adminChat = pending.data.admin_chat;
-        delete pending.data.admin_chat;
         config.business = { ...config.business, ...pending.data };
-        if (adminChat) {
-          config.business.escalation = { ...config.business.escalation, admin_chat: adminChat };
-        }
         saveConfig(config);
         delete config._pendingBusiness[msg.senderId];
         await platform.send(msg.chatId, 'Business persona saved.');
@@ -1681,7 +1666,7 @@ function formatBusinessSummary(data) {
     lines.push('  Rules:');
     data.rules.forEach(r => lines.push(`    - ${r}`));
   }
-  if (data.admin_chat) lines.push(`  Escalation chat: ${data.admin_chat}`);
+  // Escalation notifications auto-sent to all admin channels (Telegram + Beeper Note-to-self)
   return lines.join('\n');
 }
 

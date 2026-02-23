@@ -1091,12 +1091,8 @@ describe('/business command', () => {
     await router(msg('done'), platform);
     assert.match(platform.lastTo('chat1').text, /rule/i);
 
-    // Done with rules
+    // Done with rules → goes straight to confirm
     await router(msg('done'), platform);
-    assert.match(platform.lastTo('chat1').text, /escalation/i);
-
-    // Admin chat step
-    await router(msg('skip'), platform);
     assert.match(platform.lastTo('chat1').text, /Save/i);
 
     // Confirm
@@ -1239,40 +1235,68 @@ describe('config.chats consolidation', () => {
 // ---------------------------------------------------------------------------
 
 describe('Escalate tool', () => {
-  it('escalate tool sends notification to admin_chat', async () => {
+  it('escalate tool sends to all admin channels via platformRegistry', async () => {
     const { TOOLS } = require('../../src/tools/definitions');
     const escalateTool = TOOLS.find(t => t.name === 'escalate');
     assert.ok(escalateTool, 'escalate tool should exist');
 
     const sent = [];
+    const fakeSend = async (chatId, text) => sent.push({ chatId, text });
+    const registry = new Map();
+    registry.set('telegram', { send: fakeSend });
+    registry.set('beeper', { send: fakeSend, getAdminChatIds: () => ['!note-to-self'] });
+
     const ctx = {
       chatId: '!custchat',
       config: {
-        business: { escalation: { admin_chat: '!adminchat' } },
+        owner_id: 'tg123',
+        business: { escalation: {} },
         chats: { '!custchat': { name: 'Melanie' } }
       },
-      platform: { send: async (chatId, text) => sent.push({ chatId, text }) }
+      platformRegistry: registry
     };
 
     const result = await escalateTool.execute({ reason: 'wants a refund', urgency: 'urgent' }, ctx);
     assert.match(result, /Admin notified/);
-    assert.strictEqual(sent.length, 1);
-    assert.strictEqual(sent[0].chatId, '!adminchat');
+    assert.strictEqual(sent.length, 2, 'should send to both Telegram and Beeper');
+    assert.strictEqual(sent[0].chatId, 'tg123');
+    assert.strictEqual(sent[1].chatId, '!note-to-self');
     assert.match(sent[0].text, /URGENT/);
     assert.match(sent[0].text, /Melanie/);
     assert.match(sent[0].text, /refund/);
   });
 
-  it('escalate tool handles missing admin_chat gracefully', async () => {
+  it('escalate tool uses admin_chat override when set', async () => {
+    const { TOOLS } = require('../../src/tools/definitions');
+    const escalateTool = TOOLS.find(t => t.name === 'escalate');
+
+    const sent = [];
+    const ctx = {
+      chatId: '!custchat',
+      config: {
+        business: { escalation: { admin_chat: '!override' } },
+        chats: { '!custchat': { name: 'Customer' } }
+      },
+      platform: { send: async (chatId, text) => sent.push({ chatId, text }) },
+      platformRegistry: new Map()
+    };
+
+    const result = await escalateTool.execute({ reason: 'needs help' }, ctx);
+    assert.match(result, /Admin notified/);
+    assert.strictEqual(sent.length, 1);
+    assert.strictEqual(sent[0].chatId, '!override');
+  });
+
+  it('escalate tool handles no admin channels gracefully', async () => {
     const { TOOLS } = require('../../src/tools/definitions');
     const escalateTool = TOOLS.find(t => t.name === 'escalate');
     const ctx = {
       chatId: '!custchat',
       config: { business: { escalation: {} } },
-      platform: { send: async () => {} }
+      platformRegistry: new Map()
     };
     const result = await escalateTool.execute({ reason: 'needs help' }, ctx);
-    assert.match(result, /no admin chat/i);
+    assert.match(result, /no admin channels/i);
   });
 });
 
@@ -1366,7 +1390,7 @@ describe('Wizard fixes', () => {
     assert.match(platform.lastTo('chat1').text, /2-100 characters/);
   });
 
-  it('wizard asks for admin_chat step', async () => {
+  it('wizard goes from rules to confirm (no admin_chat step)', async () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
@@ -1375,15 +1399,11 @@ describe('Wizard fixes', () => {
     await router(msg('My Biz'), platform);    // name
     await router(msg('skip'), platform);       // greeting
     await router(msg('done'), platform);       // topics
-    await router(msg('done'), platform);       // rules → admin_chat step
-    assert.match(platform.lastTo('chat1').text, /escalation/i);
-
-    // Provide admin chat ID
-    await router(msg('!admin_room'), platform);
+    await router(msg('done'), platform);       // rules → confirm (no admin_chat step)
     assert.match(platform.lastTo('chat1').text, /Save/i);
 
     await router(msg('yes'), platform);
-    assert.strictEqual(env.config.business.escalation.admin_chat, '!admin_room');
+    assert.match(platform.lastTo('chat1').text, /saved/i);
   });
 });
 

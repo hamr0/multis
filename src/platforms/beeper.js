@@ -273,6 +273,10 @@ class BeeperPlatform extends Platform {
     return result.srcURL.replace(/^file:\/\//, '');
   }
 
+  getAdminChatIds() {
+    return [...this._personalChats];
+  }
+
   _getChatMode(chatId) {
     const stored = this.config.chats?.[chatId]?.mode;
     // Ignore stale 'personal' values (was renamed to profile, not a valid mode)

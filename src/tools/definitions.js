@@ -198,14 +198,34 @@ const TOOLS = [
       required: ['reason']
     },
     execute: async ({ reason, urgency }, ctx) => {
-      const adminChat = ctx.config?.business?.escalation?.admin_chat;
-      if (!adminChat) return 'Escalation noted, but no admin chat is configured. Tell the customer someone will follow up.';
       const customerName = ctx.config?.chats?.[ctx.chatId]?.name || ctx.chatId;
       const tag = urgency === 'urgent' ? '[URGENT] ' : '';
       const notification = `${tag}[Escalation] ${customerName}: ${reason}`;
-      if (ctx.platform?.send) {
-        await ctx.platform.send(adminChat, notification);
+
+      // Optional override: send to a single specific chat
+      const override = ctx.config?.business?.escalation?.admin_chat;
+      if (override) {
+        if (ctx.platform?.send) await ctx.platform.send(override, notification);
+        return 'Admin notified. Continue responding naturally to the customer.';
       }
+
+      // Send to all admin channels
+      let sent = 0;
+      const registry = ctx.platformRegistry;
+      if (registry) {
+        for (const [name, plat] of registry) {
+          if (name === 'telegram' && ctx.config?.owner_id) {
+            await plat.send(ctx.config.owner_id, notification);
+            sent++;
+          } else if (name === 'beeper' && plat.getAdminChatIds) {
+            for (const chatId of plat.getAdminChatIds()) {
+              await plat.send(chatId, notification);
+              sent++;
+            }
+          }
+        }
+      }
+      if (sent === 0) return 'Escalation noted, but no admin channels available. Tell the customer someone will follow up.';
       return 'Admin notified. Continue responding naturally to the customer.';
     }
   },

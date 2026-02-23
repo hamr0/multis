@@ -118,9 +118,9 @@ Start from scratch as if you're a new user. Validates the full install → first
 
 ### A4b. Business Persona
 
-- [ ] `/business setup` — full wizard flow (name → greeting → topics → rules → admin_chat → confirm)
+- [ ] `/business setup` — full wizard flow (name → greeting → topics → rules → confirm)
 - [ ] `/business setup` → "cancel" at any step aborts?
-- [ ] `/business setup` → "skip" for greeting and admin_chat skips?
+- [ ] `/business setup` → "skip" for greeting skips?
 - [ ] `/business setup` → multiple topics with descriptions?
 - [ ] `/business setup` → "done" on empty topics/rules works?
 - [ ] `/business setup` → name must be 2-100 chars, greeting max 500, topics/rules max 200?
