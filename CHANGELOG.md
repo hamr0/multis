@@ -2,6 +2,17 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [0.11.1] - 2026-02-27
+
+### Fixed
+- `/mode` picker replies silently dropped — personal/Note-to-self chat defaulted to `off` mode, which allowed `/commands` but blocked non-command replies like picker selections
+- `_pendingMode` keyed by `chatId` instead of `senderId` — Beeper senderId can vary across messages from the same user
+- `/mode` picker now loops properly: digits select, `/commands` cancel, other text prompts user to pick a number
+
+### Changed
+- Personal/Note-to-self chats default to `personal` mode (never restricted) — they are admin command channels
+- `/mode` read-only listing now shows numbered entries on both Telegram and Beeper
+
 ## [0.11.0] - 2026-02-23
 
 ### Added
