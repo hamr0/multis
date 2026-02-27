@@ -283,37 +283,44 @@ function createMessageRouter(config, deps = {}) {
     }
 
     // Handle pending mode selection (interactive picker reply)
-    if (config._pendingMode?.[msg.senderId] && /^\d+$/.test(text.trim())) {
-      const pending = config._pendingMode[msg.senderId];
-      const idx = parseInt(text.trim(), 10) - 1;
-      if (idx >= 0 && idx < pending.matches.length) {
-        const chat = pending.matches[idx];
-        // Block silent/off for personal/note-to-self chats
-        const beeperPlat = platformRegistry?.get('beeper');
-        if ((pending.mode === 'silent' || pending.mode === 'off') && beeperPlat?._personalChats?.has(chat.id)) {
-          delete config._pendingMode[msg.senderId];
-          await platform.send(msg.chatId, 'Personal/note-to-self chats cannot be set to silent or off.');
-          return;
+    // Keyed by chatId (not senderId) — Beeper senderId can vary across messages
+    const pendingMode = config._pendingMode?.[msg.chatId];
+    if (pendingMode) {
+      // /commands cancel the picker and fall through to command routing
+      if (text.startsWith('/')) {
+        delete config._pendingMode[msg.chatId];
+        await platform.send(msg.chatId, 'Mode selection cancelled.');
+        // Fall through to command routing below
+      } else if (/^\d+$/.test(text.trim())) {
+        const idx = parseInt(text.trim(), 10) - 1;
+        if (idx >= 0 && idx < pendingMode.matches.length) {
+          const chat = pendingMode.matches[idx];
+          // Block silent/off for personal/note-to-self chats
+          const beeperPlat = platformRegistry?.get('beeper');
+          if ((pendingMode.mode === 'silent' || pendingMode.mode === 'off') && beeperPlat?._personalChats?.has(chat.id)) {
+            delete config._pendingMode[msg.chatId];
+            await platform.send(msg.chatId, 'Personal/note-to-self chats cannot be set to silent or off.');
+            return;
+          }
+          setChatMode(config, chat.id, pendingMode.mode);
+          if (pendingMode.agent) {
+            if (!config.chat_agents) config.chat_agents = {};
+            config.chat_agents[chat.id] = pendingMode.agent;
+            saveConfig(config);
+          }
+          delete config._pendingMode[msg.chatId];
+          const agentNote = pendingMode.agent ? `, agent: ${pendingMode.agent}` : '';
+          await platform.send(msg.chatId, `${chat.title || chat.id} set to: ${pendingMode.mode}${agentNote}`);
+          logAudit({ action: 'mode', user_id: msg.senderId, chatId: chat.id, mode: pendingMode.mode, agent: pendingMode.agent });
+        } else {
+          await platform.send(msg.chatId, `Invalid choice. Pick 1-${pendingMode.matches.length}.`);
         }
-        setChatMode(config, chat.id, pending.mode);
-        if (pending.agent) {
-          if (!config.chat_agents) config.chat_agents = {};
-          config.chat_agents[chat.id] = pending.agent;
-          saveConfig(config);
-        }
-        delete config._pendingMode[msg.senderId];
-        const agentNote = pending.agent ? `, agent: ${pending.agent}` : '';
-        await platform.send(msg.chatId, `${chat.title || chat.id} set to: ${pending.mode}${agentNote}`);
-        logAudit({ action: 'mode', user_id: msg.senderId, chatId: chat.id, mode: pending.mode, agent: pending.agent });
+        return;
       } else {
-        await platform.send(msg.chatId, `Invalid choice. Pick 1-${pending.matches.length}.`);
+        // Non-number, non-command reply while picker is open — remind user
+        await platform.send(msg.chatId, `Pick a number (1-${pendingMode.matches.length}) or send a /command to cancel.`);
+        return;
       }
-      return;
-    }
-
-    // Clear stale pending mode if user sends something else
-    if (config._pendingMode?.[msg.senderId]) {
-      delete config._pendingMode[msg.senderId];
     }
 
     // Handle pending /business setup wizard
@@ -1000,9 +1007,9 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
       if (hasBeeperChats) {
         const allChats = listBeeperChats(beeperPlatform, config);
         if (allChats && allChats.length > 0) {
-          const lines = allChats.map(c => {
+          const lines = allChats.map((c, i) => {
             const m = getChatMode(config, c.id);
-            return `  ${c.title || c.id} [${m}]`;
+            return `  ${i + 1}) ${c.title || c.id} [${m}]`;
           });
           statusMsg += `\n\nChat modes:\n${lines.join('\n')}`;
         }
@@ -1036,7 +1043,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
       if (match.length > 1) {
         const list = match.map((c, i) => `  ${i + 1}) ${c.title || c.name || c.id}`).join('\n');
         if (!config._pendingMode) config._pendingMode = {};
-        config._pendingMode[msg.senderId] = { mode, matches: match, agent: null };
+        config._pendingMode[msg.chatId] = { mode, matches: match, agent: null };
         await platform.send(msg.chatId, `Multiple matches:\n${list}\n\nReply with a number:`);
         return;
       }
@@ -1068,9 +1075,9 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
         await platform.send(msg.chatId, 'No chats found.');
         return;
       }
-      const lines = allChats.map(c => {
+      const lines = allChats.map((c, i) => {
         const m = getChatMode(config, c.id);
-        return `  ${c.title || c.id} [${m}]`;
+        return `  ${i + 1}) ${c.title || c.id} [${m}]`;
       });
       await platform.send(msg.chatId, `Chat modes:\n${lines.join('\n')}`);
     } else {
@@ -1126,7 +1133,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
       const list = match.map((c, i) => `  ${i + 1}) ${c.title || c.name || c.id}`).join('\n');
       // Store pending mode selection (include agent for deferred assignment)
       if (!config._pendingMode) config._pendingMode = {};
-      config._pendingMode[msg.senderId] = { mode, matches: match, agent: agentArg };
+      config._pendingMode[msg.chatId] = { mode, matches: match, agent: agentArg };
       await platform.send(msg.chatId, `Multiple matches:\n${list}\n\nReply with a number:`);
       return;
     }
@@ -1159,7 +1166,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
     }).join('\n');
     // Store pending mode selection (include agent for deferred assignment)
     if (!config._pendingMode) config._pendingMode = {};
-    config._pendingMode[msg.senderId] = { mode, matches: chats, agent: agentArg };
+    config._pendingMode[msg.chatId] = { mode, matches: chats, agent: agentArg };
     await platform.send(msg.chatId, `Pick a chat to set to ${mode}:\n${list}\n\nReply with a number:`);
     return;
   }

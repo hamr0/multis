@@ -145,14 +145,15 @@ class BeeperPlatform extends Platform {
           if (!msgId) continue;
 
           // Skip already-seen or currently-processing messages
-          if (this._seen.has(msgId)) continue;
-          if (this._processing.has(msgId)) continue;
+          if (this._seen.has(msgId)) { continue; }
+          if (this._processing.has(msgId)) { continue; }
 
           // Mark as seen
           this._seen.add(msgId);
 
           const isSelf = this._isSelf(msg);
           const text = msg.text || '';
+          const isPersonalChat = this._personalChats.has(chatId);
 
           // Skip our own responses, bot chats, and bot-to-bot loops
           if (text.startsWith('[multis]')) continue;
@@ -162,16 +163,13 @@ class BeeperPlatform extends Platform {
 
           if (!this._messageCallback) continue;
 
-          // Detect self/personal chats (single participant or DM type)
-          const isPersonalChat = this._personalChats.has(chatId);
-
           const mode = this._getChatMode(chatId);
 
           // Off mode: skip non-self messages entirely (no processing, no archiving)
-          // Self messages: only allow commands in personal chats, skip everything else
+          // Exception: self-messages in personal chats always go through (commands + interactive replies)
           if (mode === 'off') {
             if (!isSelf) continue;
-            if (!isPersonalChat || !text.startsWith(this.commandPrefix)) continue;
+            if (!isPersonalChat) continue;
           }
 
           // Determine how to route this message
@@ -182,7 +180,7 @@ class BeeperPlatform extends Platform {
             // Explicit command from personal/note-to-self chat only
             shouldProcess = true;
           } else if (isSelf && isPersonalChat && !text.startsWith(this.commandPrefix)) {
-            // Self-message in personal/note-to-self chat → natural language ask
+            // Self-message in personal/note-to-self chat → natural language ask / interactive reply
             routeAs = 'natural';
             shouldProcess = true;
           } else if (!isSelf && mode === 'business') {
@@ -282,8 +280,8 @@ class BeeperPlatform extends Platform {
     // Ignore stale 'personal' values (was renamed to profile, not a valid mode)
     if (stored && stored !== 'personal') return stored;
     if (this.config.platforms?.beeper?.default_mode) return this.config.platforms.beeper.default_mode;
-    // Personal chats (note-to-self) stay off; others default per bot_mode
-    if (this._personalChats.has(chatId)) return 'off';
+    // Personal chats (note-to-self) are admin command channels — never restrict
+    if (this._personalChats.has(chatId)) return 'personal';
     const botMode = this.config.bot_mode || 'personal';
     return botMode === 'personal' ? 'silent' : 'business';
   }

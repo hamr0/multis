@@ -158,11 +158,11 @@ describe('BeeperPlatform', () => {
       assert.strictEqual(bp._getChatMode('chat1'), 'silent');
     });
 
-    it('returns off for self-chats', () => {
+    it('returns personal for self-chats (admin command channel)', () => {
       const { BeeperPlatform } = loadBeeper();
       const bp = new BeeperPlatform(makeConfig());
       bp._personalChats.add('selfChat');
-      assert.strictEqual(bp._getChatMode('selfChat'), 'off');
+      assert.strictEqual(bp._getChatMode('selfChat'), 'personal');
     });
 
     it('uses default_mode from config', () => {
