@@ -323,6 +323,17 @@ function createMessageRouter(config, deps = {}) {
       }
     }
 
+    // Handle pending /mode business menu selection
+    if (config._pendingBusinessMenu?.[msg.chatId]) {
+      if (text.startsWith('/')) {
+        delete config._pendingBusinessMenu[msg.chatId];
+        await platform.send(msg.chatId, 'Business menu cancelled.');
+      } else {
+        const handled = await handleBusinessMenuReply(msg, platform, config, text.trim(), agentRegistry, platformRegistry);
+        if (handled) return;
+      }
+    }
+
     // Handle pending /business setup wizard
     if (config._pendingBusiness?.[msg.senderId]) {
       // /commands during wizard cancel it and fall through to command routing
@@ -383,6 +394,12 @@ function createMessageRouter(config, deps = {}) {
     if (msg.routeAs === 'natural' || msg.routeAs === 'business') {
       // Business: anyone can get a response (customers via Beeper)
       if (msg.routeAs !== 'business' && !isPaired(msg, config)) return;
+
+      // Silently ignore emoji-only / very short messages in business chats
+      if (msg.routeAs === 'business') {
+        const trimmed = (msg.text || '').trim();
+        if (!trimmed || trimmed.length <= 2) return;
+      }
 
       // Admin presence pause for business chats
       if (msg.routeAs === 'business') {
@@ -524,9 +541,6 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
         break;
       case 'plan':
         await routePlan(msg, platform, config, provider, args, toolDeps);
-        break;
-      case 'business':
-        await routeBusiness(msg, platform, config, args);
         break;
       case 'help':
         await routeHelp(msg, platform, config);
@@ -818,7 +832,9 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
 
 async function routeAsk(msg, platform, config, indexer, provider, question, getMem, memCfg, agentRegistry, toolDeps = {}) {
   if (!question) {
-    await platform.send(msg.chatId, 'Usage: /ask <question>');
+    if (msg.routeAs !== 'business') {
+      await platform.send(msg.chatId, 'Usage: /ask <question>');
+    }
     return;
   }
 
@@ -1059,6 +1075,12 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
       return;
     }
 
+    // No target + business → show business menu
+    if (mode === 'business') {
+      await showBusinessMenu(msg, platform, config);
+      return;
+    }
+
     // No target → set global bot_mode
     config.bot_mode = mode;
     saveConfig(config);
@@ -1148,6 +1170,12 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
     const agentNote = agentArg ? `, agent: ${agentArg}` : '';
     await platform.send(msg.chatId, `${chat.title || chat.id} set to: ${mode}${agentNote}`);
     logAudit({ action: 'mode', user_id: msg.senderId, chatId: chat.id, mode, target, agent: agentArg });
+    return;
+  }
+
+  // Beeper: no target + business → show business menu
+  if (mode === 'business' && msg.isSelf) {
+    await showBusinessMenu(msg, platform, config);
     return;
   }
 
@@ -1511,56 +1539,117 @@ async function routePlan(msg, platform, config, provider, goal, toolDeps) {
 }
 
 // ---------------------------------------------------------------------------
-// /business command + setup wizard
+// /mode business menu + setup wizard
 // ---------------------------------------------------------------------------
 
-async function routeBusiness(msg, platform, config, args) {
-  if (!isOwner(msg.senderId, config, msg)) {
-    await platform.send(msg.chatId, 'Owner only command.');
-    return;
+async function showBusinessMenu(msg, platform, config) {
+  if (!config._pendingBusinessMenu) config._pendingBusinessMenu = {};
+  config._pendingBusinessMenu[msg.chatId] = { senderId: msg.senderId };
+  await platform.send(msg.chatId,
+    'Business Mode\n' +
+    '1) Setup persona\n' +
+    '2) Show persona\n' +
+    '3) Clear persona\n' +
+    '4) Set as global default\n' +
+    '5) Assign chats\n\n' +
+    'Reply with a number:'
+  );
+}
+
+async function handleBusinessMenuReply(msg, platform, config, input, agentRegistry, platformRegistry) {
+  const pending = config._pendingBusinessMenu[msg.chatId];
+  if (!pending) return false;
+
+  const choice = parseInt(input, 10);
+  if (isNaN(choice) || choice < 1 || choice > 5) {
+    await platform.send(msg.chatId, 'Pick 1-5 or send a /command to cancel.');
+    return true;
   }
 
-  const sub = (args || '').trim().toLowerCase();
+  delete config._pendingBusinessMenu[msg.chatId];
 
-  if (sub === 'show') {
-    const b = config.business || {};
-    if (!b.name) {
-      await platform.send(msg.chatId, 'No business persona configured. Run /business setup to create one.');
-      return;
+  switch (choice) {
+    case 1: {
+      // Launch wizard — pre-populated from existing config
+      if (!config._pendingBusiness) config._pendingBusiness = {};
+      const existing = config.business || {};
+      config._pendingBusiness[msg.senderId] = {
+        step: 'name',
+        data: {
+          name: existing.name || null,
+          greeting: existing.greeting || null,
+          topics: existing.topics ? existing.topics.map(t => ({ ...t })) : [],
+          rules: existing.rules ? [...existing.rules] : []
+        }
+      };
+      const current = existing.name ? `\nCurrent: ${existing.name}` : '';
+      await platform.send(msg.chatId, `Step 1/5 — Name${current}\nSend new name or "skip" to keep it.`);
+      return true;
     }
-    const lines = [`Name: ${b.name}`];
-    if (b.greeting) lines.push(`Greeting: ${b.greeting}`);
-    if (b.topics?.length > 0) {
-      lines.push('Topics:');
-      b.topics.forEach((t, i) => {
-        const esc = t.escalate ? ' [escalate]' : '';
-        lines.push(`  ${i + 1}. ${t.name}${t.description ? ' — ' + t.description : ''}${esc}`);
-      });
+    case 2: {
+      // Show persona
+      const b = config.business || {};
+      if (!b.name) {
+        await platform.send(msg.chatId, 'No business persona configured. Use /mode business → 1 to set one up.');
+        return true;
+      }
+      const lines = [`Name: ${b.name}`];
+      if (b.greeting) lines.push(`Greeting: ${b.greeting}`);
+      if (b.topics?.length > 0) {
+        lines.push('Topics:');
+        b.topics.forEach((t, i) => {
+          const esc = t.escalate ? ' [escalate]' : '';
+          lines.push(`  ${i + 1}. ${t.name}${t.description ? ' — ' + t.description : ''}${esc}`);
+        });
+      }
+      if (b.rules?.length > 0) {
+        lines.push('Rules:');
+        b.rules.forEach(r => lines.push(`  - ${r}`));
+      }
+      await platform.send(msg.chatId, lines.join('\n'));
+      return true;
     }
-    if (b.rules?.length > 0) {
-      lines.push('Rules:');
-      b.rules.forEach(r => lines.push(`  - ${r}`));
+    case 3: {
+      // Clear persona
+      config.business = { ...config.business, name: null, greeting: null, topics: [], rules: [] };
+      saveConfig(config);
+      await platform.send(msg.chatId, 'Business persona cleared.');
+      logAudit({ action: 'business_clear', user_id: msg.senderId });
+      return true;
     }
-    await platform.send(msg.chatId, lines.join('\n'));
-    return;
+    case 4: {
+      // Set as global default
+      config.bot_mode = 'business';
+      saveConfig(config);
+      await platform.send(msg.chatId, 'Bot mode set to: business');
+      logAudit({ action: 'mode', user_id: msg.senderId, mode: 'business', scope: 'global' });
+      return true;
+    }
+    case 5: {
+      // Assign chats — delegate to mode picker
+      const beeperPlatform = platformRegistry?.get('beeper');
+      const hasBeeperChats = beeperPlatform && config.platforms?.beeper?.enabled;
+      if (!hasBeeperChats) {
+        await platform.send(msg.chatId, 'No Beeper chats available. Connect Beeper first.');
+        return true;
+      }
+      const allChats = listBeeperChats(beeperPlatform, config);
+      if (!allChats || allChats.length === 0) {
+        await platform.send(msg.chatId, 'No chats found.');
+        return true;
+      }
+      const chats = allChats.filter(c => c.id !== msg.chatId);
+      const list = chats.map((c, i) => {
+        const currentMode = getChatMode(config, c.id);
+        return `  ${i + 1}) ${c.title || c.name || c.id} [${currentMode}]`;
+      }).join('\n');
+      if (!config._pendingMode) config._pendingMode = {};
+      config._pendingMode[msg.chatId] = { mode: 'business', matches: chats, agent: null };
+      await platform.send(msg.chatId, `Pick a chat to set to business:\n${list}\n\nReply with a number:`);
+      return true;
+    }
   }
-
-  if (sub === 'clear') {
-    config.business = { ...config.business, name: null, greeting: null, topics: [], rules: [] };
-    saveConfig(config);
-    await platform.send(msg.chatId, 'Business persona cleared.');
-    logAudit({ action: 'business_clear', user_id: msg.senderId });
-    return;
-  }
-
-  if (sub === 'setup') {
-    if (!config._pendingBusiness) config._pendingBusiness = {};
-    config._pendingBusiness[msg.senderId] = { step: 'name', data: {} };
-    await platform.send(msg.chatId, 'Business setup wizard.\n\nWhat is the business name? (e.g. "Acme Support Bot")');
-    return;
-  }
-
-  await platform.send(msg.chatId, 'Usage: /business setup | show | clear');
+  return false;
 }
 
 async function handleBusinessWizardStep(msg, platform, config, input) {
@@ -1575,13 +1664,26 @@ async function handleBusinessWizardStep(msg, platform, config, input) {
 
   switch (pending.step) {
     case 'name':
+      if (lower === 'skip' && pending.data.name) {
+        pending.step = 'greeting';
+        const current = pending.data.greeting ? `\nCurrent: ${pending.data.greeting}` : '';
+        await platform.send(msg.chatId, `Step 2/5 — Greeting${current}\nSend new greeting or "skip" to keep it.`);
+        break;
+      }
+      if (lower === 'skip') {
+        await platform.send(msg.chatId, 'No existing name to keep. Send a name (2-100 characters):');
+        break;
+      }
       if (input.length < 2 || input.length > 100) {
         await platform.send(msg.chatId, 'Name must be 2-100 characters. Try again:');
         break;
       }
       pending.data.name = input;
       pending.step = 'greeting';
-      await platform.send(msg.chatId, `Name: ${input}\n\nGreeting message for customers? (or "skip")`);
+      {
+        const current = pending.data.greeting ? `\nCurrent: ${pending.data.greeting}` : '';
+        await platform.send(msg.chatId, `Step 2/5 — Greeting${current}\nSend new greeting or "skip" to keep it.`);
+      }
       break;
 
     case 'greeting':
@@ -1593,48 +1695,78 @@ async function handleBusinessWizardStep(msg, platform, config, input) {
         pending.data.greeting = input;
       }
       pending.step = 'topics';
-      pending.data.topics = [];
-      await platform.send(msg.chatId, 'Add a topic name (e.g. "Pricing", "Returns"). Send "done" when finished.');
+      {
+        let prompt = 'Step 3/5 — Topics';
+        if (pending.data.topics?.length > 0) {
+          prompt += '\nCurrent topics:';
+          pending.data.topics.forEach((t, i) => {
+            prompt += `\n  ${i + 1}. ${t.name}${t.description ? ': ' + t.description : ''}`;
+          });
+        }
+        prompt += '\nAdd topics as "Topic: Description" (one per line).\nSend "done" when finished, "skip" to keep current, or "clear" to start fresh.';
+        await platform.send(msg.chatId, prompt);
+      }
       break;
 
     case 'topics':
       if (lower === 'done') {
         pending.step = 'rules';
-        pending.data.rules = [];
-        await platform.send(msg.chatId, 'Add a custom rule (e.g. "Always respond in Spanish"). Send "done" when finished.');
+        let prompt = 'Step 4/5 — Rules';
+        if (pending.data.rules?.length > 0) {
+          prompt += '\nCurrent rules:';
+          pending.data.rules.forEach((r, i) => { prompt += `\n  ${i + 1}. ${r}`; });
+        }
+        prompt += '\nAdd rules one per message.\nSend "done" when finished, "skip" to keep current, or "clear" to start fresh.';
+        await platform.send(msg.chatId, prompt);
+        break;
+      }
+      if (lower === 'skip') {
+        pending.step = 'rules';
+        let prompt = 'Step 4/5 — Rules';
+        if (pending.data.rules?.length > 0) {
+          prompt += '\nCurrent rules:';
+          pending.data.rules.forEach((r, i) => { prompt += `\n  ${i + 1}. ${r}`; });
+        }
+        prompt += '\nAdd rules one per message.\nSend "done" when finished, "skip" to keep current, or "clear" to start fresh.';
+        await platform.send(msg.chatId, prompt);
+        break;
+      }
+      if (lower === 'clear') {
+        pending.data.topics = [];
+        await platform.send(msg.chatId, 'Topics cleared. Add topics as "Topic: Description" or send "done".');
         break;
       }
       if (input.length > 200) {
-        await platform.send(msg.chatId, 'Topic name must be under 200 characters. Try again:');
+        await platform.send(msg.chatId, 'Topic must be under 200 characters. Try again:');
         break;
       }
-      // Topic name entered — ask for description
-      pending._currentTopic = input;
-      pending.step = 'topic_desc';
-      await platform.send(msg.chatId, `Description for "${input}"? (or "skip")`);
-      break;
-
-    case 'topic_desc': {
-      const topic = { name: pending._currentTopic };
-      if (lower !== 'skip') {
-        if (input.length > 200) {
-          await platform.send(msg.chatId, 'Description must be under 200 characters. Try again (or "skip"):');
-          break;
-        }
-        topic.description = input;
+      {
+        // Parse "Topic: Description" format
+        const colonIdx = input.indexOf(':');
+        const topic = colonIdx > 0
+          ? { name: input.slice(0, colonIdx).trim(), description: input.slice(colonIdx + 1).trim() || undefined }
+          : { name: input };
+        pending.data.topics.push(topic);
+        await platform.send(msg.chatId, `Added: ${topic.name}. Next topic? (or "done")`);
       }
-      pending.data.topics.push(topic);
-      delete pending._currentTopic;
-      pending.step = 'topics';
-      await platform.send(msg.chatId, `Added: ${topic.name}. Next topic? (or "done")`);
       break;
-    }
 
     case 'rules':
       if (lower === 'done') {
         pending.step = 'confirm';
         const summary = formatBusinessSummary(pending.data);
-        await platform.send(msg.chatId, `${summary}\n\nSave this? (yes/no)`);
+        await platform.send(msg.chatId, `Step 5/5 — Review & Save\n${summary}\n\nSave this? (yes/no)`);
+        break;
+      }
+      if (lower === 'skip') {
+        pending.step = 'confirm';
+        const summary = formatBusinessSummary(pending.data);
+        await platform.send(msg.chatId, `Step 5/5 — Review & Save\n${summary}\n\nSave this? (yes/no)`);
+        break;
+      }
+      if (lower === 'clear') {
+        pending.data.rules = [];
+        await platform.send(msg.chatId, 'Rules cleared. Add a rule or send "done".');
         break;
       }
       if (input.length > 200) {
@@ -1654,7 +1786,7 @@ async function handleBusinessWizardStep(msg, platform, config, input) {
         logAudit({ action: 'business_setup', user_id: msg.senderId, name: pending.data.name });
       } else {
         delete config._pendingBusiness[msg.senderId];
-        await platform.send(msg.chatId, 'Discarded. Run /business setup to start over.');
+        await platform.send(msg.chatId, 'Discarded.');
       }
       break;
   }
@@ -1707,7 +1839,7 @@ async function routeHelp(msg, platform, config) {
       '/jobs - List active scheduled jobs (owner)',
       '/cancel <id> - Cancel a scheduled job (owner)',
       '/plan <goal> - Break a goal into steps and execute (owner)',
-      '/business setup|show|clear - Configure business persona (owner)',
+      '/mode business - Business persona menu (owner)',
       'Send a file to index it (owner, Telegram/Beeper)',
       'Use @agentname to invoke a specific agent per-message'
     );

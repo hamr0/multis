@@ -29,7 +29,7 @@ Plain text messages are treated as implicit `/ask`.
 | `/read <path>` | Read a file or directory (PIN protected) |
 | `/index <path> <kb\|admin>` | Index a document with scope (PIN protected) |
 | `/pin` | Change or set PIN |
-| `/mode <personal\|business\|silent> [agent]` | Set chat mode, optionally assign agent (PIN protected) |
+| `/mode <personal\|business\|silent> [agent]` | Set chat mode, optionally assign agent (PIN protected). `/mode business` (no target) opens business persona menu |
 | `/agent [name]` | Show current agent (no args) or assign agent to this chat |
 | `/agents` | List all configured agents |
 | `/start <code>` | Pair with the bot using pairing code |

@@ -257,7 +257,25 @@ Agentic reminders (Tier 1) done — `--agent` flag runs full agent loop on tick.
   - [ ] `src/hooks/runner.js` — discover `~/.multis/hooks/`, match event, spawn with timeout
   - [ ] Events: `message:business`, `escalation`, `capture`, `index`, `cron:fail`
 
-### C2. Other Features
+### C2. Business Hours
+
+- [ ] **Structured business hours config** — `config.business.hours: { start, end, timezone, days }`
+- [ ] Inject current time + hours into business system prompt so LLM knows if admin is available
+- [ ] Within hours: escalate tool notifies admin, bot says "someone will be with you shortly"
+- [ ] Outside hours: bot handles autonomously, says "we'll follow up during business hours" for unresolvable issues
+- [ ] Add to `/business setup` wizard (optional step)
+
+### C3. Web Browsing (barebrowse)
+
+- [ ] **Integrate `barebrowse` from bare-agent** — gives the agent a real browser for web actions
+- [ ] `browse` tool: navigate, read page content, click, fill forms, extract data
+- [ ] Use cases: check prices, fill out forms, look up info, interact with web apps
+- [ ] Leverages user's existing browser sessions (no re-auth needed)
+- [ ] Replaces the planned `fetch_url` tool for most use cases — full browser vs. simple HTTP GET
+- [ ] Governance: read-only actions on allowlist, destructive actions (submit, purchase) require confirmation
+- [ ] Works for both personal assistant (browse for yourself) and business mode (look up customer info)
+
+### C4. Other Features
 
 - [ ] Tier 2 PDF parsing (font-size heading detection)
 - [ ] ACT-R activation visible in `/search` results

@@ -2,6 +2,22 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [0.11.2] - 2026-02-28
+
+### Added
+- `/mode business` unified menu — replaces `/business` command with 5-option menu (setup, show, clear, global default, assign chats)
+- Wizard skip/clear support — re-running wizard shows current values, "skip" preserves them, "clear" resets topics/rules
+- Single-line topic format — "Topic: Description" instead of 2-message flow
+- Step headers in wizard (Step 1/5 — Name, etc.)
+- Emoji/short message guard — emoji-only messages in business chats are silently ignored (no "Usage: /ask" leak)
+
+### Removed
+- `/business` command — all functionality moved to `/mode business` menu
+
+### Changed
+- Wizard pre-populates from existing `config.business` values
+- "Topic: Description" single-line format replaces the 2-step name+description flow
+
 ## [0.11.1] - 2026-02-27
 
 ### Fixed

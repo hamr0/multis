@@ -1020,20 +1020,23 @@ describe('Beeper file indexing', () => {
 });
 
 // ---------------------------------------------------------------------------
-// /business command + wizard
+// /mode business menu + wizard
 // ---------------------------------------------------------------------------
 
-describe('/business command', () => {
-  it('/business show with no persona says not configured', async () => {
+describe('/mode business menu', () => {
+  it('/mode business shows menu (no target)', async () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/business show'), platform);
-    assert.match(platform.sent[0].text, /No business persona/);
+    await router(msg('/mode business'), platform);
+    const text = platform.lastTo('chat1').text;
+    assert.match(text, /Business Mode/);
+    assert.match(text, /1\) Setup persona/);
+    assert.match(text, /5\) Assign chats/);
   });
 
-  it('/business show displays current config', async () => {
+  it('menu option 2 shows persona', async () => {
     const env = createTestEnv({
       allowed_users: ['user1'], owner_id: 'user1',
       business: { name: 'TestBiz', greeting: 'Hi!', topics: [{ name: 'Sales', description: 'Buy stuff' }], rules: ['Be nice'] }
@@ -1041,15 +1044,26 @@ describe('/business command', () => {
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/business show'), platform);
-    const text = platform.sent[0].text;
+    await router(msg('/mode business'), platform);
+    await router(msg('2'), platform);
+    const text = platform.lastTo('chat1').text;
     assert.match(text, /TestBiz/);
     assert.match(text, /Hi!/);
     assert.match(text, /Sales/);
     assert.match(text, /Be nice/);
   });
 
-  it('/business clear resets persona', async () => {
+  it('menu option 2 with no persona says not configured', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/mode business'), platform);
+    await router(msg('2'), platform);
+    assert.match(platform.lastTo('chat1').text, /No business persona/);
+  });
+
+  it('menu option 3 clears persona', async () => {
     const env = createTestEnv({
       allowed_users: ['user1'], owner_id: 'user1',
       business: { name: 'TestBiz', greeting: 'Hi!', topics: [], rules: [] }
@@ -1057,43 +1071,52 @@ describe('/business command', () => {
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/business clear'), platform);
-    assert.match(platform.sent[0].text, /cleared/i);
+    await router(msg('/mode business'), platform);
+    await router(msg('3'), platform);
+    assert.match(platform.lastTo('chat1').text, /cleared/i);
     assert.strictEqual(env.config.business.name, null);
   });
 
-  it('/business setup wizard full flow', async () => {
+  it('menu option 4 sets global default', async () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    // Start wizard
-    await router(msg('/business setup'), platform);
-    assert.match(platform.lastTo('chat1').text, /business name/i);
+    await router(msg('/mode business'), platform);
+    await router(msg('4'), platform);
+    assert.match(platform.lastTo('chat1').text, /Bot mode set to: business/);
+    assert.strictEqual(env.config.bot_mode, 'business');
+  });
+
+  it('menu option 1 starts wizard full flow', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    // Open menu, pick option 1
+    await router(msg('/mode business'), platform);
+    await router(msg('1'), platform);
+    assert.match(platform.lastTo('chat1').text, /Step 1\/5 — Name/);
 
     // Name
     await router(msg('Acme Corp'), platform);
-    assert.match(platform.lastTo('chat1').text, /Greeting/i);
+    assert.match(platform.lastTo('chat1').text, /Step 2\/5 — Greeting/);
 
     // Greeting
     await router(msg('Welcome!'), platform);
-    assert.match(platform.lastTo('chat1').text, /topic/i);
+    assert.match(platform.lastTo('chat1').text, /Step 3\/5 — Topics/);
 
-    // Add a topic
-    await router(msg('Pricing'), platform);
-    assert.match(platform.lastTo('chat1').text, /Description/i);
-
-    // Topic description
-    await router(msg('Plans and billing'), platform);
-    assert.match(platform.lastTo('chat1').text, /Next topic/i);
+    // Add a topic (single-line format)
+    await router(msg('Pricing: Plans and billing'), platform);
+    assert.match(platform.lastTo('chat1').text, /Added: Pricing/);
 
     // Done with topics
     await router(msg('done'), platform);
-    assert.match(platform.lastTo('chat1').text, /rule/i);
+    assert.match(platform.lastTo('chat1').text, /Step 4\/5 — Rules/);
 
-    // Done with rules → goes straight to confirm
+    // Done with rules
     await router(msg('done'), platform);
-    assert.match(platform.lastTo('chat1').text, /Save/i);
+    assert.match(platform.lastTo('chat1').text, /Step 5\/5 — Review/);
 
     // Confirm
     await router(msg('yes'), platform);
@@ -1102,26 +1125,91 @@ describe('/business command', () => {
     assert.strictEqual(env.config.business.greeting, 'Welcome!');
     assert.strictEqual(env.config.business.topics.length, 1);
     assert.strictEqual(env.config.business.topics[0].name, 'Pricing');
+    assert.strictEqual(env.config.business.topics[0].description, 'Plans and billing');
   });
 
-  it('/business setup cancel aborts', async () => {
+  it('wizard cancel aborts', async () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/business setup'), platform);
+    await router(msg('/mode business'), platform);
+    await router(msg('1'), platform);
     await router(msg('cancel'), platform);
     assert.match(platform.lastTo('chat1').text, /cancelled/i);
     assert.ok(!env.config.business?.name, 'name should not be set after cancel');
   });
 
-  it('/business rejected for non-owner', async () => {
+  it('/mode business rejected for non-owner', async () => {
     const env = createTestEnv({ allowed_users: ['user1', 'user2'], owner_id: 'user1' });
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/business setup', { senderId: 'user2' }), platform);
+    await router(msg('/mode business', { senderId: 'user2' }), platform);
     assert.match(platform.sent[0].text, /Owner only/);
+  });
+
+  it('wizard skip preserves existing values', async () => {
+    const env = createTestEnv({
+      allowed_users: ['user1'], owner_id: 'user1',
+      business: { name: 'OldBiz', greeting: 'Old greeting', topics: [{ name: 'Support' }], rules: ['Be polite'] }
+    });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/mode business'), platform);
+    await router(msg('1'), platform);
+    assert.match(platform.lastTo('chat1').text, /Current: OldBiz/);
+
+    // Skip name, greeting, topics, rules
+    await router(msg('skip'), platform);
+    assert.match(platform.lastTo('chat1').text, /Current: Old greeting/);
+    await router(msg('skip'), platform);
+    assert.match(platform.lastTo('chat1').text, /Current topics:/);
+    await router(msg('skip'), platform);
+    assert.match(platform.lastTo('chat1').text, /Current rules:/);
+    await router(msg('skip'), platform);
+    assert.match(platform.lastTo('chat1').text, /Review/);
+
+    await router(msg('yes'), platform);
+    assert.match(platform.lastTo('chat1').text, /saved/i);
+    assert.strictEqual(env.config.business.name, 'OldBiz');
+    assert.strictEqual(env.config.business.greeting, 'Old greeting');
+    assert.strictEqual(env.config.business.topics.length, 1);
+    assert.strictEqual(env.config.business.rules.length, 1);
+  });
+
+  it('emoji-only message in business chat is silently ignored', async () => {
+    const env = createTestEnv({
+      allowed_users: ['user1'], owner_id: 'user1',
+      business: { name: 'TestBiz' }
+    });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    const m = msg('👍', { senderId: 'cust1', chatId: 'cust_chat', routeAs: 'business' });
+    await router(m, platform);
+    // No messages sent — silently ignored
+    const responses = platform.sent.filter(s => s.chatId === 'cust_chat');
+    assert.strictEqual(responses.length, 0);
+  });
+
+  it('topic without colon accepted as name-only', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/mode business'), platform);
+    await router(msg('1'), platform);
+    await router(msg('MyBiz'), platform);      // name
+    await router(msg('skip'), platform);        // greeting
+    await router(msg('Returns'), platform);     // topic without colon
+    assert.match(platform.lastTo('chat1').text, /Added: Returns/);
+    await router(msg('done'), platform);
+    await router(msg('done'), platform);
+    await router(msg('yes'), platform);
+    assert.strictEqual(env.config.business.topics[0].name, 'Returns');
+    assert.strictEqual(env.config.business.topics[0].description, undefined);
   });
 });
 
@@ -1364,9 +1452,10 @@ describe('Wizard fixes', () => {
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    // Start wizard
-    await router(msg('/business setup'), platform);
-    assert.match(platform.lastTo('chat1').text, /business name/i);
+    // Start wizard via menu
+    await router(msg('/mode business'), platform);
+    await router(msg('1'), platform);
+    assert.match(platform.lastTo('chat1').text, /Step 1\/5/);
 
     // Type /help during wizard → cancels wizard, shows help
     await router(msg('/help'), platform);
@@ -1384,7 +1473,8 @@ describe('Wizard fixes', () => {
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/business setup'), platform);
+    await router(msg('/mode business'), platform);
+    await router(msg('1'), platform);
     // Send a single character (too short)
     await router(msg('X'), platform);
     assert.match(platform.lastTo('chat1').text, /2-100 characters/);
@@ -1395,12 +1485,13 @@ describe('Wizard fixes', () => {
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/business setup'), platform);
-    await router(msg('My Biz'), platform);    // name
-    await router(msg('skip'), platform);       // greeting
-    await router(msg('done'), platform);       // topics
-    await router(msg('done'), platform);       // rules → confirm (no admin_chat step)
-    assert.match(platform.lastTo('chat1').text, /Save/i);
+    await router(msg('/mode business'), platform);
+    await router(msg('1'), platform);          // menu → wizard
+    await router(msg('My Biz'), platform);     // name
+    await router(msg('skip'), platform);        // greeting
+    await router(msg('done'), platform);        // topics
+    await router(msg('done'), platform);        // rules → confirm
+    assert.match(platform.lastTo('chat1').text, /Save|Review/i);
 
     await router(msg('yes'), platform);
     assert.match(platform.lastTo('chat1').text, /saved/i);

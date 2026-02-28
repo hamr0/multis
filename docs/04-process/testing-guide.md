@@ -214,6 +214,7 @@ Not now. Automate when:
 | Config loading | 9 | — | Default merging, all config blocks |
 | Command routing | — | 14 | Every command path through createMessageRouter |
 | Business escalation | — | 3 | LLM-driven escalation, escalate tool, admin pause |
+| Business menu + wizard | — | 13 | Menu options (show/clear/global/setup), wizard full flow, skip, cancel, emoji guard, topic formats |
 | SQLite + FTS5 | 4 | 13 | Schema, CRUD, search, activation, re-index, triggers |
 | Memory lifecycle | 7 | 2 | Prune, capture, /remember → /memory → /forget |
 | CLI | — | 7 | All subcommands except init (interactive) |

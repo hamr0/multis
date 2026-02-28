@@ -228,7 +228,7 @@ If you edit `~/.multis/config.json` directly (changing LLM provider, model, addi
 multis restart
 ```
 
-Changes made via bot commands (`/business setup`, `/mode`, `/agent`, `/pin`) are applied immediately — no restart needed.
+Changes made via bot commands (`/mode business`, `/mode`, `/agent`, `/pin`) are applied immediately — no restart needed.
 
 ---
 
@@ -305,7 +305,7 @@ Set this up with `multis init` option 3 (Business chatbot).
 | `/jobs` | List all active reminders and cron jobs |
 | `/cancel <job-id>` | Cancel a scheduled job |
 | `/plan <goal>` | Break a goal into steps and execute them |
-| `/business setup\|show\|clear` | Configure the business persona |
+| `/mode business` | Business persona menu (setup, show, clear, global default, assign chats) |
 | `@agentname <message>` | Route one message to a specific agent |
 
 ---
@@ -356,33 +356,33 @@ From Telegram (admin channel), you can manage Beeper chat modes remotely:
 
 Configure how the bot represents your business to customers.
 
-### Using the Wizard
+### Business Menu
 
 ```
-/business setup
+/mode business
 ```
 
-The wizard walks through:
+Shows a menu with 5 options:
 
-1. **Business name** — e.g. "Acme Support" (2-100 characters)
-2. **Greeting** — what the bot says first, e.g. "Welcome to Acme! How can I help?" (max 500 chars, or skip)
-3. **Topics** — what the bot can help with. Add topics one by one with optional descriptions (max 200 chars each):
-   - "Pricing" → "Plans, billing, and payment info"
-   - "Returns" → "Return policy and refund process"
-   - Send "done" when finished
-4. **Rules** — custom instructions (max 200 chars each), e.g. "Always respond in Spanish", "Never offer discounts" (send "done" when finished)
-5. **Confirm** — review the summary, type "yes" to save
+1. **Setup persona** — launches the 5-step wizard
+2. **Show persona** — display current business config
+3. **Clear persona** — reset to blank
+4. **Set as global default** — sets bot_mode to business
+5. **Assign chats** — pick Beeper chats to set to business mode
+
+### Setup Wizard (Option 1)
+
+The wizard walks through 5 steps. Re-running shows current values — send "skip" to keep them.
+
+1. **Name** — e.g. "Acme Support" (2-100 characters, or "skip" to keep current)
+2. **Greeting** — e.g. "Welcome to Acme! How can I help?" (max 500 chars, or "skip")
+3. **Topics** — add as "Topic: Description" (one per line), e.g. "Pricing: Plans and billing". Topics without `:` are accepted as name-only. Send "done" when finished, "skip" to keep current, or "clear" to start fresh
+4. **Rules** — custom instructions (max 200 chars each), e.g. "Always respond in Spanish". Send "done" when finished, "skip" to keep current, or "clear" to start fresh
+5. **Review & Save** — review the summary, type "yes" to save
 
 Type "cancel" at any step to abort. Any `/command` typed during the wizard cancels it and routes the command normally.
 
 Escalation notifications are sent automatically to all admin channels (Telegram + Beeper Note-to-self) — no manual configuration needed.
-
-### Viewing and Clearing
-
-```
-/business show     # Display current business persona
-/business clear    # Reset to blank
-```
 
 ### How It Works
 
@@ -910,7 +910,7 @@ To pair a second user:
 
 To make someone the owner, edit `~/.multis/config.json` and set `owner_id` to their user ID, then restart.
 
-**Note:** There can only be one owner. Owner-only commands (`/exec`, `/read`, `/index`, `/mode`, `/business`, `/pin`, etc.) are restricted to the owner.
+**Note:** There can only be one owner. Owner-only commands (`/exec`, `/read`, `/index`, `/mode`, `/pin`, etc.) are restricted to the owner.
 
 ---
 

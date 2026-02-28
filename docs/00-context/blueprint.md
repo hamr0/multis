@@ -610,9 +610,9 @@ When the owner types directly in a business chat, the bot pauses for `admin_paus
 - Admin decides whether to act, remind, or ignore
 - All messages are saved to memory (appendMessage + appendToLog) so conversation history stays complete
 
-### Business persona (`/business setup`)
+### Business persona (`/mode business`)
 
-Conversational wizard configures `config.business` fields: name, greeting, topics, rules, allowed_urls. The `buildBusinessPrompt()` function compiles these into a system prompt that replaces the default agent persona in business mode.
+`/mode business` (no target) opens a 5-option menu: setup wizard, show, clear, set global default, assign chats. The wizard configures `config.business` fields: name, greeting, topics, rules, allowed_urls — with skip/clear support for re-running. The `buildBusinessPrompt()` function compiles these into a system prompt that replaces the default agent persona in business mode.
 
 `allowed_urls` are reference links included in the prompt — the LLM cites them to customers when relevant. **Future: URL indexing** — fetch `allowed_urls` and index as KB chunks so the LLM has actual page content, not just links. Requires HTML-to-text conversion (`mozilla/readability` or similar). Could also work as a standalone `/index <url> <scope>` command beyond business mode.
 
