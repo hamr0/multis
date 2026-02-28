@@ -395,10 +395,10 @@ function createMessageRouter(config, deps = {}) {
       // Business: anyone can get a response (customers via Beeper)
       if (msg.routeAs !== 'business' && !isPaired(msg, config)) return;
 
-      // Silently ignore emoji-only / very short messages in business chats
+      // Silently ignore empty / media-only messages in business chats
       if (msg.routeAs === 'business') {
         const trimmed = (msg.text || '').trim();
-        if (!trimmed || trimmed.length <= 2) return;
+        if (!trimmed) return;
       }
 
       // Admin presence pause for business chats

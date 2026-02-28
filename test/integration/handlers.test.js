@@ -1179,7 +1179,7 @@ describe('/mode business menu', () => {
     assert.strictEqual(env.config.business.rules.length, 1);
   });
 
-  it('emoji-only message in business chat is silently ignored', async () => {
+  it('empty message in business chat is silently ignored', async () => {
     const env = createTestEnv({
       allowed_users: ['user1'], owner_id: 'user1',
       business: { name: 'TestBiz' }
@@ -1187,7 +1187,7 @@ describe('/mode business menu', () => {
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    const m = msg('👍', { senderId: 'cust1', chatId: 'cust_chat', routeAs: 'business' });
+    const m = msg('', { senderId: 'cust1', chatId: 'cust_chat', routeAs: 'business' });
     await router(m, platform);
     // No messages sent — silently ignored
     const responses = platform.sent.filter(s => s.chatId === 'cust_chat');
