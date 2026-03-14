@@ -79,7 +79,7 @@ fi
 # ── 6. Verify all core modules load ──────────────────────
 bold "Verifying modules..."
 FAILED=0
-for mod in telegraf better-sqlite3 mammoth pdfjs-dist; do
+for mod in telegraf better-sqlite3 mammoth; do
   if node -e "require('$mod')" 2>/dev/null; then
     green "$mod"
   else
@@ -88,8 +88,16 @@ for mod in telegraf better-sqlite3 mammoth pdfjs-dist; do
   fi
 done
 
+# pdfjs-dist may fail on Termux (canvas dependency) — non-critical,
+# only used for PDF indexing via /index command
+if node -e "import('pdfjs-dist/legacy/build/pdf.mjs')" 2>/dev/null; then
+  green "pdfjs-dist"
+else
+  dim "  pdfjs-dist: skipped (PDF indexing won't work, everything else fine)"
+fi
+
 if [ $FAILED -ne 0 ]; then
-  red "Some modules failed. Fix errors above before continuing."
+  red "Core modules failed. Fix errors above before continuing."
   exit 1
 fi
 
