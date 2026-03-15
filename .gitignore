@@ -36,3 +36,4 @@ docs/manuals/
 # Beeper storage / tokens
 .beeper-storage/
 docs/archive/old-beeper/beeper-storage/
+.barebrowse/
