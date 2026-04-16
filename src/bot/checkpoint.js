@@ -1,20 +1,18 @@
 /**
  * Checkpoint integration — human approval gate for irreversible tool actions.
+ * Uses bareagent v0.7.0's built-in Checkpoint timeout (no custom timer needed).
  * Reuses the pendingAuth Map pattern from PIN auth for platform reply interception.
  */
 
 const { Checkpoint } = require('bare-agent');
 
-// Pending approval requests: senderId → { resolve, reject, timeout }
+// Pending approval requests: senderId → { resolve }
 const pendingApprovals = new Map();
 
 /**
  * Create a bareagent Checkpoint wired to a chat platform.
- * @param {Object} platform — platform adapter with send()
- * @param {string} chatId — chat to send approval requests to
- * @param {string} senderId — user who must approve
- * @param {Object} config — config.security.checkpoint_tools
- * @returns {Checkpoint}
+ * Timeout is handled by bareagent's Checkpoint({ timeout }) — on expiry it throws
+ * TimeoutError, Loop catches it and auto-denies with reason via loop:error + onError.
  */
 function createCheckpoint(platform, chatId, senderId, config) {
   const tools = config?.security?.checkpoint_tools || ['exec'];
@@ -22,27 +20,16 @@ function createCheckpoint(platform, chatId, senderId, config) {
 
   return new Checkpoint({
     tools,
+    timeout: timeoutMs,
     send: async (question) => {
       await platform.send(chatId, `Approval needed: ${question}\nReply "yes" or "no".`);
     },
-    waitForReply: () => new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pendingApprovals.delete(senderId);
-        reject(new Error('Approval timed out'));
-      }, timeoutMs);
-
+    waitForReply: () => new Promise((resolve) => {
       pendingApprovals.set(senderId, {
         resolve: (answer) => {
-          clearTimeout(timer);
           pendingApprovals.delete(senderId);
           resolve(answer);
         },
-        reject: (err) => {
-          clearTimeout(timer);
-          pendingApprovals.delete(senderId);
-          reject(err);
-        },
-        timeout: timer
       });
     }),
   });

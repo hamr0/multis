@@ -33,7 +33,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "bare-agent": "^0.3.0",
+    "bare-agent": "^0.7.0",
     "better-sqlite3": "^11.7.0",
     "mammoth": "^1.8.0",
     "pdfjs-dist": "^5.4.624",

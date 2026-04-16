@@ -19,7 +19,7 @@ const TOOLS = [
   // -------------------------------------------------------------------------
   {
     name: 'exec',
-    description: 'Run a shell command on the local machine. Goes through governance allowlist. Use for system tasks, opening apps, checking status, etc.',
+    description: 'Run a shell command on the local machine. Governance (command allowlist/denylist) is handled by the Loop policy, not this tool.',
     platforms: ['linux', 'macos', 'android'],
     input_schema: {
       type: 'object',
@@ -30,14 +30,12 @@ const TOOLS = [
     },
     execute: async ({ command }, ctx) => {
       const result = execCommand(command, ctx.senderId);
-      if (result.denied) return `Denied: ${result.reason}`;
-      if (result.needsConfirmation) return `Command "${command}" requires confirmation.`;
       return result.output;
     }
   },
   {
     name: 'read_file',
-    description: 'Read a file or list a directory. Use to check file contents, configs, logs.',
+    description: 'Read a file or list a directory. Path governance is handled by the Loop policy.',
     platforms: ['linux', 'macos', 'android'],
     input_schema: {
       type: 'object',
@@ -48,7 +46,6 @@ const TOOLS = [
     },
     execute: async ({ path }, ctx) => {
       const result = readFile(path, ctx.senderId);
-      if (result.denied) return `Denied: ${result.reason}`;
       return result.output;
     }
   },

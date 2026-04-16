@@ -8,7 +8,10 @@ function hashPin(pin) {
 }
 
 function verifyPin(pin, hash) {
-  return hashPin(pin) === hash;
+  const a = Buffer.from(hashPin(pin));
+  const b = Buffer.from(hash);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
 
 /**
@@ -111,8 +114,8 @@ class PinManager {
 
   _saveSessions() {
     const dir = path.dirname(PATHS.pinSessions());
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(PATHS.pinSessions(), JSON.stringify(this.sessions, null, 2));
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(PATHS.pinSessions(), JSON.stringify(this.sessions, null, 2), { mode: 0o600 });
   }
 }
 

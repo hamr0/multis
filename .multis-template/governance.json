@@ -1,5 +1,5 @@
 {
-  "_comment": "Flat allowlist covers Linux, macOS, Windows, Android. Unused commands on wrong OS are harmless.",
+  "_comment": "Flat allowlist covers Linux, macOS, Windows, Android. Unused commands on wrong OS are harmless. Governance is enforced by bareagent's Loop-level policy (bare-agent/policy helpers).",
   "commands": {
     "allowlist": [
       "ls", "dir", "pwd", "cat", "type", "head", "tail", "wc",
@@ -34,12 +34,6 @@
       "chmod", "chown", "icacls",
       "kill", "killall", "taskkill",
       "shutdown", "reboot", "halt"
-    ],
-    "requireConfirmation": [
-      "mv", "cp", "move", "copy", "xcopy", "robocopy",
-      "powershell",
-      "git push", "git rebase", "git reset",
-      "npm publish"
     ]
   },
   "paths": {
@@ -54,9 +48,5 @@
       "/etc", "/var", "/usr", "/System", "/bin", "/sbin",
       "C:\\Windows", "C:\\Program Files"
     ]
-  },
-  "rateLimits": {
-    "messagesPerMinute": 10,
-    "commandsPerMinute": 5
   }
 }

@@ -1,30 +1,18 @@
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { isCommandAllowed, isPathAllowed } = require('../governance/validate');
 const { logAudit } = require('../governance/audit');
 
 const MAX_OUTPUT = 4000; // Telegram message limit ~4096 chars
 
 /**
- * Execute a shell command after governance validation
+ * Execute a shell command. Governance (command allowlist/denylist) is handled
+ * by the Loop-level policy closure (bare-agent v0.7.0+), not here.
  * @param {string} command - Full command string
- * @param {number} userId - Telegram user ID for audit
- * @returns {Object} - { success, output, denied, reason }
+ * @param {number} userId - User ID for audit
+ * @returns {Object} - { success, output }
  */
 function execCommand(command, userId) {
-  const check = isCommandAllowed(command);
-
-  if (!check.allowed) {
-    logAudit({ action: 'exec', user_id: userId, command, allowed: false, reason: check.reason });
-    return { success: false, denied: true, reason: check.reason };
-  }
-
-  if (check.requiresConfirmation) {
-    logAudit({ action: 'exec', user_id: userId, command, allowed: true, requires_confirmation: true });
-    return { success: false, denied: false, needsConfirmation: true, command };
-  }
-
   try {
     const output = execSync(command, {
       encoding: 'utf8',
@@ -37,31 +25,25 @@ function execCommand(command, userId) {
       ? output.slice(0, MAX_OUTPUT) + '\n... (truncated)'
       : output;
 
-    logAudit({ action: 'exec', user_id: userId, command, allowed: true, status: 'success' });
+    logAudit({ action: 'exec', user_id: userId, command, status: 'success' });
     return { success: true, output: trimmed || '(no output)' };
   } catch (err) {
     const stderr = err.stderr || err.message;
-    logAudit({ action: 'exec', user_id: userId, command, allowed: true, status: 'error', error: stderr });
+    logAudit({ action: 'exec', user_id: userId, command, status: 'error', error: stderr });
     return { success: false, output: `Error: ${stderr}` };
   }
 }
 
 /**
- * Read a file after governance path validation
+ * Read a file or list a directory. Path governance is handled by the Loop-level
+ * policy closure (bare-agent v0.7.0+), not here.
  * @param {string} filePath - Path to read
- * @param {number} userId - Telegram user ID for audit
- * @returns {Object} - { success, output, denied, reason }
+ * @param {number} userId - User ID for audit
+ * @returns {Object} - { success, output }
  */
 function readFile(filePath, userId) {
   const expanded = filePath.replace(/^~/, process.env.HOME || process.env.USERPROFILE);
   const resolved = path.resolve(expanded);
-
-  const check = isPathAllowed(resolved);
-
-  if (!check.allowed) {
-    logAudit({ action: 'read', user_id: userId, path: filePath, allowed: false, reason: check.reason });
-    return { success: false, denied: true, reason: check.reason };
-  }
 
   try {
     if (!fs.existsSync(resolved)) {
@@ -70,13 +52,12 @@ function readFile(filePath, userId) {
 
     const stat = fs.statSync(resolved);
     if (stat.isDirectory()) {
-      // List directory contents instead
       const entries = fs.readdirSync(resolved);
       const output = entries.join('\n') || '(empty directory)';
       const trimmed = output.length > MAX_OUTPUT
         ? output.slice(0, MAX_OUTPUT) + '\n... (truncated)'
         : output;
-      logAudit({ action: 'read', user_id: userId, path: filePath, allowed: true, type: 'directory' });
+      logAudit({ action: 'read', user_id: userId, path: filePath, type: 'directory' });
       return { success: true, output: trimmed };
     }
 
@@ -89,10 +70,10 @@ function readFile(filePath, userId) {
       ? content.slice(0, MAX_OUTPUT) + '\n... (truncated)'
       : content;
 
-    logAudit({ action: 'read', user_id: userId, path: filePath, allowed: true, type: 'file' });
+    logAudit({ action: 'read', user_id: userId, path: filePath, type: 'file' });
     return { success: true, output: trimmed || '(empty file)' };
   } catch (err) {
-    logAudit({ action: 'read', user_id: userId, path: filePath, allowed: true, status: 'error', error: err.message });
+    logAudit({ action: 'read', user_id: userId, path: filePath, status: 'error', error: err.message });
     return { success: false, output: `Error: ${err.message}` };
   }
 }

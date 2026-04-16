@@ -13,6 +13,7 @@ const { buildToolRegistry, getToolsForUser, loadToolsConfig } = require('../tool
 const { adaptTools } = require('../tools/adapter');
 const { getPlatform } = require('../tools/platform');
 const { Loop, Retry, CircuitBreaker } = require('bare-agent');
+const { pathAllowlist, commandAllowlist, combinePolicies } = require('bare-agent/policy');
 const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler');
 const { createCheckpoint, handleApprovalReply, hasPendingApproval } = require('./checkpoint');
 
@@ -37,6 +38,56 @@ function isAdminPaused(chatId) {
 
 function clearAdminPauses() {
   _adminPaused.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Governance — single policy closure built from governance.json + bareagent helpers
+// ---------------------------------------------------------------------------
+
+function createMultisPolicy(config) {
+  const fs = require('fs');
+  const govPath = PATHS.governance();
+  let gov = { commands: { allowlist: [], denylist: [] }, paths: { allowed: [], denied: [] } };
+  try { gov = JSON.parse(fs.readFileSync(govPath, 'utf8')); } catch { /* defaults */ }
+
+  const cmdPolicy = commandAllowlist({
+    allow: gov.commands.allowlist || [],
+    deny: gov.commands.denylist || [],
+    toolName: 'exec',
+  });
+
+  const pathPolicy = pathAllowlist({
+    allow: gov.paths.allowed || [],
+    deny: gov.paths.denied || [],
+    toolNames: ['read_file', 'grep_files', 'find_files'],
+    argKey: 'path',
+  });
+
+  // Symlink traversal fix: resolve real path before checking
+  const safePathPolicy = async (toolName, args, ctx) => {
+    if (args?.path) {
+      try {
+        const expanded = args.path.replace(/^~/, process.env.HOME || '');
+        const real = fs.realpathSync(expanded);
+        return pathPolicy(toolName, { ...args, path: real }, ctx);
+      } catch { /* file doesn't exist yet — let the tool handle the error */ }
+    }
+    return pathPolicy(toolName, args, ctx);
+  };
+
+  // Owner gets full access (minus hard denylist). Non-owner gets restricted.
+  return combinePolicies(
+    cmdPolicy,
+    safePathPolicy,
+    async (toolName, args, ctx) => {
+      if (ctx?.isOwner) return true;
+      // Non-owners cannot use shell tools at all
+      if (['exec', 'read_file', 'grep_files', 'find_files'].includes(toolName)) {
+        return 'This tool requires owner privileges.';
+      }
+      return true;
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +199,7 @@ function createMessageRouter(config, deps = {}) {
   const memoryManagers = deps.memoryManagers || new Map();
   const _memBaseDir = deps.memoryBaseDir || PATHS.memory();
   const pinManager = deps.pinManager || new PinManager(config);
+  const policy = deps.policy || createMultisPolicy(config);
   // Helper: getMemoryManager with baseDir (follows getMultisDir for test isolation)
   const getMem = (chatId, opts = {}) =>
     getMemoryManager(memoryManagers, chatId, { ...opts, baseDir: _memBaseDir });
@@ -250,7 +302,7 @@ function createMessageRouter(config, deps = {}) {
       pinManager.clearPending(msg.senderId);
       // Re-route the stored command
       msg = stored.msg;
-      await executeCommand(stored.command, stored.args, msg, platform, config, indexer, provider, memoryManagers, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds });
+      await executeCommand(stored.command, stored.args, msg, platform, config, indexer, provider, memoryManagers, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, policy });
       return;
     }
 
@@ -420,7 +472,7 @@ function createMessageRouter(config, deps = {}) {
         }
       }
 
-      await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry });
+      await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, policy });
       return;
     }
 
@@ -459,7 +511,7 @@ function createMessageRouter(config, deps = {}) {
       }
     }
 
-    await executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry });
+    await executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, policy });
   };
 
   router.registerPlatform = (name, instance) => platformRegistry.set(name, instance);
@@ -468,7 +520,7 @@ function createMessageRouter(config, deps = {}) {
   router.initScheduler = () => {
     const tick = createSchedulerTick({
       platformRegistry, config, provider, indexer, getMem, memCfg,
-      allTools, toolsConfig, runtimePlatform, maxToolRounds
+      allTools, toolsConfig, runtimePlatform, maxToolRounds, policy
     });
     const scheduler = getScheduler(tick);
     return scheduler;
@@ -640,7 +692,7 @@ async function routeStatus(msg, platform, config) {
     `Role: ${owner ? 'owner' : 'user'}`,
     `Paired users: ${config.allowed_users.length}`,
     `LLM provider: ${config.llm.provider}`,
-    `Governance: ${config.governance.enabled ? 'enabled' : 'disabled'}`
+    `Governance: Loop-level policy (bare-agent v0.7+)`
   ];
   await platform.send(msg.chatId, info.join('\n'));
 }
@@ -666,16 +718,6 @@ async function routeExec(msg, platform, config, command) {
   }
 
   const result = execCommand(command, msg.senderId);
-
-  if (result.denied) {
-    await platform.send(msg.chatId, `Denied: ${result.reason}`);
-    return;
-  }
-  if (result.needsConfirmation) {
-    await platform.send(msg.chatId, `Command "${command}" requires confirmation.`);
-    return;
-  }
-
   await platform.send(msg.chatId, result.output);
 }
 
@@ -691,12 +733,6 @@ async function routeRead(msg, platform, config, filePath) {
   }
 
   const result = readFile(filePath, msg.senderId);
-
-  if (result.denied) {
-    await platform.send(msg.chatId, `Denied: ${result.reason}`);
-    return;
-  }
-
   await platform.send(msg.chatId, result.output);
 }
 
@@ -805,7 +841,7 @@ function getCircuitBreaker(config) {
  * @returns {Promise<string>} — final text answer
  */
 async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
-  const { system, maxRounds = 5, ctx, config } = opts;
+  const { system, maxRounds = 5, ctx, config, policy } = opts;
   const adapted = adaptTools(tools, ctx);
 
   // Build retry + circuit breaker from config
@@ -822,8 +858,25 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
     ? createCheckpoint(ctx.platform, ctx.chatId, ctx.senderId, config)
     : null;
 
-  const loop = new Loop({ provider: wrappedProvider, system, maxRounds, retry, checkpoint, throwOnError: false });
-  const result = await loop.run(messages, adapted);
+  const maxCost = config?.security?.max_cost_per_run || undefined;
+
+  const loop = new Loop({
+    provider: wrappedProvider,
+    system,
+    maxRounds,
+    retry,
+    checkpoint,
+    policy,
+    maxCost,
+    throwOnError: false,
+    onError: (err, meta) => {
+      logAudit({ action: 'loop_error', source: meta?.source, error: err?.message, chatId: ctx.chatId, user_id: ctx.senderId });
+    },
+  });
+
+  const result = await loop.run(messages, adapted, {
+    ctx: { senderId: ctx.senderId, chatId: ctx.chatId, isOwner: ctx.isOwner },
+  });
   if (result.error) {
     throw result.error instanceof Error ? result.error : new Error(String(result.error));
   }
@@ -915,7 +968,7 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     }
 
     // --- Agent loop with tool calling ---
-    const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5, platformRegistry } = toolDeps;
+    const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5, platformRegistry, policy: tdPolicy } = toolDeps;
     const userTools = getToolsForUser(allTools, admin, tCfg);
     const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, config, platformRegistry };
 
@@ -923,7 +976,8 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
       system,
       maxRounds: maxToolRounds,
       ctx,
-      config
+      config,
+      policy: tdPolicy
     });
 
     // Prefix with agent name only when multiple agents exist
@@ -1352,7 +1406,7 @@ async function routeAgents(msg, platform, agentRegistry) {
  * Resolves platform from registry at fire time, not from a closure.
  * Agentic jobs run through runAgentLoop with owner's full toolset.
  */
-function createSchedulerTick({ platformRegistry, config, provider, indexer, getMem, memCfg, allTools, toolsConfig, runtimePlatform, maxToolRounds }) {
+function createSchedulerTick({ platformRegistry, config, provider, indexer, getMem, memCfg, allTools, toolsConfig, runtimePlatform, maxToolRounds, policy }) {
   return async (job) => {
     const platform = platformRegistry.get(job.platformName) || platformRegistry.values().next().value;
     if (!platform) {
@@ -1384,7 +1438,8 @@ function createSchedulerTick({ platformRegistry, config, provider, indexer, getM
         system,
         maxRounds: maxToolRounds || config?.llm?.max_tool_rounds || 5,
         ctx: { senderId: config.owner_id, chatId: job.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, config, platformRegistry },
-        config
+        config,
+        policy
       });
       await platform.send(job.chatId, answer);
       logAudit({ action: 'agentic_tick', jobId: job.id, jobAction: job.action });
@@ -1514,7 +1569,7 @@ async function routePlan(msg, platform, config, provider, goal, toolDeps) {
     await platform.send(msg.chatId, `Plan:\n${planText}\n\nExecuting...`);
 
     // Execute steps sequentially via the agent loop
-    const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5, platformRegistry } = toolDeps;
+    const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5, platformRegistry, policy: tdPolicy } = toolDeps;
     const admin = isOwner(msg.senderId, config, msg);
     const userTools = getToolsForUser(allTools, admin, tCfg);
 
@@ -1523,7 +1578,8 @@ async function routePlan(msg, platform, config, provider, goal, toolDeps) {
         const answer = await runAgentLoop(provider, [{ role: 'user', content: step.action }], userTools, {
           maxRounds: maxToolRounds,
           ctx: { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, platform, config, platformRegistry },
-          config
+          config,
+          policy: tdPolicy
         });
         await platform.send(msg.chatId, `Step "${step.action}": ${answer}`);
       } catch (err) {
@@ -2021,7 +2077,7 @@ function handleStatus(config) {
       `Role: ${owner ? 'owner' : 'user'}`,
       `Paired users: ${config.allowed_users.length}`,
       `LLM provider: ${config.llm.provider}`,
-      `Governance: ${config.governance.enabled ? 'enabled' : 'disabled'}`
+      `Governance: Loop-level policy (bare-agent v0.7+)`
     ];
     ctx.reply(info.join('\n'));
   };
@@ -2047,8 +2103,6 @@ function handleExec(config) {
     const command = text.replace(/^\/exec\s*/, '').trim();
     if (!command) { ctx.reply('Usage: /exec <command>'); return; }
     const result = execCommand(command, ctx.from.id);
-    if (result.denied) { ctx.reply(`Denied: ${result.reason}`); return; }
-    if (result.needsConfirmation) { ctx.reply(`Command "${command}" requires confirmation.`); return; }
     ctx.reply(result.output);
   };
 }
@@ -2061,7 +2115,6 @@ function handleRead(config) {
     const filePath = text.replace(/^\/read\s*/, '').trim();
     if (!filePath) { ctx.reply('Usage: /read <path>'); return; }
     const result = readFile(filePath, ctx.from.id);
-    if (result.denied) { ctx.reply(`Denied: ${result.reason}`); return; }
     ctx.reply(result.output);
   };
 }

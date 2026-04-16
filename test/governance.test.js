@@ -1,105 +1,133 @@
+'use strict';
+
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
-const { isCommandAllowed, isPathAllowed } = require('../src/governance/validate');
+const { pathAllowlist, commandAllowlist, combinePolicies } = require('bare-agent/policy');
 
-const GOV = {
-  commands: {
-    allowlist: ['ls', 'pwd', 'cat', 'grep', 'git', 'mv'],
-    denylist: ['rm', 'sudo', 'dd', 'shutdown'],
-    requireConfirmation: ['mv', 'git push']
-  },
-  paths: {
-    allowed: ['/home/testuser/Documents', '/home/testuser/Projects'],
-    denied: ['/etc', '/var', '/usr', '/bin']
-  }
+// Mirrors the governance.json shape that createMultisPolicy reads
+const GOV_PATHS = {
+  allowed: ['/home/testuser/Documents', '/home/testuser/Projects'],
+  denied: ['/etc', '/var', '/usr', '/bin'],
 };
 
-describe('isCommandAllowed', () => {
-  it('allows command in allowlist', () => {
-    const r = isCommandAllowed('ls -la', GOV);
-    assert.strictEqual(r.allowed, true);
-    assert.strictEqual(r.requiresConfirmation, false);
+const GOV_CMDS = {
+  allowlist: ['ls', 'pwd', 'cat', 'grep', 'git'],
+  denylist: ['rm', 'sudo', 'dd', 'shutdown'],
+};
+
+const cmdPolicy = commandAllowlist({
+  allow: GOV_CMDS.allowlist,
+  deny: GOV_CMDS.denylist,
+  toolName: 'exec',
+});
+
+const pathPolicy = pathAllowlist({
+  allow: GOV_PATHS.allowed,
+  deny: GOV_PATHS.denied,
+  toolNames: ['read_file', 'grep_files', 'find_files'],
+});
+
+const policy = combinePolicies(cmdPolicy, pathPolicy);
+
+describe('commandAllowlist (replaces isCommandAllowed)', () => {
+  it('allows command in allowlist', async () => {
+    const r = await cmdPolicy('exec', { command: 'ls -la' });
+    assert.strictEqual(r, true);
   });
 
-  it('allows command with arguments', () => {
-    const r = isCommandAllowed('git status', GOV);
-    assert.strictEqual(r.allowed, true);
+  it('allows command with arguments', async () => {
+    const r = await cmdPolicy('exec', { command: 'git status' });
+    assert.strictEqual(r, true);
   });
 
-  it('denies command in denylist', () => {
-    const r = isCommandAllowed('rm -rf /', GOV);
-    assert.strictEqual(r.allowed, false);
-    assert.match(r.reason, /explicitly denied/);
+  it('denies command in denylist', async () => {
+    const r = await cmdPolicy('exec', { command: 'rm -rf /' });
+    assert.match(r, /denylist/);
   });
 
-  it('denies command not in allowlist', () => {
-    const r = isCommandAllowed('echo hello', GOV);
-    assert.strictEqual(r.allowed, false);
-    assert.match(r.reason, /not in the allowlist/);
+  it('denies command not in allowlist', async () => {
+    const r = await cmdPolicy('exec', { command: 'echo hello' });
+    assert.match(r, /not on the allowlist/);
   });
 
-  it('denylist wins over allowlist', () => {
-    // If a command were somehow in both, deny should win
-    const gov = {
-      commands: { allowlist: ['rm'], denylist: ['rm'], requireConfirmation: [] }
-    };
-    const r = isCommandAllowed('rm file.txt', gov);
-    assert.strictEqual(r.allowed, false);
+  it('denylist wins over allowlist', async () => {
+    const both = commandAllowlist({ allow: ['rm'], deny: ['rm'], toolName: 'exec' });
+    const r = await both('exec', { command: 'rm file.txt' });
+    assert.match(r, /denylist/);
   });
 
-  it('flags requireConfirmation for matching command', () => {
-    const r = isCommandAllowed('mv file.txt dest/', GOV);
-    assert.strictEqual(r.allowed, true);
-    assert.strictEqual(r.requiresConfirmation, true);
-  });
-
-  it('does not flag requireConfirmation for non-matching command', () => {
-    const r = isCommandAllowed('ls', GOV);
-    assert.strictEqual(r.requiresConfirmation, false);
-  });
-
-  it('trims whitespace from command', () => {
-    const r = isCommandAllowed('  ls  -la  ', GOV);
-    assert.strictEqual(r.allowed, true);
+  it('passes through tools not named exec', async () => {
+    const r = await cmdPolicy('read_file', { path: '/etc/passwd' });
+    assert.strictEqual(r, true);
   });
 });
 
-describe('isPathAllowed', () => {
-  it('allows path in allowed list', () => {
-    const r = isPathAllowed('/home/testuser/Documents/report.pdf', GOV);
-    assert.strictEqual(r.allowed, true);
+describe('pathAllowlist (replaces isPathAllowed)', () => {
+  it('allows path in allowed list', async () => {
+    const r = await pathPolicy('read_file', { path: '/home/testuser/Documents/report.pdf' });
+    assert.strictEqual(r, true);
   });
 
-  it('allows subdirectory of allowed path', () => {
-    const r = isPathAllowed('/home/testuser/Projects/multis/src/index.js', GOV);
-    assert.strictEqual(r.allowed, true);
+  it('allows subdirectory of allowed path', async () => {
+    const r = await pathPolicy('read_file', { path: '/home/testuser/Projects/multis/src/index.js' });
+    assert.strictEqual(r, true);
   });
 
-  it('denies path in denied list', () => {
-    const r = isPathAllowed('/etc/passwd', GOV);
-    assert.strictEqual(r.allowed, false);
-    assert.match(r.reason, /denied directory/);
+  it('denies path in denied list', async () => {
+    const r = await pathPolicy('read_file', { path: '/etc/passwd' });
+    assert.match(r, /denied root/);
   });
 
-  it('denies subdirectory of denied path', () => {
-    const r = isPathAllowed('/var/log/syslog', GOV);
-    assert.strictEqual(r.allowed, false);
+  it('denies subdirectory of denied path', async () => {
+    const r = await pathPolicy('read_file', { path: '/var/log/syslog' });
+    assert.match(r, /denied root/);
   });
 
-  it('denied paths take priority over allowed paths', () => {
-    const gov = {
-      paths: {
-        allowed: ['/usr/local/share'],
-        denied: ['/usr']
-      }
-    };
-    const r = isPathAllowed('/usr/local/share/doc.txt', gov);
-    assert.strictEqual(r.allowed, false);
+  it('denied paths take priority over allowed paths', async () => {
+    const strict = pathAllowlist({
+      allow: ['/usr/local/share'],
+      deny: ['/usr'],
+      toolNames: ['read_file'],
+    });
+    const r = await strict('read_file', { path: '/usr/local/share/doc.txt' });
+    assert.match(r, /denied root/);
   });
 
-  it('denies path not in any list', () => {
-    const r = isPathAllowed('/opt/random/file.txt', GOV);
-    assert.strictEqual(r.allowed, false);
-    assert.match(r.reason, /not in an allowed directory/);
+  it('denies path not in any list', async () => {
+    const r = await pathPolicy('read_file', { path: '/opt/random/file.txt' });
+    assert.match(r, /not under any allowed root/);
+  });
+
+  it('passes through tools not in toolNames', async () => {
+    const r = await pathPolicy('exec', { command: 'ls' });
+    assert.strictEqual(r, true);
+  });
+});
+
+describe('combinePolicies (replaces dual governance layer)', () => {
+  it('allows when both command and path pass', async () => {
+    const r = await policy('exec', { command: 'ls -la' });
+    assert.strictEqual(r, true);
+  });
+
+  it('denies on command even if path would pass', async () => {
+    const r = await policy('exec', { command: 'rm /home/testuser/Documents/x' });
+    assert.match(r, /denylist/);
+  });
+
+  it('denies on path even if command would pass', async () => {
+    const r = await policy('read_file', { path: '/etc/passwd' });
+    assert.match(r, /denied root/);
+  });
+
+  it('owner routing works via ctx (non-owner denied shell tools)', async () => {
+    const withOwner = combinePolicies(policy, async (name, args, ctx) => {
+      if (!ctx?.isOwner && ['exec', 'read_file'].includes(name)) return 'Owner only';
+      return true;
+    });
+    const r1 = await withOwner('exec', { command: 'ls' }, { isOwner: true });
+    assert.strictEqual(r1, true);
+    const r2 = await withOwner('exec', { command: 'ls' }, { isOwner: false });
+    assert.strictEqual(r2, 'Owner only');
   });
 });
