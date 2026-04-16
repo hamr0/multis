@@ -2,6 +2,39 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [0.12.0] - 2026-04-16
+
+### Changed — Governance consolidation (bare-agent v0.7.0)
+
+Multis had two parallel governance systems (command/path allowlist in `validate.js` called from `executor.js`, plus a separate checkpoint tool list). Both are now replaced by **one policy closure** wired into bareagent's Loop at construction time — one hook gates every tool call with per-caller `ctx` routing.
+
+- **Deleted** `src/governance/validate.js` — replaced by `bare-agent/policy` helpers (`pathAllowlist`, `commandAllowlist`, `combinePolicies`). Same `governance.json` config file, same rules, zero duplication.
+- **Stripped governance from `executor.js`** — `isCommandAllowed` / `isPathAllowed` / `requireConfirmation` removed. Shell-out logic stays (25+ tools still call `execCommand`). Governance is Loop-level now.
+- **New `createMultisPolicy()`** in `handlers.js` — reads `governance.json`, builds a combined policy closure, wired into `Loop({ policy })` with `ctx: { senderId, chatId, isOwner }` forwarded per-run.
+- **Dropped dead code:** `requireConfirmation` (printed a message but had no path to confirm), `governance.enabled` flag (always-on, never gated), unused config fields (`rateLimits`, `business.allowed_urls/topics/rules`, `documents.maxSize/allowedTypes`, `governance.auditLog`).
+- **Symlink traversal fix** — policy closure resolves `realpathSync` before path allowlist check.
+- **`maxCost`** wired from `config.security.max_cost_per_run` (optional runaway cap).
+- **`onError`** callback writes Loop errors to audit log with chatId context.
+
+### Changed — Checkpoint simplification
+
+- Removed custom timeout timer from `checkpoint.js`. Uses bareagent's built-in `Checkpoint({ timeout })` — on expiry, auto-denies and routes through `loop:error` + `onError`. No silent hangs.
+
+### Security
+
+- **PIN:** `verifyPin` now uses `crypto.timingSafeEqual` (constant-time comparison).
+- **PIN:** Session file mode `0o600`, directory mode `0o700` (owner-only).
+
+### Dependencies
+
+- `bare-agent` `^0.3.0` → `^0.7.0`
+
+### Tests
+
+- 395/395 passing (zero regressions). Governance tests rewritten to use `bare-agent/policy` helpers.
+
+---
+
 ## [0.11.2] - 2026-02-28
 
 ### Added

@@ -583,11 +583,14 @@ After 3 wrong PIN attempts, your account is locked for 60 minutes. The bot tells
 
 ### Governance
 
-Shell commands (`/exec`) are filtered through a governance system:
+All tool calls (shell commands, file reads, etc.) are filtered through a single governance policy:
 - **Allowlist:** Safe commands like `ls`, `cat`, `grep`, `git`, `python`
 - **Denylist:** Dangerous commands like `rm`, `sudo`, `chmod`, `shutdown`
-- **Confirmation required:** Risky but useful commands like `mv`, `cp`, `git push`
 - **Path restrictions:** Only allowed directories (like `~/Documents`) can be accessed
+- **Cost cap:** Optional per-run spending limit (set `max_cost_per_run` in config)
+- **Owner-only tools:** Shell exec and file read require owner privileges
+
+Edit `~/.multis/auth/governance.json` to customize allowed/denied commands and paths.
 
 ---
 

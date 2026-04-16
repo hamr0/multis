@@ -28,12 +28,12 @@
 - `/exec` — run allowlisted shell commands
 - `/read` — read files and directories
 - `/skills`, `/help` — discovery commands
-- Governance layer: allowlist/denylist in `governance.json` + path restrictions
+- Governance layer: command/path allowlist in `governance.json` — now enforced via bare-agent Loop-level `policy` (v0.12.0 consolidated from inline validate.js to `createMultisPolicy()` using `bare-agent/policy` helpers)
 - Audit log: append-only JSONL at `~/.multis/logs/audit.log`
 - Owner model: first paired user becomes owner, `/exec` + `/index` restricted to owner
 
 **Findings:**
-- Governance JSON is simple and effective — no need for a complex policy engine
+- Governance JSON is simple and effective — no need for a complex policy engine. Moved to bare-agent policy helpers in v0.12.0 for reuse across projects
 - Owner model covers the single-user case well, scales to "owner + trusted users" later
 
 ---

@@ -17,7 +17,7 @@
 - **LLM agnostic:** Anthropic, OpenAI, Ollama — swap providers without code changes
 - **Persistent memory:** ACT-R activation decay keeps recent context hot, old conversations fade naturally
 - **Document-aware:** Indexes PDFs and DOCX with hierarchical section-aware chunking, answers with citations
-- **Governed:** Command allowlist/denylist + append-only audit logs
+- **Governed:** Single Loop-level policy (via bare-agent v0.7) — command allowlist/denylist + path restrictions + per-caller routing + append-only audit logs
 
 ## Quick Start
 
@@ -50,7 +50,7 @@ See the **[Customer Guide](docs/01-product/customer-guide.md)** for full setup i
        │         │          │
 ┌──────▼─────────▼──────────▼───────────────────┐
 │  SQLite (FTS5 search · activation decay)       │
-│  Governance (allowlist · denylist · audit log)  │
+│  Governance (bare-agent Loop policy · audit log) │
 └────────────────────────────────────────────────┘
 ```
 
@@ -66,7 +66,7 @@ Borrowed the good parts — daemon architecture, pairing flow, skill.md pattern 
 ## Features
 
 - **Ask questions** — `/ask` or just type naturally. RAG pipeline searches your docs, passes context to the LLM, answers with citations.
-- **Run commands** — `/exec ls ~/Documents` with governance enforcement (allowlist/denylist)
+- **Run commands** — `/exec ls ~/Documents` with Loop-level governance (command + path allowlists via bare-agent policy)
 - **Index documents** — Upload PDFs and DOCX files, or `/index <path>`. Hierarchical chunking preserves document structure.
 - **Chat modes** — Set any Beeper chat to `business` (auto-respond), `silent` (archive + search), or `off` (ignore)
 - **Audit everything** — Append-only tamper-evident log of all commands and actions
@@ -74,7 +74,7 @@ Borrowed the good parts — daemon architecture, pairing flow, skill.md pattern 
 ## Roadmap
 
 - [x] POC 1: Telegram bot + pairing
-- [x] POC 2: Skills (shell exec, file read, governance)
+- [x] POC 2: Skills (shell exec, file read, governance via bare-agent Loop policy)
 - [x] POC 3: Document indexing (PDF/DOCX → FTS5)
 - [x] POC 4: LLM RAG + chat modes
 - [x] POC 5: Memory (ACT-R activation decay + memory.md)
@@ -95,8 +95,8 @@ src/
 ├── platforms/            # Telegram + Beeper adapters, normalized Message
 ├── llm/                  # bare-agent provider adapter + RAG prompts
 ├── indexer/              # PDF/DOCX parsing, chunking, SQLite FTS5 store
-├── governance/           # Command validation + audit logging
-├── skills/               # Shell exec, file read
+├── governance/           # Audit logging (governance.json config read by bare-agent policy)
+├── skills/               # Shell exec, file read (governance stripped — Loop policy gates)
 ├── config.js             # ~/.multis/config.json + .env loader
 └── index.js              # Entry point
 ```

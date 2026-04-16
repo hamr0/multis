@@ -237,10 +237,11 @@ The agent loop and resilience layer are provided by `bare-agent`:
 
 | Component | bare-agent class | What it does |
 |-----------|-----------------|--------------|
-| **Loop** | `Loop` | LLM → tool_use → execute → loop (max N rounds). Drives all `/ask` and `/plan` interactions |
+| **Loop** | `Loop` | LLM → tool_use → execute → loop (max N rounds). `policy(tool, args, ctx)` gates every tool call. `audit` writes JSONL. `maxCost` caps USD spend per run. `onError` surfaces silent failures. Drives all `/ask` and `/plan` interactions |
+| **Policy helpers** | `pathAllowlist`, `commandAllowlist`, `combinePolicies` | Composable predicates for `Loop({ policy })`. Multis wires these via `createMultisPolicy()` reading `governance.json` |
 | **Retry** | `Retry` | Automatic retry on 429/5xx with configurable max attempts and timeout |
 | **CircuitBreaker** | `CircuitBreaker` | Shared per-process, opens after N failures, resets after cooldown. Wraps the provider |
-| **Checkpoint** | `Checkpoint` | Human-in-the-loop approval before dangerous tool calls (e.g. `exec`). Sends yes/no prompt to chat |
+| **Checkpoint** | `Checkpoint` | Human-in-the-loop approval before dangerous tool calls (e.g. `exec`). Built-in timeout (default 5min) auto-denies if no reply. Sends yes/no prompt to chat |
 | **Planner** | `Planner` | Breaks a goal into steps. Used by `/plan` command |
 | **Scheduler** | `Scheduler` | Time-triggered jobs, persists to `~/.multis/data/scheduler.json`, 60s poll interval |
 
@@ -467,14 +468,17 @@ Chunks outside role **never reach the LLM context**. This is the hard boundary.
 
 ## 7. Governance + Security
 
-### Command validation — flat cross-platform allowlist
+### Governance — single Loop-level policy (bare-agent v0.7+)
 
-One `governance.json` covers all platforms (Linux, macOS, Windows, Android). Unused commands on the wrong OS are harmless — no conditional logic needed. The LLM reads the flat list without complexity overhead.
+As of v0.12.0, governance is handled by bareagent's `Loop({ policy })` — one closure gates every tool call (native tools, MCP tools, browsing, mobile, user-defined). `createMultisPolicy()` in `handlers.js` reads `governance.json` and builds the policy using `bare-agent/policy` helpers (`pathAllowlist`, `commandAllowlist`, `combinePolicies`). Per-caller routing via `ctx: { senderId, chatId, isOwner }` forwarded per `loop.run()`.
+
+One `governance.json` covers all platforms (Linux, macOS, Windows, Android). Unused commands on the wrong OS are harmless.
 
 - **Allowlist:** Safe commands across all OSes — `ls`/`dir`, `cat`/`type`, `grep`/`find`/`where`, `curl`/`wget`, `git`/`npm`/`node`/`python`, media (`playerctl`, `osascript`), clipboard (`xclip`, `pbcopy`, `clip`), screenshots (`grim`, `screencapture`, `snippingtool`), Termux (`termux-*` for Android)
 - **Denylist:** Destructive commands — `rm`/`rmdir`/`del`/`rd`, `sudo`/`su`/`runas`, `dd`/`mkfs`/`format`/`diskpart`, `chmod`/`chown`/`icacls`, `kill`/`killall`/`taskkill`, `shutdown`/`reboot`/`halt`
-- **Confirmation:** Risky commands — `mv`/`cp`/`move`/`copy`/`xcopy`/`robocopy`, `powershell`, `git push`/`git rebase`/`git reset`, `npm publish`
-- **Path restrictions:** Allowed dirs (`~/Documents`, `~/Downloads`, `~/Projects`, `~/PycharmProjects`, `~/Desktop`) vs denied (`/etc`, `/var`, `/usr`, `/System`, `/bin`, `/sbin`, `C:\Windows`, `C:\Program Files`)
+- **Path restrictions:** Allowed dirs (`~/Documents`, `~/Downloads`, `~/Projects`, `~/PycharmProjects`, `~/Desktop`) vs denied (`/etc`, `/var`, `/usr`, `/System`, `/bin`, `/sbin`, `C:\Windows`, `C:\Program Files`). Symlinks resolved via `realpathSync` before checking.
+- **Cost cap:** Optional `config.security.max_cost_per_run` — Loop throws `MaxCostError` if cumulative cost exceeds the cap.
+- **`requireConfirmation` removed** (v0.12.0) — was dead code. Commands needing human approval go into Checkpoint's tool list instead.
 
 ### PIN authentication (POC6)
 
