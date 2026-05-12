@@ -231,19 +231,21 @@ Providers are handled by `bare-agent` library. Configuration in `~/.multis/confi
 
 **Adapter:** `src/llm/provider-adapter.js` maps config to bare-agent provider instances.
 
-### bare-agent integration
+### bare-agent + bareguard integration
 
-The agent loop and resilience layer are provided by `bare-agent`:
+The agent loop is provided by `bare-agent ^0.10.1`. All governance (allowlists, audit, budget, humanChannel) is delegated to `bareguard ^0.4.1` via `wireGate(gate, { actionTranslator })`.
 
-| Component | bare-agent class | What it does |
-|-----------|-----------------|--------------|
-| **Loop** | `Loop` | LLM → tool_use → execute → loop (max N rounds). `policy(tool, args, ctx)` gates every tool call. `audit` writes JSONL. `maxCost` caps USD spend per run. `onError` surfaces silent failures. Drives all `/ask` and `/plan` interactions |
-| **Policy helpers** | `pathAllowlist`, `commandAllowlist`, `combinePolicies` | Composable predicates for `Loop({ policy })`. Multis wires these via `createMultisPolicy()` reading `governance.json` |
-| **Retry** | `Retry` | Automatic retry on 429/5xx with configurable max attempts and timeout |
-| **CircuitBreaker** | `CircuitBreaker` | Shared per-process, opens after N failures, resets after cooldown. Wraps the provider |
-| **Checkpoint** | `Checkpoint` | Human-in-the-loop approval before dangerous tool calls (e.g. `exec`). Built-in timeout (default 5min) auto-denies if no reply. Sends yes/no prompt to chat |
-| **Planner** | `Planner` | Breaks a goal into steps. Used by `/plan` command |
-| **Scheduler** | `Scheduler` | Time-triggered jobs, persists to `~/.multis/data/scheduler.json`, 60s poll interval |
+| Component | Package | What it does |
+|-----------|---------|--------------|
+| **Loop** | bare-agent | LLM → tool_use → execute → loop. `policy(tool, args, ctx)` from wireGate gates every tool call. `onLlmResult`/`onToolResult` callbacks forward usage to `gate.record` so `budget.maxCostUsd` covers BOTH LLM and tool spend. `HaltError` from the policy exits the loop cleanly (never leaks `[HALT:]` to the model). Drives `/ask` and `/plan` |
+| **Gate** | bareguard | Single source of truth for governance: `bash.allow`/`bash.denyPatterns`, `fs.readScope`/`fs.deny`, `content.askPatterns` (absorbs multis' prompt-injection patterns), `secrets.envVars`, `budget.maxCostUsd`, `limits.maxTurns`, `humanChannel` (single callback for every ask/halt). Built lazily in `src/governance/gate.js` (bareguard is ESM, multis is CJS — dynamic import) |
+| **wireGate** | bare-agent/bareguard | `wireGate(gate, { actionTranslator })` returns `{policy, onLlmResult, onToolResult, filterTools}`. multis' translator hoists `exec → {type:'bash', cmd}` and `read_file → {type:'read', path}` at the seam so bareguard's primitives read these top-level fields. Owner-bypass (`exec`/`read_file` for non-owners) layered as a pre-check before `wireGate.policy` |
+| **humanChannel** | bareguard contract | `src/governance/human-channel.js` routes ask/halt back to the originating chat via `event.action._ctx.{platform, chatId, senderId}` (v0.4 contract); reuses the pending-reply Map pattern from `src/bot/checkpoint.js` |
+| **Retry** | bare-agent | Automatic retry on 429/5xx with configurable max attempts and timeout |
+| **CircuitBreaker** | bare-agent | Shared per-process, opens after N failures, resets after cooldown. Wraps the provider |
+| **Checkpoint** | bare-agent | Retained for non-policy "always confirm" flows (e.g. `send_email`-style). humanChannel handles policy-driven approvals; Checkpoint handles the rest |
+| **Planner** | bare-agent | Breaks a goal into steps. Used by `/plan` command |
+| **Scheduler** | bare-agent | Time-triggered jobs, persists to `~/.multis/data/scheduler.json`, 60s poll interval |
 
 Config for retry and circuit breaker in `config.json`:
 
@@ -468,17 +470,32 @@ Chunks outside role **never reach the LLM context**. This is the hard boundary.
 
 ## 7. Governance + Security
 
-### Governance — single Loop-level policy (bare-agent v0.7+)
+### Governance — bareguard Gate (bareguard 0.4 + bare-agent 0.10)
 
-As of v0.12.0, governance is handled by bareagent's `Loop({ policy })` — one closure gates every tool call (native tools, MCP tools, browsing, mobile, user-defined). `createMultisPolicy()` in `handlers.js` reads `governance.json` and builds the policy using `bare-agent/policy` helpers (`pathAllowlist`, `commandAllowlist`, `combinePolicies`). Per-caller routing via `ctx: { senderId, chatId, isOwner }` forwarded per `loop.run()`.
+As of v0.13.0, governance lives in a **bareguard Gate** wired into bareagent's `Loop` via `wireGate(gate)`. One `humanChannel` callback handles every ask/halt event; one structured JSONL audit at `~/.multis/logs/gate.jsonl` records every gate decision; `budget.maxCostUsd` covers both LLM and tool spend via `Loop({onLlmResult, onToolResult})`. multis is bareguard's first production adopter.
+
+`src/governance/gate.js` is the integration point. It lazily `await import('bareguard')` (bareguard is ESM, multis is CJS), reads `governance.json`, and builds the Gate config:
+
+| governance.json | → Gate config |
+|---|---|
+| `commands.allowlist` | `bash.allow` (argv[0]-style prefix match) |
+| `commands.denylist` | `bash.denyPatterns` (regex per entry) |
+| `paths.allowed` | `fs.readScope` + `fs.writeScope` |
+| `paths.denied` | `fs.deny` |
+| `security.max_cost_per_run` | `budget.maxCostUsd` (covers LLM + tool spend) |
+| `llm.max_tool_rounds` | `limits.maxTurns` (doubled — bareguard counts both LLM and tool records) |
+| (built-in) | `secrets.envVars`: ANTHROPIC/OPENAI/GEMINI/TELEGRAM tokens |
+| (built-in) | `content.askPatterns`: multis' prompt-injection patterns |
 
 One `governance.json` covers all platforms (Linux, macOS, Windows, Android). Unused commands on the wrong OS are harmless.
 
 - **Allowlist:** Safe commands across all OSes — `ls`/`dir`, `cat`/`type`, `grep`/`find`/`where`, `curl`/`wget`, `git`/`npm`/`node`/`python`, media (`playerctl`, `osascript`), clipboard (`xclip`, `pbcopy`, `clip`), screenshots (`grim`, `screencapture`, `snippingtool`), Termux (`termux-*` for Android)
 - **Denylist:** Destructive commands — `rm`/`rmdir`/`del`/`rd`, `sudo`/`su`/`runas`, `dd`/`mkfs`/`format`/`diskpart`, `chmod`/`chown`/`icacls`, `kill`/`killall`/`taskkill`, `shutdown`/`reboot`/`halt`
 - **Path restrictions:** Allowed dirs (`~/Documents`, `~/Downloads`, `~/Projects`, `~/PycharmProjects`, `~/Desktop`) vs denied (`/etc`, `/var`, `/usr`, `/System`, `/bin`, `/sbin`, `C:\Windows`, `C:\Program Files`). Symlinks resolved via `realpathSync` before checking.
-- **Cost cap:** Optional `config.security.max_cost_per_run` — Loop throws `MaxCostError` if cumulative cost exceeds the cap.
-- **`requireConfirmation` removed** (v0.12.0) — was dead code. Commands needing human approval go into Checkpoint's tool list instead.
+- **Cost cap:** Optional `config.security.max_cost_per_run` → `budget.maxCostUsd`. On halt, bareguard fires `humanChannel(event)` with the originating chat's `_ctx` so the prompt routes back to the right user. multis' default humanPrompt treats "yes" on halt as `terminate` (no top-up UX).
+- **Action shape translation:** multis tool names (`exec`, `read_file`, `grep_files`, `find_files`) are translated to bareguard's canonical types (`bash`, `read`) via `wireGate(gate, { actionTranslator })` (bareagent 0.10.1+ / bareguard 0.4.1+ seam). bareguard's `bashCheck` reads `action.cmd` and `fsCheck` reads `action.path` at top level — the translator hoists these from the LLM's `args` into the shape bareguard expects. Symlinks resolved via `realpathSync` inside the translator before the gate sees the path.
+- **Halt protocol:** halt-severity decisions throw `HaltError` from the policy; Loop catches it, exits cleanly, and returns `result.error = 'halt:<rule>'`. The `[HALT:]` string never reaches the LLM. (multis surfaces this to the user as a normal "LLM error" via the existing try/catch.)
+- **Audit split:** bareguard writes gate decisions to `~/.multis/logs/gate.jsonl` (forensic, structured by phase: `gate`, `record`, `approval`, `halt`, `topup`, `terminate`). multis' `src/governance/audit.js` keeps the 50+ app-event call sites at `~/.multis/logs/audit.log` (pairing, mode change, capture, escalation, etc.).
 
 ### PIN authentication (POC6)
 

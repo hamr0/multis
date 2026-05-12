@@ -59,6 +59,8 @@ Personal chatbot/assistant that runs locally. Control your laptop and query your
 
 - Node.js >= 20, vanilla (minimal deps)
 - Telegraf (Telegram), better-sqlite3 (SQLite + FTS5), pdfjs-dist (PDF.js), mammoth
+- bare-agent ^0.10.1 (Loop, Retry, CircuitBreaker, Checkpoint, Scheduler, wireGate + actionTranslator, HaltError)
+- bareguard ^0.4.1 (Gate, audit, budget, humanChannel — ESM, dynamic-imported from CJS)
 - Beeper Desktop API on localhost:23373 (opt-in)
 - LLM: Anthropic, OpenAI, Ollama (configurable via .env)
 
@@ -79,8 +81,10 @@ npm test             # node --test test/**/*.test.js
 | src/config.js | Load ~/.multis/config.json + .env |
 | src/bot/handlers.js | Message router, all command handlers |
 | src/platforms/ | Platform adapters (telegram.js, beeper.js, base.js, message.js) |
-| src/governance/audit.js | Append-only event log (50+ call sites — bot events, not just governance) |
-| src/skills/executor.js | Shell exec, file read (governance stripped — gating is Loop-level via bare-agent policy) |
+| src/governance/gate.js | bareguard Gate factory — ESM dynamic-import, action translation (exec→bash, read_file→read), maps governance.json → bash/fs/content/secrets/budget/limits |
+| src/governance/human-channel.js | Single `humanPrompt` for every ask/halt event — routes back to chat via `event.action._ctx.{platform, chatId, senderId}` |
+| src/governance/audit.js | Append-only app-event log (50+ call sites; distinct from bareguard's `gate.jsonl`) |
+| src/skills/executor.js | Shell exec, file read (no governance here — gating happens at bareguard Gate via wireGate's policy) |
 | src/indexer/ | Doc parsing, chunking, SQLite FTS5 store |
 | src/llm/ | LLM providers + RAG prompt builder |
 | ~/.multis/ | Runtime data: config.json, data/ (db, memory), auth/, logs/, run/ |

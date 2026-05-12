@@ -13,9 +13,10 @@ const { buildToolRegistry, getToolsForUser, loadToolsConfig } = require('../tool
 const { adaptTools } = require('../tools/adapter');
 const { getPlatform } = require('../tools/platform');
 const { Loop, Retry, CircuitBreaker } = require('bare-agent');
-const { pathAllowlist, commandAllowlist, combinePolicies } = require('bare-agent/policy');
 const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler');
 const { createCheckpoint, handleApprovalReply, hasPendingApproval } = require('./checkpoint');
+const { createGate } = require('../governance/gate');
+const { createHumanPrompt, handleHumanReply, hasPendingHumanReply } = require('../governance/human-channel');
 
 // ---------------------------------------------------------------------------
 // Admin presence pause — when owner messages in a business chat, bot pauses
@@ -41,53 +42,52 @@ function clearAdminPauses() {
 }
 
 // ---------------------------------------------------------------------------
-// Governance — single policy closure built from governance.json + bareagent helpers
+// Governance — bareguard Gate per router instance. Shared budget + audit
+// across all chats served by this router. Lazy-init: built on first agent
+// loop invocation since loading the ESM `bareguard` module requires `await
+// import()`.
+//
+// gov.resolve() returns the bundle. gov.platformRegistry is mutable so the
+// humanPrompt closure can route prompts back via the registered platforms.
 // ---------------------------------------------------------------------------
 
-function createMultisPolicy(config) {
-  const fs = require('fs');
-  const govPath = PATHS.governance();
-  let gov = { commands: { allowlist: [], denylist: [] }, paths: { allowed: [], denied: [] } };
-  try { gov = JSON.parse(fs.readFileSync(govPath, 'utf8')); } catch { /* defaults */ }
+function createGovernanceCarrier(config, opts = {}) {
+  const platformRegistry = new Map();
+  let resolved = null;
+  let resolving = null;
 
-  const cmdPolicy = commandAllowlist({
-    allow: gov.commands.allowlist || [],
-    deny: gov.commands.denylist || [],
-    toolName: 'exec',
-  });
-
-  const pathPolicy = pathAllowlist({
-    allow: gov.paths.allowed || [],
-    deny: gov.paths.denied || [],
-    toolNames: ['read_file', 'grep_files', 'find_files'],
-    argKey: 'path',
-  });
-
-  // Symlink traversal fix: resolve real path before checking
-  const safePathPolicy = async (toolName, args, ctx) => {
-    if (args?.path) {
-      try {
-        const expanded = args.path.replace(/^~/, process.env.HOME || '');
-        const real = fs.realpathSync(expanded);
-        return pathPolicy(toolName, { ...args, path: real }, ctx);
-      } catch { /* file doesn't exist yet — let the tool handle the error */ }
-    }
-    return pathPolicy(toolName, args, ctx);
+  const carrier = {
+    platformRegistry,
+    setPlatformRegistry(registry) {
+      // copy entries from the router's registry into ours so humanPrompt can
+      // dispatch to the right transport
+      for (const [k, v] of registry) platformRegistry.set(k, v);
+    },
+    async resolve() {
+      if (resolved) return resolved;
+      if (resolving) return resolving;
+      resolving = (async () => {
+        const humanPrompt = opts.humanPrompt || createHumanPrompt({
+          platformRegistry,
+          pinManager: opts.pinManager,
+          timeoutMs: (config?.security?.checkpoint_timeout || 60) * 1000,
+        });
+        const built = await createGate({
+          config,
+          humanPrompt,
+          auditPath: opts.auditPath,
+          budgetFile: opts.budgetFile,
+          fileless: opts.fileless,
+          governance: opts.governance,
+        });
+        resolved = built;
+        return built;
+      })();
+      return resolving;
+    },
   };
 
-  // Owner gets full access (minus hard denylist). Non-owner gets restricted.
-  return combinePolicies(
-    cmdPolicy,
-    safePathPolicy,
-    async (toolName, args, ctx) => {
-      if (ctx?.isOwner) return true;
-      // Non-owners cannot use shell tools at all
-      if (['exec', 'read_file', 'grep_files', 'find_files'].includes(toolName)) {
-        return 'This tool requires owner privileges.';
-      }
-      return true;
-    },
-  );
+  return carrier;
 }
 
 // ---------------------------------------------------------------------------
@@ -199,7 +199,18 @@ function createMessageRouter(config, deps = {}) {
   const memoryManagers = deps.memoryManagers || new Map();
   const _memBaseDir = deps.memoryBaseDir || PATHS.memory();
   const pinManager = deps.pinManager || new PinManager(config);
-  const policy = deps.policy || createMultisPolicy(config);
+  // gov is a lazy carrier — gov.resolve() returns {gate, policy, onLlmResult,
+  // onToolResult, filterTools, HaltError}. Lazy because bareguard is ESM and
+  // requires `await import()` on first use. Tests can pass deps.gov to inject
+  // a fully-built governance bundle (skips Gate construction).
+  const gov = deps.gov || createGovernanceCarrier(config, {
+    humanPrompt: deps.humanPrompt,
+    auditPath: deps.auditPath,
+    budgetFile: deps.budgetFile,
+    fileless: deps.fileless,
+    governance: deps.governanceFile,
+    pinManager,
+  });
   // Helper: getMemoryManager with baseDir (follows getMultisDir for test isolation)
   const getMem = (chatId, opts = {}) =>
     getMemoryManager(memoryManagers, chatId, { ...opts, baseDir: _memBaseDir });
@@ -270,7 +281,12 @@ function createMessageRouter(config, deps = {}) {
     // so they aren't swallowed by natural/silent/business routing
     const text = msg.text || '';
 
-    // Check for checkpoint approval reply (yes/no)
+    // Check for bareguard humanChannel reply (ask/halt prompts)
+    if (hasPendingHumanReply(msg.senderId) && handleHumanReply(msg.senderId, text)) {
+      return;
+    }
+
+    // Check for checkpoint approval reply (yes/no) — non-policy "always confirm" flows
     if (hasPendingApproval(msg.senderId) && handleApprovalReply(msg.senderId, text)) {
       return;
     }
@@ -302,7 +318,7 @@ function createMessageRouter(config, deps = {}) {
       pinManager.clearPending(msg.senderId);
       // Re-route the stored command
       msg = stored.msg;
-      await executeCommand(stored.command, stored.args, msg, platform, config, indexer, provider, memoryManagers, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, policy });
+      await executeCommand(stored.command, stored.args, msg, platform, config, indexer, provider, memoryManagers, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, gov });
       return;
     }
 
@@ -472,7 +488,7 @@ function createMessageRouter(config, deps = {}) {
         }
       }
 
-      await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, policy });
+      await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, gov });
       return;
     }
 
@@ -511,16 +527,19 @@ function createMessageRouter(config, deps = {}) {
       }
     }
 
-    await executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, policy });
+    await executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, gov });
   };
 
-  router.registerPlatform = (name, instance) => platformRegistry.set(name, instance);
+  router.registerPlatform = (name, instance) => {
+    platformRegistry.set(name, instance);
+    gov.platformRegistry.set(name, instance);
+  };
 
   // Initialize scheduler with centralized tick handler (call after platforms registered)
   router.initScheduler = () => {
     const tick = createSchedulerTick({
       platformRegistry, config, provider, indexer, getMem, memCfg,
-      allTools, toolsConfig, runtimePlatform, maxToolRounds, policy
+      allTools, toolsConfig, runtimePlatform, maxToolRounds, gov
     });
     const scheduler = getScheduler(tick);
     return scheduler;
@@ -692,7 +711,7 @@ async function routeStatus(msg, platform, config) {
     `Role: ${owner ? 'owner' : 'user'}`,
     `Paired users: ${config.allowed_users.length}`,
     `LLM provider: ${config.llm.provider}`,
-    `Governance: Loop-level policy (bare-agent v0.7+)`
+    `Governance: bareguard Gate (bareguard 0.4 + bare-agent 0.10)`
   ];
   await platform.send(msg.chatId, info.join('\n'));
 }
@@ -841,8 +860,11 @@ function getCircuitBreaker(config) {
  * @returns {Promise<string>} — final text answer
  */
 async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
-  const { system, maxRounds = 5, ctx, config, policy } = opts;
+  const { system, maxRounds = 5, ctx, config, gov } = opts;
   const adapted = adaptTools(tools, ctx);
+
+  // Resolve governance lazily on first call (ESM bareguard requires await import)
+  const { policy, onLlmResult, onToolResult } = gov ? await gov.resolve() : {};
 
   // Build retry + circuit breaker from config
   const retryCfg = config?.llm?.retry || {};
@@ -853,31 +875,38 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   const cb = getCircuitBreaker(config);
   const wrappedProvider = cb.wrapProvider(agentProvider, config?.llm?.provider || 'default');
 
-  // Checkpoint for human approval on dangerous tools (if platform context available)
+  // Checkpoint stays for non-policy "always confirm" flows. bareguard's
+  // humanChannel handles policy-driven asks/halts.
   const checkpoint = ctx.platform
     ? createCheckpoint(ctx.platform, ctx.chatId, ctx.senderId, config)
     : null;
 
-  const maxCost = config?.security?.max_cost_per_run || undefined;
-
   const loop = new Loop({
     provider: wrappedProvider,
     system,
-    maxRounds,
     retry,
     checkpoint,
     policy,
-    maxCost,
+    onLlmResult,
+    onToolResult,
     throwOnError: false,
     onError: (err, meta) => {
       logAudit({ action: 'loop_error', source: meta?.source, error: err?.message, chatId: ctx.chatId, user_id: ctx.senderId });
     },
   });
 
+  // Pass _ctx through so humanChannel can route prompts back via platformRegistry.
+  // Note: maxRounds moved off Loop in 0.10 → use Gate limits.maxTurns (config.llm.max_tool_rounds).
   const result = await loop.run(messages, adapted, {
-    ctx: { senderId: ctx.senderId, chatId: ctx.chatId, isOwner: ctx.isOwner },
+    ctx: {
+      senderId: ctx.senderId,
+      chatId: ctx.chatId,
+      isOwner: ctx.isOwner,
+      platform: ctx.platform?.name || ctx.platform?.platform || ctx.platformName,
+    },
   });
   if (result.error) {
+    // Halt errors come back as `error: 'halt:<rule>'` strings — surface as a normal Error
     throw result.error instanceof Error ? result.error : new Error(String(result.error));
   }
   return result.text || '(no response)';
@@ -968,16 +997,16 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     }
 
     // --- Agent loop with tool calling ---
-    const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5, platformRegistry, policy: tdPolicy } = toolDeps;
+    const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5, platformRegistry, gov } = toolDeps;
     const userTools = getToolsForUser(allTools, admin, tCfg);
-    const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, config, platformRegistry };
+    const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, platformName: msg.platform, config, platformRegistry };
 
     const answer = await runAgentLoop(agentProvider, messages, userTools, {
       system,
       maxRounds: maxToolRounds,
       ctx,
       config,
-      policy: tdPolicy
+      gov,
     });
 
     // Prefix with agent name only when multiple agents exist
@@ -1406,7 +1435,7 @@ async function routeAgents(msg, platform, agentRegistry) {
  * Resolves platform from registry at fire time, not from a closure.
  * Agentic jobs run through runAgentLoop with owner's full toolset.
  */
-function createSchedulerTick({ platformRegistry, config, provider, indexer, getMem, memCfg, allTools, toolsConfig, runtimePlatform, maxToolRounds, policy }) {
+function createSchedulerTick({ platformRegistry, config, provider, indexer, getMem, memCfg, allTools, toolsConfig, runtimePlatform, maxToolRounds, gov }) {
   return async (job) => {
     const platform = platformRegistry.get(job.platformName) || platformRegistry.values().next().value;
     if (!platform) {
@@ -1437,9 +1466,9 @@ function createSchedulerTick({ platformRegistry, config, provider, indexer, getM
       const answer = await runAgentLoop(provider, [{ role: 'user', content: job.action }], userTools, {
         system,
         maxRounds: maxToolRounds || config?.llm?.max_tool_rounds || 5,
-        ctx: { senderId: config.owner_id, chatId: job.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, config, platformRegistry },
+        ctx: { senderId: config.owner_id, chatId: job.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, platformName: job.platformName, config, platformRegistry },
         config,
-        policy
+        gov,
       });
       await platform.send(job.chatId, answer);
       logAudit({ action: 'agentic_tick', jobId: job.id, jobAction: job.action });
@@ -1569,7 +1598,7 @@ async function routePlan(msg, platform, config, provider, goal, toolDeps) {
     await platform.send(msg.chatId, `Plan:\n${planText}\n\nExecuting...`);
 
     // Execute steps sequentially via the agent loop
-    const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5, platformRegistry, policy: tdPolicy } = toolDeps;
+    const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5, platformRegistry, gov } = toolDeps;
     const admin = isOwner(msg.senderId, config, msg);
     const userTools = getToolsForUser(allTools, admin, tCfg);
 
@@ -1577,9 +1606,9 @@ async function routePlan(msg, platform, config, provider, goal, toolDeps) {
       try {
         const answer = await runAgentLoop(provider, [{ role: 'user', content: step.action }], userTools, {
           maxRounds: maxToolRounds,
-          ctx: { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, platform, config, platformRegistry },
+          ctx: { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, platform, platformName: msg.platform, config, platformRegistry },
           config,
-          policy: tdPolicy
+          gov,
         });
         await platform.send(msg.chatId, `Step "${step.action}": ${answer}`);
       } catch (err) {
@@ -2077,7 +2106,7 @@ function handleStatus(config) {
       `Role: ${owner ? 'owner' : 'user'}`,
       `Paired users: ${config.allowed_users.length}`,
       `LLM provider: ${config.llm.provider}`,
-      `Governance: Loop-level policy (bare-agent v0.7+)`
+      `Governance: bareguard Gate (bareguard 0.4 + bare-agent 0.10)`
     ];
     ctx.reply(info.join('\n'));
   };

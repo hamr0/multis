@@ -22,7 +22,7 @@
 - **LLM agnostic:** Anthropic, OpenAI, Ollama — swap providers without code changes
 - **Persistent memory:** ACT-R activation decay keeps recent context hot, old conversations fade naturally
 - **Document-aware:** Indexes PDFs and DOCX with hierarchical section-aware chunking, answers with citations
-- **Governed:** Single Loop-level policy (via bare-agent v0.7) — command allowlist/denylist + path restrictions + per-caller routing + append-only audit logs
+- **Governed:** bareguard 0.4 Gate — one `humanChannel` for every ask/halt, structured JSONL audit, USD budget cap with LLM-cost accounting, command/path allowlists, secrets redaction
 
 ## Quick Start
 
@@ -55,7 +55,7 @@ See the **[Customer Guide](docs/01-product/customer-guide.md)** for full setup i
        │         │          │
 ┌──────▼─────────▼──────────▼───────────────────┐
 │  SQLite (FTS5 search · activation decay)       │
-│  Governance (bare-agent Loop policy · audit log) │
+│  Governance (bareguard Gate · gate.jsonl audit)   │
 └────────────────────────────────────────────────┘
 ```
 
@@ -71,7 +71,7 @@ Borrowed the good parts — daemon architecture, pairing flow, skill.md pattern 
 ## Features
 
 - **Ask questions** — `/ask` or just type naturally. RAG pipeline searches your docs, passes context to the LLM, answers with citations.
-- **Run commands** — `/exec ls ~/Documents` with Loop-level governance (command + path allowlists via bare-agent policy)
+- **Run commands** — `/exec ls ~/Documents` with bareguard governance (command + path allowlists, budget cap, single humanChannel for approvals)
 - **Index documents** — Upload PDFs and DOCX files, or `/index <path>`. Hierarchical chunking preserves document structure.
 - **Chat modes** — Set any Beeper chat to `business` (auto-respond), `silent` (archive + search), or `off` (ignore)
 - **Audit everything** — Append-only tamper-evident log of all commands and actions

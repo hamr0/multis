@@ -23,8 +23,8 @@ Current state of the multis codebase as of POC4.
 │          │             │                        │             │
 │  ┌───────▼──────┐ ┌────▼─────────┐  ┌──────────▼──────────┐ │
 │  │  Governance  │ │  LLM Layer   │  │  Indexer             │ │
-│  │  (validate,  │ │  (Anthropic, │  │  (PDF, DOCX, MD, TXT │ │
-│  │   audit)     │ │   OpenAI,    │  │   → chunks → SQLite) │ │
+│  │  (bareguard  │ │  (Anthropic, │  │  (PDF, DOCX, MD, TXT │ │
+│  │  Gate, audit)│ │   OpenAI,    │  │   → chunks → SQLite) │ │
 │  └──────────────┘ │   Ollama)    │  └──────────────────────┘ │
 │                   └──────────────┘                            │
 │                                                               │
@@ -51,8 +51,9 @@ src/
 │   ├── telegram.js       # Telegram platform adapter
 │   └── beeper.js         # Beeper Desktop API adapter (polling, mode routing)
 ├── governance/
-│   ├── validate.js       # Command allowlist/denylist + path restrictions
-│   └── audit.js          # Append-only JSON audit log
+│   ├── gate.js           # bareguard Gate factory (ESM dynamic import) + action translation
+│   ├── human-channel.js  # humanPrompt closure — single callback for every ask/halt event
+│   └── audit.js          # Append-only JSONL app-event log (distinct from bareguard's gate.jsonl)
 ├── tools/
 │   ├── definitions.js    # 25+ tool definitions across desktop, Android, universal
 │   ├── registry.js       # Platform filtering, owner-only gating, config overrides
@@ -93,16 +94,20 @@ All config lives in `~/.multis/`:
 | File | Purpose |
 |------|---------|
 | `config.json` | Main config (platforms, LLM, users, pairing code) |
-| `governance.json` | Command allowlist/denylist, path restrictions |
-| `multis.db` | SQLite database (document chunks, FTS5 index) |
-| `audit.log` | Append-only audit log (JSONL) |
-| `beeper-token.json` | Beeper Desktop API token |
+| `auth/governance.json` | Command allowlist/denylist, path restrictions — mapped to bareguard Gate config |
+| `data/documents.db` | SQLite database (document chunks, FTS5 index) |
+| `logs/audit.log` | Append-only app-event log (pairing, mode, capture, ...) |
+| `logs/gate.jsonl` | Bareguard structured audit (phases: gate, record, approval, halt, topup, terminate) |
+| `run/budget.json` | Shared budget file across all chats (`proper-lockfile`) |
+| `auth/beeper-token.json` | Beeper Desktop API token |
 
 ## Dependencies
 
 | Package | Purpose |
 |---------|---------|
 | `telegraf` | Telegram bot framework |
+| `bare-agent ^0.10.1` | Agent loop, Retry, CircuitBreaker, Checkpoint, Scheduler, wireGate (with `actionTranslator`), HaltError |
+| `bareguard ^0.4.1` | Gate + humanChannel + audit + budget (ESM; dynamic-imported from multis' CJS) |
 | `better-sqlite3` | SQLite database |
 | `pdfjs-dist` | PDF parsing (TOC + per-page text) |
 | `mammoth` | DOCX parsing |

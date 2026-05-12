@@ -28,12 +28,12 @@
 - `/exec` — run allowlisted shell commands
 - `/read` — read files and directories
 - `/skills`, `/help` — discovery commands
-- Governance layer: command/path allowlist in `governance.json` — now enforced via bare-agent Loop-level `policy` (v0.12.0 consolidated from inline validate.js to `createMultisPolicy()` using `bare-agent/policy` helpers)
-- Audit log: append-only JSONL at `~/.multis/logs/audit.log`
+- Governance layer: command/path allowlist in `governance.json` — enforced by a **bareguard 0.4 Gate** wired into bare-agent 0.10's `Loop` via `wireGate(gate)` (v0.13.0; multis is bareguard's first production adopter). v0.12.0 consolidated to a single Loop policy via `bare-agent/policy` helpers; v0.13.0 swapped those for a real bareguard Gate with audit + budget + secrets-redaction + humanChannel.
+- Audit log split: bareguard writes gate decisions to `~/.multis/logs/gate.jsonl` (forensic, structured by phase). multis' `src/governance/audit.js` keeps the 50+ app-event call sites at `~/.multis/logs/audit.log`.
 - Owner model: first paired user becomes owner, `/exec` + `/index` restricted to owner
 
 **Findings:**
-- Governance JSON is simple and effective — no need for a complex policy engine. Moved to bare-agent policy helpers in v0.12.0 for reuse across projects
+- Governance JSON is simple and effective — no need for a complex policy engine. v0.12.0 moved enforcement to bare-agent policy helpers; v0.13.0 moved to a bareguard Gate (one library owning command/path allowlists, audit JSONL, budget cap with LLM-cost accounting, secrets redaction, and a single humanChannel for every ask/halt).
 - Owner model covers the single-user case well, scales to "owner + trusted users" later
 
 ---

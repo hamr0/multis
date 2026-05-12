@@ -2,6 +2,44 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [0.13.0] - 2026-05-12
+
+### Changed — Governance migrated to bareguard 0.4 + bare-agent 0.10
+
+The Loop-level policy closure introduced in v0.12.0 is replaced by a real **bareguard Gate**. bareguard owns command/path allowlists, budget caps, audit JSONL, secrets redaction, and the single `humanChannel` callback for all human escalations. bareagent's `Loop` only knows about the `policy` predicate it gets from `wireGate(gate)`. multis is bareguard's first production adopter.
+
+- **New `src/governance/gate.js`** — `createGate({config, humanPrompt, ...})` factory. Lazily `await import('bareguard')` (multis is CJS, bareguard is ESM); maps `governance.json` → `bash.allow`/`bash.denyPatterns` + `fs.readScope`/`fs.deny`; configures `secrets.envVars` + `content.askPatterns` (absorbed multis' prompt-injection patterns); routes `security.max_cost_per_run` → `budget.maxCostUsd` and `llm.max_tool_rounds` → `limits.maxTurns` (doubled — bareguard counts both LLM and tool records).
+- **New `src/governance/human-channel.js`** — single `humanPrompt` closure handles both ask and halt events. Routes back to the originating chat via `event.action._ctx.{platform, chatId, senderId}` (bareguard 0.4's halt-event contract). Reuses the pending-reply Map pattern from `src/bot/checkpoint.js`.
+- **Deleted `createMultisPolicy()`** from `handlers.js`. Replaced by a lazy `createGovernanceCarrier(config)` that resolves `{policy, onLlmResult, onToolResult, filterTools}` from `wireGate(gate)` on first agent loop call.
+- **Action shape translation** — `translateAction()` hoists `exec → {type:'bash', cmd}`, `read_file/grep_files/find_files → {type:'read', path}` so bareguard's bash/fs primitives see the canonical fields they expect (they read `action.cmd` and `action.path` at top level, not under `args`).
+- **LLM cost recording now wired** — `Loop({onLlmResult})` forwards every `provider.generate` usage to `gate.record({type:'llm'})`. Pre-BA1, `budget.maxCostUsd` only saw tool cost and was effectively a lie for token-heavy / tool-light chatbot workloads.
+- **Halts no longer leak to the LLM** — bareagent throws `HaltError` from the policy on halt-severity decisions; Loop catches it and exits with `result.error = 'halt:<rule>'`. The `[HALT:]` string never reaches the model.
+- **Audit split** — bareguard writes gate decisions to `~/.multis/logs/gate.jsonl` (forensic, structured by phase). multis' existing `src/governance/audit.js` keeps the 50+ app-event call sites at `~/.multis/logs/audit.log`.
+- **Shared budget across chats** — every chat shares one budget cap via `~/.multis/run/budget.json` (`proper-lockfile`).
+- **`Checkpoint` retained** for non-policy "always confirm" flows (e.g. `send_email`-style). Per bareagent context, Checkpoint and humanChannel coexist for distinct use cases.
+- **Dropped from Loop config:** `maxCost`, `maxRounds`, `audit` (all gone in bare-agent 0.10 — moved to the Gate).
+- **Tool name vocabulary preserved** — multis keeps `exec`/`read_file`/`grep_files`/`find_files` as LLM-facing names. Translation happens inside the policy shim, not at the tool definition layer.
+
+### Dependencies
+
+- `bare-agent` `^0.7.0` → `^0.10.1` (10.1 re-exports `HaltError` from main, adds `defaultActionTranslator`, throws on legacy `maxRounds`)
+- `bareguard` `^0.4.1` added (4.1 ships the action-shape composition fix and documents the maxTurns ratio)
+
+### Tests
+
+- 403/403 passing. `test/governance.test.js` fully rewritten against the new shape: governance.json → Gate config mapping, action translation, owner gate, end-to-end with fileless audit (`audit.path: null` from bareguard 0.4), halt routing via `event.action._ctx`.
+
+### Adopter feedback round-trip
+
+Three of the four items I filed during the v0.13.0 integration shipped in patch releases by the time the docs landed:
+
+- ✅ **`HaltError` now in `require('bare-agent')`** (bareagent 0.10.1). Dropped the `require.resolve('bare-agent')` + walk-to-`src/errors.js` workaround — back to a clean `const { HaltError } = require('bare-agent')`.
+- ✅ **`wireGate(gate, { actionTranslator })`** + exported `defaultActionTranslator` (bareagent 0.10.1). Replaces multis' custom policy shim. The translator hoists `exec → bash.cmd` and `read_file → fs.path` at the seam instead of bypassing wireGate. multis still keeps owner-bypass + symlink resolution on its side (multis-specific behavior, not adapter concerns).
+- ✅ **`Loop({ maxRounds })` now throws** with a migration pointer to `limits.maxTurns` (bareagent 0.10.1). Catches anyone migrating from 0.9.
+- ✅ **maxTurns semantics documented** in bareguard 0.4.1 README. `maxTurns: rounds * 2` is the recommended pattern.
+
+---
+
 ## [0.12.0] - 2026-04-16
 
 ### Changed — Governance consolidation (bare-agent v0.7.0)

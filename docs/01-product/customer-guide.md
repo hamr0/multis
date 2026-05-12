@@ -583,12 +583,14 @@ After 3 wrong PIN attempts, your account is locked for 60 minutes. The bot tells
 
 ### Governance
 
-All tool calls (shell commands, file reads, etc.) are filtered through a single governance policy:
+All tool calls (shell commands, file reads, etc.) flow through a **bareguard Gate** (multis is bareguard's first production adopter, v0.13.0+):
 - **Allowlist:** Safe commands like `ls`, `cat`, `grep`, `git`, `python`
-- **Denylist:** Dangerous commands like `rm`, `sudo`, `chmod`, `shutdown`
-- **Path restrictions:** Only allowed directories (like `~/Documents`) can be accessed
-- **Cost cap:** Optional per-run spending limit (set `max_cost_per_run` in config)
+- **Denylist:** Dangerous commands like `rm`, `sudo`, `chmod`, `shutdown` (matched as regex patterns)
+- **Path restrictions:** Only allowed directories (like `~/Documents`) can be read or written
+- **Cost cap:** Optional per-run spending limit (set `max_cost_per_run` in config) — covers BOTH LLM tokens and tool execution. On halt, the bot pings you with current spend and asks whether to terminate
+- **Secrets redaction:** API keys (`ANTHROPIC_API_KEY`, etc.) are stripped from the audit log automatically
 - **Owner-only tools:** Shell exec and file read require owner privileges
+- **Audit:** Every gate decision is logged at `~/.multis/logs/gate.jsonl` (structured by phase: gate, record, approval, halt). App-level events (pairing, mode change, etc.) stay at `~/.multis/logs/audit.log`
 
 Edit `~/.multis/auth/governance.json` to customize allowed/denied commands and paths.
 
