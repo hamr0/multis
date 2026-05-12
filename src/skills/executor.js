@@ -7,7 +7,7 @@ const MAX_OUTPUT = 4000; // Telegram message limit ~4096 chars
 
 /**
  * Execute a shell command. Governance (command allowlist/denylist) is handled
- * by the Loop-level policy closure (bare-agent v0.7.0+), not here.
+ * by the bareguard Gate (wired via bare-agent's wireGate), not here.
  * @param {string} command - Full command string
  * @param {number} userId - User ID for audit
  * @returns {Object} - { success, output }
@@ -35,8 +35,8 @@ function execCommand(command, userId) {
 }
 
 /**
- * Read a file or list a directory. Path governance is handled by the Loop-level
- * policy closure (bare-agent v0.7.0+), not here.
+ * Read a file or list a directory. Path governance is handled by the bareguard
+ * Gate (wired via bare-agent's wireGate), not here.
  * @param {string} filePath - Path to read
  * @param {number} userId - User ID for audit
  * @returns {Object} - { success, output }

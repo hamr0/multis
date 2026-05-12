@@ -2,6 +2,39 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [0.14.0] - 2026-05-12
+
+### Changed — Governance seam closed (bareguard 0.4.2 + bare-agent 0.10.2)
+
+The remaining adopter friction from v0.13.0 closed in two upstream patches. multis now meets bareguard at the natural API — no field-hoisting transforms, no doubled round counts.
+
+- **`limits.maxToolRounds` replaces the `maxTurns: rounds * 2` arithmetic.** bareguard 0.4.2 added a sibling primitive that ticks only on non-`llm` records, so `config.llm.max_tool_rounds` maps 1:1. The `*2` multiplier and the regression test that pinned it are gone.
+- **Verbatim args form replaces the `bash.cmd` / `fs.path` hoist.** bareguard 0.4.1's `bashCheck` and `fsCheck` already read `args.command` / `args.path` via fallback; with the upstream pin in place we can drop the field hoist. The translator now only maps tool names → bareguard types (`exec → bash`, `read_file/send_file/grep_files/find_files → read`).
+- **`gate.js` translator simplified** — symlink resolution now mutates `args.path` directly. Action shape is `{ type, args, _ctx }` end-to-end. File header docstring rewritten.
+
+### Fixed (carries v0.13.x bug fixes)
+
+- `send_file` is now translated to `{type:'read'}` so `fs.deny` gates outbound files (was bypassing the path allowlist).
+- Owner-bypass writes a `phase:'denied-owner'` audit entry via `gate.record` before returning the deny string — non-owner attempts no longer disappear from `gate.jsonl`.
+- Carrier `resolve()` self-heals: `resolving.catch(() => { resolving = null; })` so a transient ESM-import failure doesn't permanently brick the bot.
+- `src/index.js` shutdown handler now calls `PATHS.pid()` (was an undefined `pidPath`, raised `ReferenceError` and leaked the PID file).
+- `/status` and the startup banner read the version from `package.json` (was hardcoded `v0.1.0` since the first POC).
+
+### Dependencies
+
+- `bare-agent` `^0.10.1` → `^0.10.2` (README leads with `limits.maxToolRounds`; `actionTranslator` example uses verbatim args form; two new real-bareguard smoke tests cover both).
+- `bareguard` `~0.4.1` → `^0.4.2` (added `limits.maxToolRounds`; carry-over from 0.4.1: `bashCheck` / `fsCheck` accept `args.command` / `args.path` via fallback).
+
+### Tests
+
+- 404/404 passing. Translator tests rewritten for the verbatim args shape; `limits.maxToolRounds` tests assert the 1:1 mapping.
+
+### Docs
+
+- New `docs/04-process/qa-smoke.md` — 15-step manual smoke checklist with explicit regression markers for each bug fixed in the v0.13.x cycle (notably step 9 = owner-bypass audit, step 15 = pidPath shutdown).
+
+---
+
 ## [0.13.0] - 2026-05-12
 
 ### Changed — Governance migrated to bareguard 0.4 + bare-agent 0.10

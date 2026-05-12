@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Gate factory — wires bareguard 0.4.1 into multis via bare-agent 0.10.1's
+ * Gate factory — wires bareguard 0.4.2 into multis via bare-agent 0.10.2's
  * `wireGate(gate, { actionTranslator })`.
  *
  * Single Gate per process (router-scoped via the carrier in handlers.js).
@@ -11,16 +11,20 @@
  * bareguard is ESM ("type":"module"); multis is CommonJS. We lazily
  * `await import('bareguard')` on first use and cache the module.
  *
- * As of bareguard 0.4.1 / bare-agent 0.10.1, both the HaltError export gap and
- * the action-shape composition seam are fixed:
- *   - `HaltError` is reachable from `require('bare-agent')`.
- *   - `wireGate(gate, { actionTranslator })` lets us hoist `exec → bash.cmd`
- *     and `read_file → fs.path` at the seam — no custom policy shim needed.
+ * As of bareguard 0.4.2 / bare-agent 0.10.2 the seam is closed:
+ *   - `bashCheck` and `fsCheck` accept `args.command` / `args.path` directly,
+ *     so the translator only maps tool NAMES to bareguard types — no field
+ *     hoisting (no `cmd:` / `path:` extraction).
+ *   - `limits.maxToolRounds` ticks only on tool records, so our cap is a 1:1
+ *     mapping from `config.llm.max_tool_rounds` (no *2 arithmetic).
  *
  * multis-specific behavior we keep on this side:
  *   - Owner-bypass: non-owners can't touch shell tools (`exec`, `read_file`,
- *     `grep_files`, `find_files`). Layered as a pre-check before wireGate.policy.
- *   - Symlink resolution before fs check (multis legacy behavior).
+ *     `grep_files`, `find_files`, `send_file`). Layered as a pre-check before
+ *     wireGate.policy. Denied attempts are recorded to the gate audit.
+ *   - Symlink resolution: args.path is realpath-resolved before fs.deny runs,
+ *     so denied directories can't be reached via symlink.
+ *   - send_file is translated to {type:'read'} so fs.deny gates outbound files.
  */
 
 const fs = require('fs');
@@ -94,12 +98,11 @@ function buildGateConfig({ governance, security, audit, budget, llm }) {
     if (budget.strict) cfg.budget.strict = true;
   }
 
-  // bareguard counts every gate.record (LLM + tool) toward limits.maxTurns,
-  // so 1 multis "round" = 2 bareguard ticks (1 LLM record + 1 tool record).
-  // Documented in bareguard 0.4.1 README; multiplier is the recommended pattern.
+  // bareguard 0.4.2 added limits.maxToolRounds — ticks only on non-"llm"
+  // records, so it counts actual tool calls 1-for-1. No more *2 arithmetic.
   const rounds = llm?.max_tool_rounds || security?.max_tool_rounds;
   if (rounds) {
-    cfg.limits = { maxTurns: rounds * 2 };
+    cfg.limits = { maxToolRounds: rounds };
   }
 
   cfg.audit = audit || {};
@@ -121,33 +124,39 @@ function expandHome(p) {
 }
 
 /**
- * Resolve symlinks for fs actions before the gate checks the path. Returns the
- * action with `path` rewritten to the realpath (or untouched if the file
- * doesn't exist yet — the executor will surface that error).
+ * Resolve symlinks for fs actions before the gate checks the path. bareguard
+ * 0.4.1+ reads the path from action.args.path (or action.path), so we mutate
+ * args.path. Untouched if the file doesn't exist yet — the executor surfaces
+ * that error.
  */
 function resolveFsPath(action) {
   if (action.type === 'read' || action.type === 'write' || action.type === 'edit') {
-    try { action.path = fs.realpathSync(action.path); } catch { /* let executor handle */ }
+    const p = action.args?.path;
+    if (p) {
+      try { action.args.path = fs.realpathSync(p); } catch { /* let executor handle */ }
+    }
   }
   return action;
 }
 
 /**
- * Action translator passed to wireGate. Hoists multis tool args into bareguard's
- * canonical action shapes (bash.cmd, fs.path). Symlinks resolved here so fs.deny
- * sees the real path.
+ * Action translator passed to wireGate. Maps multis tool names to bareguard's
+ * canonical types (bash, read). bareguard 0.4.1+ reads cmd/path out of
+ * action.args directly via fallback, so we keep the verbatim args form — no
+ * field hoisting. Path is expanded + symlink-resolved in args so fs.deny sees
+ * the real absolute path.
  */
 function makeActionTranslator(defaultTranslator) {
   return function multisActionTranslator(toolName, args, ctx) {
     const _ctx = ctx ?? null;
     if (toolName === 'exec') {
-      return { type: 'bash', cmd: args?.command || '', args, _ctx };
+      return { type: 'bash', args, _ctx };
     }
-    if (toolName === 'read_file') {
-      return resolveFsPath({ type: 'read', path: expandHome(args?.path || ''), args, _ctx });
+    if (toolName === 'read_file' || toolName === 'send_file') {
+      return resolveFsPath({ type: 'read', args: { ...args, path: expandHome(args?.path || '') }, _ctx });
     }
     if (toolName === 'grep_files' || toolName === 'find_files') {
-      return resolveFsPath({ type: 'read', path: expandHome(args?.path || '~'), args, _ctx });
+      return resolveFsPath({ type: 'read', args: { ...args, path: expandHome(args?.path || '~') }, _ctx });
     }
     return defaultTranslator(toolName, args, _ctx);
   };
@@ -250,9 +259,17 @@ async function createGate(opts = {}) {
   // Owner-bypass layered before wireGate.policy. wireGate.policy throws
   // HaltError on halt severity (caught by Loop) and returns deny strings
   // verbatim on action severity (LLM sees them).
+  // Non-owner attempts are recorded to the gate audit so denied attempts
+  // aren't silent — bareguard's policy() never runs on this branch otherwise.
   const policy = async (toolName, args, ctx) => {
     const ownerDeny = ownerCheck(toolName, ctx);
-    if (ownerDeny) return ownerDeny;
+    if (ownerDeny) {
+      try {
+        const action = makeActionTranslator(defaultTranslator)(toolName, args, ctx);
+        await gate.record(action, { phase: 'denied-owner', reason: ownerDeny });
+      } catch { /* audit write must not break the deny path */ }
+      return ownerDeny;
+    }
     return wired.policy(toolName, args, ctx);
   };
 

@@ -28,7 +28,7 @@
 - `/exec` — run allowlisted shell commands
 - `/read` — read files and directories
 - `/skills`, `/help` — discovery commands
-- Governance layer: command/path allowlist in `governance.json` — enforced by a **bareguard 0.4 Gate** wired into bare-agent 0.10's `Loop` via `wireGate(gate)` (v0.13.0; multis is bareguard's first production adopter). v0.12.0 consolidated to a single Loop policy via `bare-agent/policy` helpers; v0.13.0 swapped those for a real bareguard Gate with audit + budget + secrets-redaction + humanChannel.
+- Governance layer: command/path allowlist in `governance.json` — enforced by a **bareguard 0.4.2 Gate** wired into bare-agent 0.10.2's `Loop` via `wireGate(gate)` (v0.13.0; multis is bareguard's first production adopter). v0.12.0 consolidated to a single Loop policy via `bare-agent/policy` helpers; v0.13.0 swapped those for a real bareguard Gate with audit + budget + secrets-redaction + humanChannel; v0.14.0 closed the seam (verbatim args form, `limits.maxToolRounds` cap with no `*2` arithmetic).
 - Audit log split: bareguard writes gate decisions to `~/.multis/logs/gate.jsonl` (forensic, structured by phase). multis' `src/governance/audit.js` keeps the 50+ app-event call sites at `~/.multis/logs/audit.log`.
 - Owner model: first paired user becomes owner, `/exec` + `/index` restricted to owner
 

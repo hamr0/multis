@@ -37,7 +37,7 @@ Telegram prefix: `/`. Beeper prefix: `//`. Access levels: anyone, paired, owner,
 -> docs/01-product/commands.md
 
 ## Configuration
-Runtime config: ~/.multis/config.json. Secrets: .env. Governance: ~/.multis/auth/governance.json (read by `src/governance/gate.js`, mapped to a bareguard 0.4 Gate wired into bare-agent 0.10 via `wireGate`). Bareguard audit: ~/.multis/logs/gate.jsonl. App-event audit: ~/.multis/logs/audit.log. Shared budget: ~/.multis/run/budget.json.
+Runtime config: ~/.multis/config.json. Secrets: .env. Governance: ~/.multis/auth/governance.json (read by `src/governance/gate.js`, mapped to a bareguard 0.4.2 Gate wired into bare-agent 0.10.2 via `wireGate`; verbatim args form, no field hoisting). Bareguard audit: ~/.multis/logs/gate.jsonl. App-event audit: ~/.multis/logs/audit.log. Shared budget: ~/.multis/run/budget.json.
 -> docs/04-process/dev-workflow.md
 
 ## Adding Commands

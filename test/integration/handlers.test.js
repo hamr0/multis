@@ -74,7 +74,7 @@ describe('Command routing', () => {
 
   it('/status returns bot info', async () => {
     await router(msg('/status'), platform);
-    assert.match(platform.sent[0].text, /multis bot v0\.1\.0/);
+    assert.match(platform.sent[0].text, /multis bot v\d+\.\d+\.\d+/);
     assert.match(platform.sent[0].text, /Role: owner/);
   });
 
@@ -558,7 +558,7 @@ describe('Beeper command routing', () => {
 
     const m = msg('/status', { platform: 'beeper', senderId: 'self1', isSelf: true });
     await router(m, platform);
-    assert.match(platform.sent[0].text, /multis bot v0\.1\.0/);
+    assert.match(platform.sent[0].text, /multis bot v\d+\.\d+\.\d+/);
   });
 
   it('plain text from beeper with routeAs natural goes to /ask', async () => {

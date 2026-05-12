@@ -66,12 +66,12 @@ describe('buildGateConfig — governance.json → bareguard config mapping', () 
     assert.strictEqual(cfg.budget.maxCostUsd, 0.50);
   });
 
-  it('maps limits.maxTurns from security.max_tool_rounds (doubled — bareguard counts both LLM and tool records)', () => {
+  it('maps limits.maxToolRounds 1:1 from security.max_tool_rounds (bareguard 0.4.2 ticks only on tool records)', () => {
     const cfg = buildGateConfig({
       governance: GOV,
       security: { max_tool_rounds: 7 },
     });
-    assert.strictEqual(cfg.limits.maxTurns, 14);
+    assert.strictEqual(cfg.limits.maxToolRounds, 7);
   });
 
   it('llm.max_tool_rounds takes precedence over security.max_tool_rounds', () => {
@@ -80,33 +80,41 @@ describe('buildGateConfig — governance.json → bareguard config mapping', () 
       llm: { max_tool_rounds: 3 },
       security: { max_tool_rounds: 99 },
     });
-    assert.strictEqual(cfg.limits.maxTurns, 6);
+    assert.strictEqual(cfg.limits.maxToolRounds, 3);
   });
 });
 
 describe('translateAction — multis tool names → bareguard canonical', () => {
-  it('exec → {type:"bash", cmd, args, _ctx}', () => {
+  // Verbatim args form: bareguard 0.4.1+ reads cmd/path from action.args via
+  // fallback, so the translator only maps the type — no field hoisting.
+  it('exec → {type:"bash", args, _ctx}', () => {
     const a = translateAction('exec', { command: 'ls -la' }, { senderId: 'u1' });
     assert.strictEqual(a.type, 'bash');
-    assert.strictEqual(a.cmd, 'ls -la');
     assert.deepStrictEqual(a.args, { command: 'ls -la' });
     assert.strictEqual(a._ctx.senderId, 'u1');
   });
 
-  it('read_file → {type:"read", path, args, _ctx}', () => {
+  it('read_file → {type:"read", args:{path}, _ctx}', () => {
     const a = translateAction('read_file', { path: '/tmp/x' }, { chatId: 'c1' });
     assert.strictEqual(a.type, 'read');
-    assert.strictEqual(a.path, '/tmp/x');
+    assert.strictEqual(a.args.path, '/tmp/x');
     assert.strictEqual(a._ctx.chatId, 'c1');
   });
 
-  it('grep_files / find_files → {type:"read", path}', () => {
+  it('grep_files / find_files → {type:"read", args:{path}}', () => {
     const g = translateAction('grep_files', { pattern: 'foo', path: '/tmp' });
     assert.strictEqual(g.type, 'read');
-    assert.strictEqual(g.path, '/tmp');
+    assert.strictEqual(g.args.path, '/tmp');
+    assert.strictEqual(g.args.pattern, 'foo');
     const f = translateAction('find_files', { name: '*.js', path: '/tmp' });
     assert.strictEqual(f.type, 'read');
-    assert.strictEqual(f.path, '/tmp');
+    assert.strictEqual(f.args.path, '/tmp');
+  });
+
+  it('send_file → {type:"read", args:{path}} so fs.deny gates the read', () => {
+    const a = translateAction('send_file', { path: '/etc/shadow' });
+    assert.strictEqual(a.type, 'read');
+    assert.strictEqual(a.args.path, '/etc/shadow');
   });
 
   it('unknown tool name passes through as type', () => {

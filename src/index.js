@@ -12,7 +12,7 @@ async function main() {
   ensureMultisDir();
   const config = loadConfig();
 
-  console.log('multis v0.1.0');
+  console.log(`multis v${require('../package.json').version}`);
   console.log(`Pairing code: ${config.pairing_code}`);
   console.log(`Paired users: ${config.allowed_users.length}`);
   console.log(`LLM provider: ${config.llm.provider}`);
@@ -102,7 +102,7 @@ async function main() {
     console.log(`\nShutting down (${signal})...`);
     logAudit({ action: 'bot_stop', reason: signal });
     // Remove PID file
-    try { fs.unlinkSync(pidPath); } catch { /* ignore */ }
+    try { fs.unlinkSync(PATHS.pid()); } catch { /* ignore */ }
     for (const p of platforms) {
       await p.stop();
     }

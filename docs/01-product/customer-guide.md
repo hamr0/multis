@@ -583,7 +583,7 @@ After 3 wrong PIN attempts, your account is locked for 60 minutes. The bot tells
 
 ### Governance
 
-All tool calls (shell commands, file reads, etc.) flow through a **bareguard Gate** (multis is bareguard's first production adopter, v0.13.0+):
+All tool calls (shell commands, file reads, etc.) flow through a **bareguard Gate** (multis is bareguard's first production adopter, v0.13.0+; v0.14.0 closed the integration seam):
 - **Allowlist:** Safe commands like `ls`, `cat`, `grep`, `git`, `python`
 - **Denylist:** Dangerous commands like `rm`, `sudo`, `chmod`, `shutdown` (matched as regex patterns)
 - **Path restrictions:** Only allowed directories (like `~/Documents`) can be read or written

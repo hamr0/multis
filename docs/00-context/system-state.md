@@ -106,8 +106,8 @@ All config lives in `~/.multis/`:
 | Package | Purpose |
 |---------|---------|
 | `telegraf` | Telegram bot framework |
-| `bare-agent ^0.10.1` | Agent loop, Retry, CircuitBreaker, Checkpoint, Scheduler, wireGate (with `actionTranslator`), HaltError |
-| `bareguard ^0.4.1` | Gate + humanChannel + audit + budget (ESM; dynamic-imported from multis' CJS) |
+| `bare-agent ^0.10.2` | Agent loop, Retry, CircuitBreaker, Checkpoint, Scheduler, wireGate (with `actionTranslator`), HaltError |
+| `bareguard ^0.4.2` | Gate + humanChannel + audit + budget + `limits.maxToolRounds` (ESM; dynamic-imported from multis' CJS) |
 | `better-sqlite3` | SQLite database |
 | `pdfjs-dist` | PDF parsing (TOC + per-page text) |
 | `mammoth` | DOCX parsing |

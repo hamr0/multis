@@ -17,6 +17,7 @@ const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler
 const { createCheckpoint, handleApprovalReply, hasPendingApproval } = require('./checkpoint');
 const { createGate } = require('../governance/gate');
 const { createHumanPrompt, handleHumanReply, hasPendingHumanReply } = require('../governance/human-channel');
+const PKG_VERSION = require('../../package.json').version;
 
 // ---------------------------------------------------------------------------
 // Admin presence pause — when owner messages in a business chat, bot pauses
@@ -83,6 +84,10 @@ function createGovernanceCarrier(config, opts = {}) {
         resolved = built;
         return built;
       })();
+      // Self-heal on transient init failure (e.g. bareguard ESM import error).
+      // Without this, every subsequent message would receive the same rejected
+      // promise and the bot would be permanently broken until restart.
+      resolving.catch(() => { resolving = null; });
       return resolving;
     },
   };
@@ -706,7 +711,7 @@ async function routeStart(msg, platform, config, code) {
 async function routeStatus(msg, platform, config) {
   const owner = isOwner(msg.senderId, config, msg);
   const info = [
-    'multis bot v0.1.0',
+    `multis bot v${PKG_VERSION}`,
     `Platform: ${msg.platform}`,
     `Role: ${owner ? 'owner' : 'user'}`,
     `Paired users: ${config.allowed_users.length}`,
@@ -860,7 +865,10 @@ function getCircuitBreaker(config) {
  * @returns {Promise<string>} — final text answer
  */
 async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
-  const { system, maxRounds = 5, ctx, config, gov } = opts;
+  // maxRounds removed in bare-agent 0.10 — round caps live in the bareguard
+  // Gate as limits.maxToolRounds, derived from config.llm.max_tool_rounds.
+  // Don't accept maxRounds here so callers don't think it has any effect.
+  const { system, ctx, config, gov } = opts;
   const adapted = adaptTools(tools, ctx);
 
   // Resolve governance lazily on first call (ESM bareguard requires await import)
@@ -896,7 +904,6 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   });
 
   // Pass _ctx through so humanChannel can route prompts back via platformRegistry.
-  // Note: maxRounds moved off Loop in 0.10 → use Gate limits.maxTurns (config.llm.max_tool_rounds).
   const result = await loop.run(messages, adapted, {
     ctx: {
       senderId: ctx.senderId,
@@ -1003,7 +1010,6 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
 
     const answer = await runAgentLoop(agentProvider, messages, userTools, {
       system,
-      maxRounds: maxToolRounds,
       ctx,
       config,
       gov,
@@ -1465,7 +1471,6 @@ function createSchedulerTick({ platformRegistry, config, provider, indexer, getM
 
       const answer = await runAgentLoop(provider, [{ role: 'user', content: job.action }], userTools, {
         system,
-        maxRounds: maxToolRounds || config?.llm?.max_tool_rounds || 5,
         ctx: { senderId: config.owner_id, chatId: job.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, platformName: job.platformName, config, platformRegistry },
         config,
         gov,
@@ -1605,7 +1610,6 @@ async function routePlan(msg, platform, config, provider, goal, toolDeps) {
     for (const step of steps) {
       try {
         const answer = await runAgentLoop(provider, [{ role: 'user', content: step.action }], userTools, {
-          maxRounds: maxToolRounds,
           ctx: { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, platform, platformName: msg.platform, config, platformRegistry },
           config,
           gov,
@@ -2102,7 +2106,7 @@ function handleStatus(config) {
     if (!isPaired(ctx, config)) return;
     const owner = isOwner(ctx.from.id, config);
     const info = [
-      'multis bot v0.1.0',
+      `multis bot v${PKG_VERSION}`,
       `Role: ${owner ? 'owner' : 'user'}`,
       `Paired users: ${config.allowed_users.length}`,
       `LLM provider: ${config.llm.provider}`,

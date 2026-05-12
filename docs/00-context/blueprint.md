@@ -238,8 +238,8 @@ The agent loop is provided by `bare-agent ^0.10.1`. All governance (allowlists, 
 | Component | Package | What it does |
 |-----------|---------|--------------|
 | **Loop** | bare-agent | LLM → tool_use → execute → loop. `policy(tool, args, ctx)` from wireGate gates every tool call. `onLlmResult`/`onToolResult` callbacks forward usage to `gate.record` so `budget.maxCostUsd` covers BOTH LLM and tool spend. `HaltError` from the policy exits the loop cleanly (never leaks `[HALT:]` to the model). Drives `/ask` and `/plan` |
-| **Gate** | bareguard | Single source of truth for governance: `bash.allow`/`bash.denyPatterns`, `fs.readScope`/`fs.deny`, `content.askPatterns` (absorbs multis' prompt-injection patterns), `secrets.envVars`, `budget.maxCostUsd`, `limits.maxTurns`, `humanChannel` (single callback for every ask/halt). Built lazily in `src/governance/gate.js` (bareguard is ESM, multis is CJS — dynamic import) |
-| **wireGate** | bare-agent/bareguard | `wireGate(gate, { actionTranslator })` returns `{policy, onLlmResult, onToolResult, filterTools}`. multis' translator hoists `exec → {type:'bash', cmd}` and `read_file → {type:'read', path}` at the seam so bareguard's primitives read these top-level fields. Owner-bypass (`exec`/`read_file` for non-owners) layered as a pre-check before `wireGate.policy` |
+| **Gate** | bareguard | Single source of truth for governance: `bash.allow`/`bash.denyPatterns`, `fs.readScope`/`fs.deny`, `content.askPatterns` (absorbs multis' prompt-injection patterns), `secrets.envVars`, `budget.maxCostUsd`, `limits.maxToolRounds`, `humanChannel` (single callback for every ask/halt). Built lazily in `src/governance/gate.js` (bareguard is ESM, multis is CJS — dynamic import) |
+| **wireGate** | bare-agent/bareguard | `wireGate(gate, { actionTranslator })` returns `{policy, onLlmResult, onToolResult, filterTools}`. multis' translator only maps tool NAMES (`exec → bash`, `read_file/send_file/grep_files/find_files → read`) — args pass through verbatim because bareguard 0.4.1+ reads `args.command` / `args.path` via fallback. Owner-bypass for non-owner shell tools is layered as a pre-check before `wireGate.policy` and recorded to the gate audit |
 | **humanChannel** | bareguard contract | `src/governance/human-channel.js` routes ask/halt back to the originating chat via `event.action._ctx.{platform, chatId, senderId}` (v0.4 contract); reuses the pending-reply Map pattern from `src/bot/checkpoint.js` |
 | **Retry** | bare-agent | Automatic retry on 429/5xx with configurable max attempts and timeout |
 | **CircuitBreaker** | bare-agent | Shared per-process, opens after N failures, resets after cooldown. Wraps the provider |
@@ -470,9 +470,9 @@ Chunks outside role **never reach the LLM context**. This is the hard boundary.
 
 ## 7. Governance + Security
 
-### Governance — bareguard Gate (bareguard 0.4 + bare-agent 0.10)
+### Governance — bareguard Gate (bareguard 0.4.2 + bare-agent 0.10.2)
 
-As of v0.13.0, governance lives in a **bareguard Gate** wired into bareagent's `Loop` via `wireGate(gate)`. One `humanChannel` callback handles every ask/halt event; one structured JSONL audit at `~/.multis/logs/gate.jsonl` records every gate decision; `budget.maxCostUsd` covers both LLM and tool spend via `Loop({onLlmResult, onToolResult})`. multis is bareguard's first production adopter.
+As of v0.14.0, governance lives in a **bareguard Gate** wired into bareagent's `Loop` via `wireGate(gate)`. One `humanChannel` callback handles every ask/halt event; one structured JSONL audit at `~/.multis/logs/gate.jsonl` records every gate decision; `budget.maxCostUsd` covers both LLM and tool spend via `Loop({onLlmResult, onToolResult})`. multis is bareguard's first production adopter — v0.14.0 closed the last seam (no more `*2` arithmetic, no more `bash.cmd` / `fs.path` field hoisting).
 
 `src/governance/gate.js` is the integration point. It lazily `await import('bareguard')` (bareguard is ESM, multis is CJS), reads `governance.json`, and builds the Gate config:
 
@@ -483,7 +483,7 @@ As of v0.13.0, governance lives in a **bareguard Gate** wired into bareagent's `
 | `paths.allowed` | `fs.readScope` + `fs.writeScope` |
 | `paths.denied` | `fs.deny` |
 | `security.max_cost_per_run` | `budget.maxCostUsd` (covers LLM + tool spend) |
-| `llm.max_tool_rounds` | `limits.maxTurns` (doubled — bareguard counts both LLM and tool records) |
+| `llm.max_tool_rounds` | `limits.maxToolRounds` (1:1 — bareguard 0.4.2 ticks only on tool records, not LLM records) |
 | (built-in) | `secrets.envVars`: ANTHROPIC/OPENAI/GEMINI/TELEGRAM tokens |
 | (built-in) | `content.askPatterns`: multis' prompt-injection patterns |
 
@@ -493,7 +493,7 @@ One `governance.json` covers all platforms (Linux, macOS, Windows, Android). Unu
 - **Denylist:** Destructive commands — `rm`/`rmdir`/`del`/`rd`, `sudo`/`su`/`runas`, `dd`/`mkfs`/`format`/`diskpart`, `chmod`/`chown`/`icacls`, `kill`/`killall`/`taskkill`, `shutdown`/`reboot`/`halt`
 - **Path restrictions:** Allowed dirs (`~/Documents`, `~/Downloads`, `~/Projects`, `~/PycharmProjects`, `~/Desktop`) vs denied (`/etc`, `/var`, `/usr`, `/System`, `/bin`, `/sbin`, `C:\Windows`, `C:\Program Files`). Symlinks resolved via `realpathSync` before checking.
 - **Cost cap:** Optional `config.security.max_cost_per_run` → `budget.maxCostUsd`. On halt, bareguard fires `humanChannel(event)` with the originating chat's `_ctx` so the prompt routes back to the right user. multis' default humanPrompt treats "yes" on halt as `terminate` (no top-up UX).
-- **Action shape translation:** multis tool names (`exec`, `read_file`, `grep_files`, `find_files`) are translated to bareguard's canonical types (`bash`, `read`) via `wireGate(gate, { actionTranslator })` (bareagent 0.10.1+ / bareguard 0.4.1+ seam). bareguard's `bashCheck` reads `action.cmd` and `fsCheck` reads `action.path` at top level — the translator hoists these from the LLM's `args` into the shape bareguard expects. Symlinks resolved via `realpathSync` inside the translator before the gate sees the path.
+- **Action shape translation:** multis tool names (`exec`, `read_file`, `send_file`, `grep_files`, `find_files`) are mapped to bareguard's canonical types (`bash`, `read`) via `wireGate(gate, { actionTranslator })` (bareagent 0.10.2 / bareguard 0.4.2 seam). bareguard's `bashCheck` reads `args.command` and `fsCheck` reads `args.path` via fallback, so the translator passes args through verbatim — no field hoisting. Symlinks are resolved via `realpathSync` and written back to `args.path` inside the translator before the gate sees them. `send_file` is mapped to `{type:'read'}` so `fs.deny` gates outbound files.
 - **Halt protocol:** halt-severity decisions throw `HaltError` from the policy; Loop catches it, exits cleanly, and returns `result.error = 'halt:<rule>'`. The `[HALT:]` string never reaches the LLM. (multis surfaces this to the user as a normal "LLM error" via the existing try/catch.)
 - **Audit split:** bareguard writes gate decisions to `~/.multis/logs/gate.jsonl` (forensic, structured by phase: `gate`, `record`, `approval`, `halt`, `topup`, `terminate`). multis' `src/governance/audit.js` keeps the 50+ app-event call sites at `~/.multis/logs/audit.log` (pairing, mode change, capture, escalation, etc.).
 

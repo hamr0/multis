@@ -1,7 +1,15 @@
 /**
  * Checkpoint integration — human approval gate for irreversible tool actions.
- * Uses bareagent v0.7.0's built-in Checkpoint timeout (no custom timer needed).
+ * Uses bare-agent's built-in Checkpoint timeout (no custom timer needed).
  * Reuses the pendingAuth Map pattern from PIN auth for platform reply interception.
+ *
+ * Coexists with bareguard's humanChannel (src/governance/human-channel.js):
+ *   - Checkpoint: "always confirm" flows declared in config.security.checkpoint_tools
+ *   - humanChannel: policy-driven asks/halts emitted by the bareguard Gate
+ * Both keep their own pending-reply Map keyed by senderId. They cannot collide
+ * today because policy fires before tool execution: a policy ask/halt prevents
+ * the tool from running, so checkpoint never opens. If a tool is ever added to
+ * BOTH sets, document the precedence — the router checks human-channel first.
  */
 
 const { Checkpoint } = require('bare-agent');
