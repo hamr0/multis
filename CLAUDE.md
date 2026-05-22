@@ -49,7 +49,7 @@ Keep this managed block so 'aur init --config' can refresh the instructions.
 
 **Open-source only.** No vendor lock-in. Every line of code must have a purpose — no speculative code, no premature abstractions.
 
-For full development and testing standards, see `/home/hamr/Documents/PycharmProjects/gitdone/.claude/memory/AGENT_RULES.md`.
+For full development and testing standards, see `.claude/memory/AGENT_RULES.md`.
 
 # multis
 
@@ -125,5 +125,5 @@ POC 1-5 done (bot, skills, indexing, RAG, memory). POC 6 next (daemon + CLI + se
 
 <!-- MEMORY:START -->
 @.claude/memory/MEMORY.md
-@/home/hamr/Documents/PycharmProjects/gitdone/.claude/memory/AGENT_RULES.md
+@.claude/memory/AGENT_RULES.md
 <!-- MEMORY:END -->
