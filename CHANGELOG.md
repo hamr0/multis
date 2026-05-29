@@ -2,6 +2,11 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [Unreleased]
+
+### Changed
+- **`publish.yml` is now manual-only (`workflow_dispatch`) — npm OIDC trusted publishing with provenance, idempotent, and verifies the registry end-state.**
+
 ## [0.14.0] - 2026-05-12
 
 ### Changed — Governance seam closed (bareguard 0.4.2 + bare-agent 0.10.2)
