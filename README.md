@@ -22,7 +22,7 @@
 - **LLM agnostic:** Anthropic, OpenAI, Ollama — swap providers without code changes
 - **Persistent memory:** ACT-R activation decay keeps recent context hot, old conversations fade naturally
 - **Document-aware:** Indexes PDFs and DOCX with hierarchical section-aware chunking, answers with citations
-- **Governed:** bareguard 0.4.2 Gate — one `humanChannel` for every ask/halt, structured JSONL audit, USD budget cap with LLM-cost accounting, command/path allowlists, secrets redaction, `limits.maxToolRounds` cap
+- **Governed:** bareguard 0.7.0 Gate — one `humanChannel` for every ask/halt (incl. always-ask-before-exec via the `flags` primitive), structured JSONL audit, USD budget cap with LLM-cost accounting, command/path allowlists, secrets redaction, `limits.maxToolRounds` cap
 
 ## Quick Start
 

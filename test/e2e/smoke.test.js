@@ -31,10 +31,6 @@ describe('Module loading (smoke)', () => {
     requireModule('./src/bot/scheduler');
   });
 
-  it('loads src/bot/checkpoint', () => {
-    requireModule('./src/bot/checkpoint');
-  });
-
   it('loads src/tools/adapter', () => {
     requireModule('./src/tools/adapter');
   });

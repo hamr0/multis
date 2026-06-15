@@ -146,7 +146,10 @@ describe('createGate — end-to-end with fileless audit', () => {
 
   before(async () => {
     bundle = await createGate({
-      config: { security: { max_cost_per_run: 1.00 } },
+      // checkpoint_tools: [] opts out of the always-ask flags layer so these
+      // tests exercise allowlist/deny MECHANICS directly (the always-ask path is
+      // covered separately below).
+      config: { security: { max_cost_per_run: 1.00, checkpoint_tools: [] } },
       governance: GOV,
       fileless: true,
       humanPrompt: async () => ({ decision: 'deny' }),
@@ -220,6 +223,53 @@ describe('createGate — end-to-end with fileless audit', () => {
     assert.strictEqual(rec.action.type, 'llm');
     assert.strictEqual(rec.result.costUsd, 0.001);
     assert.strictEqual(rec.result.tokens, 150);
+  });
+});
+
+describe('createGate — always-ask (flags) replaces the Checkpoint bridge', () => {
+  // F2 cutover: confirm-before-every-exec is governed by bareguard's flags
+  // primitive (flags:{type:{bash:'ask'}}), default-on for exec, routed through
+  // the single humanChannel — not a separate bare-agent Checkpoint.
+
+  it('asks before an exec that is otherwise allowlist-ALLOWED (fires before the allowlist)', async () => {
+    const asked = [];
+    const bundle = await createGate({
+      config: {}, // no checkpoint_tools → default ['exec'] → flags ask on bash
+      governance: GOV,
+      fileless: true,
+      humanPrompt: async (event) => { asked.push(event); return { decision: 'allow' }; },
+    });
+    // `ls` is on the allowlist, yet the always-ask must still fire (step 4b
+    // before the allowlist at step 5). Approving lets it proceed.
+    const verdict = await bundle.policy('exec', { command: 'ls' }, { isOwner: true, chatId: 'c1', senderId: 'u1' });
+    assert.strictEqual(asked.length, 1, 'humanChannel asked once for the allowlisted exec');
+    assert.strictEqual(asked[0].action?._ctx?.chatId, 'c1', 'ask event carries originating _ctx');
+    assert.match(asked[0].rule || '', /flags\.type/, 'ask raised by the flags.type primitive');
+    assert.strictEqual(verdict, true, 'approve → exec proceeds');
+  });
+
+  it('deny at the ask blocks the exec', async () => {
+    const bundle = await createGate({
+      config: {},
+      governance: GOV,
+      fileless: true,
+      humanPrompt: async () => ({ decision: 'deny' }),
+    });
+    const verdict = await bundle.policy('exec', { command: 'ls' }, { isOwner: true, chatId: 'c1' });
+    assert.notStrictEqual(verdict, true, 'deny at the ask → not allowed');
+  });
+
+  it('checkpoint_tools:[] opts out — an allowlisted exec runs without asking', async () => {
+    const asked = [];
+    const bundle = await createGate({
+      config: { security: { checkpoint_tools: [] } },
+      governance: GOV,
+      fileless: true,
+      humanPrompt: async (event) => { asked.push(event); return { decision: 'deny' }; },
+    });
+    const verdict = await bundle.policy('exec', { command: 'ls' }, { isOwner: true, chatId: 'c1' });
+    assert.strictEqual(asked.length, 0, 'no ask when opted out');
+    assert.strictEqual(verdict, true, 'allowlisted exec proceeds silently');
   });
 });
 
