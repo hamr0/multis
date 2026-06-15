@@ -96,6 +96,27 @@ describe('BeeperPlatform', () => {
   // -------------------------------------------------------------------------
 
   describe('_loadToken', () => {
+    // Token resolution reads process.env.BEEPER_TOKEN — isolate it so ambient env
+    // can't leak into the file-based cases.
+    let savedEnvToken;
+    beforeEach(() => { savedEnvToken = process.env.BEEPER_TOKEN; delete process.env.BEEPER_TOKEN; });
+    afterEach(() => { if (savedEnvToken === undefined) delete process.env.BEEPER_TOKEN; else process.env.BEEPER_TOKEN = savedEnvToken; });
+
+    it('prefers config platforms.beeper.token (swap-by-config for beeperbox)', () => {
+      const { BeeperPlatform } = loadBeeper();
+      // even with a token file present, config wins
+      fs.writeFileSync(path.join(tmp.multisDir, 'auth', 'beeper-token.json'), JSON.stringify({ access_token: 'file_tok' }));
+      const bp = new BeeperPlatform(makeConfig({ token: 'cfg_tok' }));
+      assert.strictEqual(bp._loadToken(), 'cfg_tok');
+    });
+
+    it('falls back to BEEPER_TOKEN env when no config token', () => {
+      const { BeeperPlatform } = loadBeeper();
+      process.env.BEEPER_TOKEN = 'env_tok';
+      const bp = new BeeperPlatform(makeConfig());
+      assert.strictEqual(bp._loadToken(), 'env_tok');
+    });
+
     it('loads token from ~/.multis/auth/beeper-token.json', () => {
       const { BeeperPlatform } = loadBeeper();
       fs.writeFileSync(
@@ -301,25 +322,31 @@ describe('BeeperPlatform', () => {
       assert.ok(bp._seen.has('200'));
     });
 
-    it('detects personal/self chats (all participants isSelf)', async () => {
+    it('detects note-to-self via canonical rule (total===1 && isSelf)', async () => {
       const { BeeperPlatform } = loadBeeper();
       const bp = new BeeperPlatform(makeConfig());
 
+      // Shapes match the real API: participants carries { items, total }.
       bp._api = async (method, apiPath) => {
         if (apiPath.startsWith('/v1/chats?')) {
           return { items: [
-            { id: 'noteToSelf', type: 'group', participants: { items: [{ id: 'me', isSelf: true }] } },
-            { id: 'groupChat', type: 'group', participants: { items: [{ id: 'a', isSelf: false }, { id: 'me', isSelf: true }] } },
-            { id: 'dmChat', type: 'single', participants: { items: [{ id: 'friend', isSelf: false }, { id: 'me', isSelf: true }] } },
+            { id: 'noteToSelf', type: 'group', participants: { total: 1, items: [{ id: 'me', isSelf: true }] } },
+            { id: 'groupChat', type: 'group', participants: { total: 2, items: [{ id: 'a', isSelf: false }, { id: 'me', isSelf: true }] } },
+            { id: 'dmChat', type: 'single', participants: { total: 2, items: [{ id: 'friend', isSelf: false }, { id: 'me', isSelf: true }] } },
+            // Pagination trap: a big group whose loaded `items` page happens to show
+            // only yourself. The OLD every(isSelf) rule would WRONGLY flag this as
+            // personal; the canonical total===1 rule correctly rejects it.
+            { id: 'pagedBigGroup', type: 'group', participants: { total: 80, items: [{ id: 'me', isSelf: true }] } },
           ]};
         }
         return { items: [{ id: '1' }] };
       };
 
       await bp._seedLastSeen();
-      assert.ok(bp._personalChats.has('noteToSelf'));
-      assert.ok(!bp._personalChats.has('groupChat'));
-      assert.ok(!bp._personalChats.has('dmChat'));
+      assert.ok(bp._personalChats.has('noteToSelf'), 'single-self chat is personal');
+      assert.ok(!bp._personalChats.has('groupChat'), 'mixed group is not personal');
+      assert.ok(!bp._personalChats.has('dmChat'), 'DM is not personal');
+      assert.ok(!bp._personalChats.has('pagedBigGroup'), 'paginated self-only page on a big group is NOT personal (total===1 guards it)');
     });
 
     it('throws on API errors so callers can retry', async () => {

@@ -88,6 +88,49 @@ function mockLLM(response = 'Mock answer') {
 }
 
 /**
+ * Mock bareagent-compatible provider scripted with a sequence of responses.
+ * provider.generate(messages, tools, options) → { text, toolCalls, usage, model }
+ * Each call returns the next item in responseSequence; falls back to { text:'done' }.
+ * A scripted response may set `model` to exercise the Loop's real cost accounting
+ * (Loop reads result.model → estimateCost); omit it and cost stays null, as before.
+ */
+function mockToolProvider(responseSequence) {
+  let callIndex = 0;
+  const calls = [];
+  return {
+    generate: async (messages, tools, options) => {
+      calls.push({ type: 'generate', messages, tools, options });
+      const resp = responseSequence[callIndex] || { text: 'done', toolCalls: [] };
+      callIndex++;
+      return {
+        text: resp.text || '',
+        toolCalls: resp.toolCalls || [],
+        usage: resp.usage || { inputTokens: 0, outputTokens: 0 },
+        model: resp.model,
+      };
+    },
+    calls,
+  };
+}
+
+/**
+ * Build a REAL bareguard Gate (fileless, in-memory audit) wrapped as a gov
+ * carrier the router accepts via deps.gov. Returns { carrier, gate } so tests
+ * can drive the genuine policy/translator/owner-bypass and then read decisions
+ * back from gate.audit.entries — no production code is stubbed.
+ */
+async function realGov(config, governance, humanPrompt) {
+  const { createGate } = require('../../src/governance/gate');
+  const built = await createGate({ config, governance, fileless: true, humanPrompt });
+  const carrier = {
+    platformRegistry: new Map(),
+    resolve: async () => built,
+    setPlatformRegistry() {},
+  };
+  return { carrier, gate: built.gate, built };
+}
+
+/**
  * Create a Message for testing.
  */
 function msg(text, overrides = {}) {
@@ -102,4 +145,4 @@ function msg(text, overrides = {}) {
   });
 }
 
-module.exports = { createTestEnv, mockPlatform, mockLLM, msg };
+module.exports = { createTestEnv, mockPlatform, mockLLM, mockToolProvider, realGov, msg };

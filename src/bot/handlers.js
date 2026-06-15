@@ -14,7 +14,6 @@ const { adaptTools } = require('../tools/adapter');
 const { getPlatform } = require('../tools/platform');
 const { Loop, Retry, CircuitBreaker } = require('bare-agent');
 const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler');
-const { createCheckpoint, handleApprovalReply, hasPendingApproval } = require('./checkpoint');
 const { createGate } = require('../governance/gate');
 const { createHumanPrompt, handleHumanReply, hasPendingHumanReply } = require('../governance/human-channel');
 const PKG_VERSION = require('../../package.json').version;
@@ -282,17 +281,13 @@ function createMessageRouter(config, deps = {}) {
       return;
     }
 
-    // Interactive replies (PIN, checkpoint, mode picker) must be checked before routeAs
+    // Interactive replies (PIN, humanChannel, mode picker) must be checked before routeAs
     // so they aren't swallowed by natural/silent/business routing
     const text = msg.text || '';
 
-    // Check for bareguard humanChannel reply (ask/halt prompts)
+    // Check for bareguard humanChannel reply (ask/halt prompts, incl. always-ask
+    // confirms now routed through the gate's flags primitive)
     if (hasPendingHumanReply(msg.senderId) && handleHumanReply(msg.senderId, text)) {
-      return;
-    }
-
-    // Check for checkpoint approval reply (yes/no) — non-policy "always confirm" flows
-    if (hasPendingApproval(msg.senderId) && handleApprovalReply(msg.senderId, text)) {
       return;
     }
 
@@ -562,10 +557,10 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
         await routeUnpair(msg, platform, config);
         break;
       case 'exec':
-        await routeExec(msg, platform, config, args);
+        await routeExec(msg, platform, config, args, toolDeps);
         break;
       case 'read':
-        await routeRead(msg, platform, config, args);
+        await routeRead(msg, platform, config, args, toolDeps);
         break;
       case 'index':
         await routeIndex(msg, platform, config, indexer, args);
@@ -730,7 +725,33 @@ async function routeUnpair(msg, platform, config) {
   logAudit({ action: 'unpair', user_id: userId, status: 'success' });
 }
 
-async function routeExec(msg, platform, config, command) {
+/**
+ * Run a direct (slash-command) action through the same bareguard policy the
+ * agent loop uses, so /exec and /read are governed identically to LLM tool
+ * calls. governance = bareguard: every privileged path goes through the gate,
+ * not just the LLM tool path. Returns null when allowed, or a deny/halt
+ * message to surface to the user.
+ */
+async function enforceGate(gov, toolName, args, msg) {
+  if (!gov) return null; // no governance configured — nothing to enforce
+  const ctx = {
+    senderId: msg.senderId,
+    chatId: msg.chatId,
+    isOwner: true, // slash exec/read are owner-only (caller already checked)
+    platform: msg.platform,
+  };
+  try {
+    const { policy } = await gov.resolve();
+    const verdict = await policy(toolName, args, ctx);
+    if (verdict === true) return null;
+    return typeof verdict === 'string' ? verdict : 'Denied by governance.';
+  } catch (err) {
+    // HaltError or gate failure → deny closed
+    return err?.message || 'Denied by governance.';
+  }
+}
+
+async function routeExec(msg, platform, config, command, toolDeps = {}) {
   if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only command.');
     return;
@@ -741,11 +762,17 @@ async function routeExec(msg, platform, config, command) {
     return;
   }
 
+  const deny = await enforceGate(toolDeps.gov, 'exec', { command }, msg);
+  if (deny) {
+    await platform.send(msg.chatId, deny);
+    return;
+  }
+
   const result = execCommand(command, msg.senderId);
   await platform.send(msg.chatId, result.output);
 }
 
-async function routeRead(msg, platform, config, filePath) {
+async function routeRead(msg, platform, config, filePath, toolDeps = {}) {
   if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only command.');
     return;
@@ -753,6 +780,12 @@ async function routeRead(msg, platform, config, filePath) {
 
   if (!filePath) {
     await platform.send(msg.chatId, 'Usage: /read <path>');
+    return;
+  }
+
+  const deny = await enforceGate(toolDeps.gov, 'read_file', { path: filePath }, msg);
+  if (deny) {
+    await platform.send(msg.chatId, deny);
     return;
   }
 
@@ -883,17 +916,13 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   const cb = getCircuitBreaker(config);
   const wrappedProvider = cb.wrapProvider(agentProvider, config?.llm?.provider || 'default');
 
-  // Checkpoint stays for non-policy "always confirm" flows. bareguard's
-  // humanChannel handles policy-driven asks/halts.
-  const checkpoint = ctx.platform
-    ? createCheckpoint(ctx.platform, ctx.chatId, ctx.senderId, config)
-    : null;
-
+  // "Always ask" confirms (e.g. before every exec) are governed by bareguard's
+  // flags primitive inside `policy`, routed through the single humanChannel —
+  // no separate Checkpoint. governance = bareguard, one path.
   const loop = new Loop({
     provider: wrappedProvider,
     system,
     retry,
-    checkpoint,
     policy,
     onLlmResult,
     onToolResult,

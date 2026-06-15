@@ -1,10 +1,12 @@
 'use strict';
 
 /**
- * humanChannel for bareguard Gate. Routes ask/halt events back to the
- * originating chat via event.action._ctx, prompts the user, waits for a reply
- * via the pendingApprovals Map (same pattern as src/bot/checkpoint.js), and
- * resolves to bareguard's {decision, reason, newCap} shape.
+ * humanChannel for bareguard Gate. The single approval path for every gate
+ * ask/halt — including always-ask confirms (flags) that previously went through
+ * a separate bare-agent Checkpoint. Routes events back to the originating chat
+ * via event.action._ctx, prompts the user, waits for a reply via the
+ * pendingHumanResponses Map, and resolves to bareguard's {decision, reason,
+ * newCap} shape.
  *
  * Test code can pass an `autoResponder(event)` that returns the decision
  * directly without touching the platform — used by integration tests so they

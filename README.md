@@ -22,7 +22,7 @@
 - **LLM agnostic:** Anthropic, OpenAI, Ollama — swap providers without code changes
 - **Persistent memory:** ACT-R activation decay keeps recent context hot, old conversations fade naturally
 - **Document-aware:** Indexes PDFs and DOCX with hierarchical section-aware chunking, answers with citations
-- **Governed:** bareguard 0.4.2 Gate — one `humanChannel` for every ask/halt, structured JSONL audit, USD budget cap with LLM-cost accounting, command/path allowlists, secrets redaction, `limits.maxToolRounds` cap
+- **Governed:** bareguard 0.7.0 Gate — one `humanChannel` for every ask/halt (incl. always-ask-before-exec via the `flags` primitive), structured JSONL audit, USD budget cap with LLM-cost accounting, command/path allowlists, secrets redaction, `limits.maxToolRounds` cap
 
 ## Quick Start
 
@@ -33,6 +33,17 @@ multis start            # run as background daemon
 ```
 
 See the **[Customer Guide](docs/01-product/customer-guide.md)** for full setup instructions, command reference, and troubleshooting.
+
+### Self-hosting Beeper on a VPS (no laptop) — beeperbox
+
+The Beeper platform normally talks to a local Beeper Desktop. To run headless on a VPS instead, point multis at **[beeperbox](https://github.com/hamr0/beeperbox)** — a Docker container that exposes the same Beeper Desktop API. It's a **config-only swap**, no code change:
+
+```jsonc
+// ~/.multis/config.json
+"platforms": { "beeper": { "url": "http://localhost:23373", "token": "<beeperbox token>" } }
+```
+
+(Or export `BEEPER_TOKEN` — the same env var beeperbox uses.) Validated end-to-end against a beeperbox container.
 
 ## How It Works
 

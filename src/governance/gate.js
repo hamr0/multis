@@ -49,7 +49,36 @@ async function loadDeps() {
  * Build a Gate config object from multis governance.json + config.security.
  * Pure — no I/O, easy to test.
  */
-function buildGateConfig({ governance, security, audit, budget, llm }) {
+// multis-specific prompt-injection patterns. Escalated to the human via
+// content.askPatterns (humanChannel decides). COMPOSED with bareguard's
+// SAFE_DEFAULT_ASK_PATTERNS — never replacing them (bareguard treats a set
+// askPatterns as a full override).
+const INJECTION_ASK_PATTERNS = [
+  /ignore\s+(all\s+)?(previous\s+)?instructions/i,
+  /ignore\s+your\s+(instructions|rules|guidelines)/i,
+  /disregard\s+(all\s+)?(previous\s+)?instructions/i,
+  /reveal\s+(your|the)\s+(system|hidden|secret)/i,
+  /jailbreak/i,
+  /\bDAN\b/,
+  /bypass\s+(security|restrictions|filters)/i,
+  /act\s+as\s+(an?\s+)?admin/i,
+  /pretend\s+(you('re| are)\s+)?(an?\s+)?admin/i,
+  /you\s+are\s+now\s+(an?\s+)?/i,
+  /show\s+(me\s+)?(all|other)\s+(users?|customers?|data)/i,
+  /system\s+prompt/i,
+];
+
+// multis tool name → bareguard canonical action type. Mirrors makeActionTranslator
+// so an "always ask" declared on tool names lands on the type the gate evaluates.
+const TOOL_TYPE = { exec: 'bash', read_file: 'read', send_file: 'read', grep_files: 'read', find_files: 'read' };
+
+/**
+ * @param {object} args
+ * @param {RegExp[]} [args.safeAskPatterns]  bareguard's SAFE_DEFAULT_ASK_PATTERNS,
+ *   passed in by createGate (ESM, async-loaded). Defaults to [] for the pure
+ *   sync test accessor — production composes the real defaults.
+ */
+function buildGateConfig({ governance, security, audit, budget, llm, safeAskPatterns = [] }) {
   const cfg = {};
 
   if (governance?.commands) {
@@ -73,22 +102,24 @@ function buildGateConfig({ governance, security, audit, budget, llm }) {
   };
 
   cfg.content = {
-    // multis injection patterns moved to askPatterns — humanChannel decides
-    askPatterns: [
-      /ignore\s+(all\s+)?(previous\s+)?instructions/i,
-      /ignore\s+your\s+(instructions|rules|guidelines)/i,
-      /disregard\s+(all\s+)?(previous\s+)?instructions/i,
-      /reveal\s+(your|the)\s+(system|hidden|secret)/i,
-      /jailbreak/i,
-      /\bDAN\b/,
-      /bypass\s+(security|restrictions|filters)/i,
-      /act\s+as\s+(an?\s+)?admin/i,
-      /pretend\s+(you('re| are)\s+)?(an?\s+)?admin/i,
-      /you\s+are\s+now\s+(an?\s+)?/i,
-      /show\s+(me\s+)?(all|other)\s+(users?|customers?|data)/i,
-      /system\s+prompt/i,
-    ],
+    // Compose: bareguard safe defaults (delete/revoke/truncate/force-push/…)
+    // FIRST, then multis injection patterns. Setting askPatterns is a full
+    // override in bareguard, so we must re-include the defaults explicitly.
+    askPatterns: [...safeAskPatterns, ...INJECTION_ASK_PATTERNS],
   };
+
+  // "Always ask" before a tool runs, routed through bareguard's flags primitive
+  // (fires at eval step 4b — before the allowlist — so an allowlisted tool still
+  // asks; the single humanChannel handles the prompt). Replaces the bare-agent
+  // Checkpoint bridge. `checkpoint_tools` are multis tool names; map to gate
+  // types. Default ['exec'] preserves confirm-before-every-exec. An explicit []
+  // opts out.
+  const askTools = security?.checkpoint_tools ?? ['exec'];
+  if (askTools.length) {
+    const types = {};
+    for (const t of askTools) types[TOOL_TYPE[t] || t] = 'ask';
+    cfg.flags = { type: types };
+  }
 
   if (budget && (budget.maxCostUsd != null || budget.maxTokens != null)) {
     cfg.budget = {};
@@ -230,6 +261,9 @@ async function createGate(opts = {}) {
       maxCostUsd: opts.config?.security?.max_cost_per_run,
       sharedFile: budgetFile,
     },
+    // Compose multis injection asks ON TOP of bareguard's safe defaults rather
+    // than clobbering them (bareguard treats a set askPatterns as a full override).
+    safeAskPatterns: bareguard.SAFE_DEFAULT_ASK_PATTERNS || [],
   });
 
   // humanChannel — collapses every ask/halt into one callback. Routes back to

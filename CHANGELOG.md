@@ -8,6 +8,47 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 - **CI:** the publish workflow now polls the npm registry for ~2 min (was ~15s; `--prefer-online` skips npm's view cache) and accepts an `exit 0` publish even if the registry hasn't reflected it yet, so a successful-but-slow-to-reflect publish no longer reports a false failure.
 - **`publish.yml` is now manual-only (`workflow_dispatch`) — npm OIDC trusted publishing with provenance, idempotent, and verifies the registry end-state.**
 
+## [0.15.0] - 2026-06-15
+
+### Baresuite migration — M0–M2 + F2/F3 (multis is the first baresuite customer)
+
+multis now consumes the current baresuite (bareguard 0.7.0, bare-agent 0.16.1) and closes the two upstream findings the validation net surfaced. Governing doc: `docs/01-product/baresuite-migration-prd.md`.
+
+#### M0 — validation net
+
+- **New `test/e2e/router.test.js`** — drives the **real** message router with a mock LLM and a **real fileless bareguard Gate** (genuine policy, action translator, owner-bypass, audit). Covers QA smoke steps 5–11 via BOTH the LLM tool-call path and the slash-command path, proving "governance = bareguard" holds uniformly.
+- **F1 fix — slash `/exec` `/read` bypassed the gate.** `routeExec`/`routeRead` now run the same `gov.resolve().policy` as the LLM tool path before executing (`enforceGate` helper). Previously they called `execCommand`/`readFile` directly, so governance only applied on the LLM path. (PRD §8.)
+- `test/helpers/setup.js` gains `realGov()` (builds the real fileless Gate) and `mockToolProvider`.
+
+#### M1 — bareguard 0.4.2 → 0.7.0
+
+- **Dependency:** `bareguard ^0.4.2 → ^0.7.0`. Additive for multis — full suite green on the bump with no `buildGateConfig` changes required for the bump itself.
+- **F2 RESOLVED upstream — no new primitive needed.** The "always ask before every exec" requirement is met by bareguard's `flags` primitive (shipped 0.6.0): `flags:{ type:{ bash:'ask' } }` fires an ask at eval **step 4b — before the allowlist (step 5)** — so an allowlisted command still asks, routed through the single `humanChannel` with `_ctx` intact. The original repro failed only because it ran on 0.4.2, which predates `flags` (the config key was silently ignored). Validated directly against the published `Gate` with negative controls (no-flags → no ask; flags-on-other-type → no ask). Consumed in the F2 cutover below.
+
+#### M2 — bare-agent 0.10.2 → 0.16.1
+
+- **Dependency:** `bare-agent ^0.10.2 → ^0.16.1`. Pinned to **0.16.1** specifically — the release that ships the F3 fix (0.16.0 still had the bug).
+- **F3 RESOLVED — LLM cost accounting on the agent loop is live again.** Pre-fix, `CircuitBreaker.wrapProvider` returned a bare `{generate}`, dropping `.model`; `Loop` read `this.provider.model` → null → `estimateCost` → null, so `budget.maxCostUsd` accrued **zero** token cost on every wrapped-provider loop (i.e. the cost cap was silently dead in production). bare-agent 0.16.1 fixes it three ways: `wrapProvider` preserves passthrough props (`...provider`), `Loop` falls back to `result.model`, and the providers emit `model` in their result. Verified against the installed artifact, not a working tree.
+- **Real cost-accrual e2e** — the M0 budget-halt test no longer injects spend directly (the workaround for dead F3). It now drives a genuine halt: a first LLM turn reports `claude-haiku-4-5` + token usage → `Loop` derives ~$0.0048 → accrues via `onLlmResult` → trips `max_cost_per_run` ($0.0001) → halts at the exec gate → `humanChannel` with `_ctx.chatId`. Asserts a non-null `costUsd` lands in the audit. Failability-proven (drop the reported model → the test fails).
+
+#### F2 cutover — one approval path
+
+- **Removed the bare-agent `Checkpoint` bridge.** Deleted `src/bot/checkpoint.js`, the `Checkpoint` wiring in `runAgentLoop`, and the separate checkpoint reply interception. Confirm-before-every-exec now flows through bareguard's `flags` primitive and the single `humanChannel` — governance = bareguard, no parallel local approval path.
+- **`buildGateConfig` maps `security.checkpoint_tools` → `flags:{ type:{ <gateType>:'ask' } }`** (tool names mapped to gate types: `exec→bash`, `read_file/send_file/grep_files/find_files→read`). Default `['exec']` preserves confirm-before-every-exec; an explicit `[]` opts out.
+- **`content.askPatterns` now composes** `[...SAFE_DEFAULT_ASK_PATTERNS, ...injection]` instead of replacing the safe defaults (bareguard treats a set `askPatterns` as a full override, so the defaults were previously dropped).
+- **Behavior change:** confirm-before-exec was previously LLM-tool-path only (the checkpoint lived in `runAgentLoop`); it now fires at the shared gate, so **slash `/exec` also asks**. Uniform by design.
+- Always-ask covered at three levels: the `flags` primitive in isolation (throwaway POC vs the published Gate, with negative controls), multis wiring (unit + e2e tests asserting `rule: flags.type`, allowlisted-still-asks, `_ctx` preserved, opt-out), and failability (mutation: break the mapping → tests fail). Obsolete checkpoint unit tests removed.
+
+#### M-B (step 2) — beeperbox parity + swap-by-config
+
+multis can now point at a [beeperbox](https://github.com/hamr0/beeperbox) container (headless Beeper on a VPS) by **config alone** — validated end-to-end against a live container with multis's real client. Governed by PRD §E (verbs in beeperbox, policy in the integrator).
+
+- **Token from config (swap-by-config enabler).** `_loadToken()` resolves `platforms.beeper.token` → `BEEPER_TOKEN` env (the same var beeperbox uses) → token file → legacy. Pointing at beeperbox is now `{ url, token }` in config, zero code wiring.
+- **Canonical note-to-self detection.** New `_isNoteToSelf()` uses `participants.total === 1 && items[0].isSelf` (beeperbox's rule) — stricter and pagination-proof vs the old `items.every(p=>p.isSelf)` (which would misflag a big group whose loaded participant page happens to show only you). Parity, not a live bugfix — current data showed no divergence; the new test includes a pagination trap that the old rule fails.
+- **Documented the `/v1/chats` recent-25 polling bound** (the API caps at 25, recency-ordered; use `/v1/messages/search` for full reach).
+- README: documents beeperbox as the self-host-on-VPS deploy path.
+- Tests: +2 token-resolution cases (config precedence, env fallback, env-isolated); note-to-self test reshaped with the real `{items,total}` shape + pagination trap. Suite 415 → 417, green.
+
 ## [0.14.0] - 2026-05-12
 
 ### Changed — Governance seam closed (bareguard 0.4.2 + bare-agent 0.10.2)

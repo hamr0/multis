@@ -3,7 +3,6 @@ const assert = require('node:assert');
 const { createMessageRouter } = require('../../src/bot/handlers');
 const { createTestEnv, mockPlatform, mockLLM, msg } = require('../helpers/setup');
 const { parseRemind, parseCron, formatJob } = require('../../src/bot/scheduler');
-const { handleApprovalReply, hasPendingApproval } = require('../../src/bot/checkpoint');
 
 // Stub indexer
 function stubIndexer() {
@@ -164,30 +163,6 @@ describe('/cancel command', () => {
 
     await router(msg('/cancel nonexistent'), platform);
     assert.match(platform.lastTo('chat1').text, /not found/);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Checkpoint
-// ---------------------------------------------------------------------------
-
-describe('Checkpoint approval replies', () => {
-  it('hasPendingApproval returns false when no pending', () => {
-    assert.strictEqual(hasPendingApproval('nobody'), false);
-  });
-
-  it('handleApprovalReply returns false when no pending', () => {
-    assert.strictEqual(handleApprovalReply('nobody', 'yes'), false);
-  });
-
-  it('handleApprovalReply ignores non-yes/no text when no pending', () => {
-    assert.strictEqual(handleApprovalReply('nobody', 'maybe'), false);
-  });
-
-  it('hasPendingApproval returns false for different senderIds', () => {
-    assert.strictEqual(hasPendingApproval('user-a'), false);
-    assert.strictEqual(hasPendingApproval('user-b'), false);
-    assert.strictEqual(hasPendingApproval(''), false);
   });
 });
 
