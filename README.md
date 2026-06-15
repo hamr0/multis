@@ -34,6 +34,17 @@ multis start            # run as background daemon
 
 See the **[Customer Guide](docs/01-product/customer-guide.md)** for full setup instructions, command reference, and troubleshooting.
 
+### Self-hosting Beeper on a VPS (no laptop) — beeperbox
+
+The Beeper platform normally talks to a local Beeper Desktop. To run headless on a VPS instead, point multis at **[beeperbox](https://github.com/hamr0/beeperbox)** — a Docker container that exposes the same Beeper Desktop API. It's a **config-only swap**, no code change:
+
+```jsonc
+// ~/.multis/config.json
+"platforms": { "beeper": { "url": "http://localhost:23373", "token": "<beeperbox token>" } }
+```
+
+(Or export `BEEPER_TOKEN` — the same env var beeperbox uses.) Validated end-to-end against a beeperbox container.
+
 ## How It Works
 
 ```

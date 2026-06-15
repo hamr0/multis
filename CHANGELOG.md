@@ -39,6 +39,16 @@ multis now consumes the current baresuite (bareguard 0.7.0, bare-agent 0.16.1) a
 - **Behavior change:** confirm-before-exec was previously LLM-tool-path only (the checkpoint lived in `runAgentLoop`); it now fires at the shared gate, so **slash `/exec` also asks**. Uniform by design.
 - Always-ask covered at three levels: the `flags` primitive in isolation (throwaway POC vs the published Gate, with negative controls), multis wiring (unit + e2e tests asserting `rule: flags.type`, allowlisted-still-asks, `_ctx` preserved, opt-out), and failability (mutation: break the mapping → tests fail). Obsolete checkpoint unit tests removed.
 
+#### M-B (step 2) — beeperbox parity + swap-by-config
+
+multis can now point at a [beeperbox](https://github.com/hamr0/beeperbox) container (headless Beeper on a VPS) by **config alone** — validated end-to-end against a live container with multis's real client. Governed by PRD §E (verbs in beeperbox, policy in the integrator).
+
+- **Token from config (swap-by-config enabler).** `_loadToken()` resolves `platforms.beeper.token` → `BEEPER_TOKEN` env (the same var beeperbox uses) → token file → legacy. Pointing at beeperbox is now `{ url, token }` in config, zero code wiring.
+- **Canonical note-to-self detection.** New `_isNoteToSelf()` uses `participants.total === 1 && items[0].isSelf` (beeperbox's rule) — stricter and pagination-proof vs the old `items.every(p=>p.isSelf)` (which would misflag a big group whose loaded participant page happens to show only you). Parity, not a live bugfix — current data showed no divergence; the new test includes a pagination trap that the old rule fails.
+- **Documented the `/v1/chats` recent-25 polling bound** (the API caps at 25, recency-ordered; use `/v1/messages/search` for full reach).
+- README: documents beeperbox as the self-host-on-VPS deploy path.
+- Tests: +2 token-resolution cases (config precedence, env fallback, env-isolated); note-to-self test reshaped with the real `{items,total}` shape + pagination trap. Suite 415 → 417, green.
+
 ## [0.14.0] - 2026-05-12
 
 ### Changed — Governance seam closed (bareguard 0.4.2 + bare-agent 0.10.2)

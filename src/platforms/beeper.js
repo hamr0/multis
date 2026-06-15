@@ -80,6 +80,10 @@ class BeeperPlatform extends Platform {
   }
 
   async _seedLastSeen() {
+    // NOTE: /v1/chats is hard-capped at 25, recency-ordered (the limit param is a
+    // lower bound the API ignores past 25). So polling only ever sees the 25
+    // most-recent chats — older/idle chats are invisible here by design. For full
+    // reach use /v1/messages/search, not /v1/chats. (M-B spike finding.)
     const data = await this._api('GET', '/v1/chats?limit=20');
     const chats = data.items || [];
     for (const chat of chats) {
@@ -87,9 +91,7 @@ class BeeperPlatform extends Platform {
       if (!chatId) continue;
       if (chatId === this._botChatId) continue; // skip Telegram bot chat
 
-      // Detect self/note-to-self chats: all participants have isSelf=true
-      const items = chat.participants?.items || chat.members?.items || [];
-      if (items.length > 0 && items.every(p => p.isSelf)) {
+      if (this._isNoteToSelf(chat)) {
         this._personalChats.add(chatId);
       }
 
@@ -260,6 +262,20 @@ class BeeperPlatform extends Platform {
   }
 
   /**
+   * Note-to-self / saved-messages chat = exactly one participant, who is yourself.
+   * This is beeperbox's canonical rule (`participants.total===1 && items[0].isSelf`),
+   * adopted for parity (M-B §E). It's stricter and pagination-proof vs. the old
+   * `items.every(p=>p.isSelf)` — `total` is the true count, while `items` may be a
+   * paginated subset. Catches Beeper-native "Note to self" and per-platform saved
+   * chats (Telegram Saved Messages, WhatsApp "Send to yourself", …).
+   */
+  _isNoteToSelf(chat) {
+    const p = chat.participants || chat.members || {};
+    const items = p.items || [];
+    return p.total === 1 && items[0]?.isSelf === true;
+  }
+
+  /**
    * Download an asset from Beeper Desktop API.
    * @param {string} mxcUrl - mxc:// URI (possibly with encryptedFileInfoJSON param)
    * @returns {string} local file path
@@ -287,6 +303,14 @@ class BeeperPlatform extends Platform {
   }
 
   _loadToken() {
+    // Config/secret-store first so pointing multis at a beeperbox container is a
+    // pure config change (M-B §E swap-by-config): set platforms.beeper.token, or
+    // export BEEPER_TOKEN (the same var name beeperbox uses — share it across both).
+    const configToken = this.config.platforms?.beeper?.token;
+    if (configToken) return configToken;
+    if (process.env.BEEPER_TOKEN) return process.env.BEEPER_TOKEN;
+
+    // Otherwise the local Beeper Desktop OAuth token file (default deploy).
     try {
       const data = JSON.parse(fs.readFileSync(PATHS.beeperToken(), 'utf8'));
       return data.access_token;
