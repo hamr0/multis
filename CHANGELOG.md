@@ -8,6 +8,15 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 - **CI:** the publish workflow now polls the npm registry for ~2 min (was ~15s; `--prefer-online` skips npm's view cache) and accepts an `exit 0` publish even if the registry hasn't reflected it yet, so a successful-but-slow-to-reflect publish no longer reports a false failure.
 - **`publish.yml` is now manual-only (`workflow_dispatch`) — npm OIDC trusted publishing with provenance, idempotent, and verifies the registry end-state.**
 
+### Baresuite migration — M-B step 3 (foundation validated; Beeper adapter rewire pending)
+
+Validated beeperbox's watch + echo primitives **end-to-end against a live container** — the foundation for replacing multis's hand-rolled Beeper poll loop and `[multis]`-prefix echo hack. **No multis code changed yet**; the `src/platforms/beeper.js` rewire onto `poll_messages` lands next.
+
+- **`poll_messages`** (beeperbox PR #11) — cursor-based passive watch; proven **exactly-once within a single cursor chain** (4 sequential sends, 0 dup / 0 loss) — the property the old NaN-dedup / wake-flood bugs broke.
+- **Exact-id echo-guard** (beeperbox PR #13) — `source:"api"` now resolves `pendingMessageID` → final bridge id and matches by **exact id, not text**. Verified with the discriminating test: two identical-text sends each tagged with their own `client_tag`, no crossing — closes beeperbox's CI-unverifiable limit. Lets multis drop both the `[multis]` prefix **and** `_isLooping`.
+- **Container stability** (beeperbox PR #12/#13) — `docker restart` no longer segfaults (stale Xvfb-lock fix); `beepertexts` is supervised (real crash → relaunch in ~10s, verified).
+- Upstream asks filed → resolved → verified in `docs/01-product/baresuite-migration-prd.md` §7.
+
 ## [0.15.0] - 2026-06-15
 
 ### Baresuite migration — M0–M2 + F2/F3 (multis is the first baresuite customer)
