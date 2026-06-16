@@ -1,6 +1,6 @@
 const path = require('path');
 const { logAudit } = require('../governance/audit');
-const { addAllowedUser, isOwner, saveConfig, backupConfig, updateChatMeta, getMultisDir, PATHS } = require('../config');
+const { addAllowedUser, isOwner, isAdmin, addAdmin, removeAdmin, saveConfig, backupConfig, updateChatMeta, getMultisDir, PATHS } = require('../config');
 const { execCommand, readFile, listSkills } = require('../skills/executor');
 const { DocumentIndexer } = require('../indexer/index');
 const { createProvider, simpleGenerate } = require('../llm/provider-adapter');
@@ -368,6 +368,20 @@ function createMessageRouter(config, deps = {}) {
       return;
     }
 
+    // Handle pending /admin designation flow (pick → confirm → PIN). Keyed by
+    // chatId. Placed before the digit-matching handlers below so its numeric
+    // picks aren't swallowed by the index/mode pickers.
+    if (config._pendingAdmin?.[msg.chatId]) {
+      if (text.trim().startsWith('/')) {
+        delete config._pendingAdmin[msg.chatId];
+        await platform.send(msg.chatId, 'Admin setup cancelled.');
+        // fall through to command routing
+      } else {
+        await handleAdminFlowReply(msg, platform, config, text.trim(), pinManager);
+        return;
+      }
+    }
+
     // Handle pending file index scope reply (1 = public, 2 = admin, 3 = skip)
     // Must come before pending-mode handler — both match digits, this is more specific
     if (config._pendingIndex?.[msg.senderId] && /^[123]$/.test(text.trim())) {
@@ -505,8 +519,9 @@ function createMessageRouter(config, deps = {}) {
 
     // Natural language / business routing (set by platform adapter)
     if (msg.routeAs === 'natural' || msg.routeAs === 'business') {
-      // Business: anyone can get a response (customers via Beeper)
-      if (msg.routeAs !== 'business' && !isPaired(msg, config)) return;
+      // Business: anyone can get a response (customers via Beeper). Natural:
+      // paired users or designated limited-admin chats.
+      if (msg.routeAs !== 'business' && !isPaired(msg, config) && !isAdmin(msg.senderId, config, msg)) return;
 
       // Silently ignore empty / media-only messages in business chats
       if (msg.routeAs === 'business') {
@@ -570,8 +585,9 @@ function createMessageRouter(config, deps = {}) {
       return;
     }
 
-    // Auth check for all other commands
-    if (!isPaired(msg, config)) {
+    // Auth check for all other commands. Designated limited-admin chats may
+    // issue commands even though they aren't in allowed_users.
+    if (!isPaired(msg, config) && !isAdmin(msg.senderId, config, msg)) {
       if (msg.platform === 'telegram') {
         await platform.send(msg.chatId, 'You are not paired. Send /start <pairing_code> to pair.');
       }
@@ -653,6 +669,9 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
         break;
       case 'mode':
         await routeMode(msg, platform, config, args, agentRegistry, toolDeps.platformRegistry);
+        break;
+      case 'admin':
+        await routeAdmin(msg, platform, config, args, toolDeps.platformRegistry);
         break;
       case 'agent':
         await routeAgent(msg, platform, config, args, agentRegistry);
@@ -859,8 +878,10 @@ async function routeRead(msg, platform, config, filePath, toolDeps = {}) {
 }
 
 async function routeIndex(msg, platform, config, indexer, args) {
-  if (!isOwner(msg.senderId, config, msg)) {
-    await platform.send(msg.chatId, 'Owner only command.');
+  // Limited admins manage the knowledge base too (mode/index/ask), so allow any
+  // admin window — not just the super-admin. Shell (/exec,/read) stays owner-only.
+  if (!isAdmin(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, 'Admin only command.');
     return;
   }
 
@@ -1190,9 +1211,9 @@ async function routeRemember(msg, platform, config, getMem, note) {
 const VALID_MODES = ['off', 'business', 'silent'];
 
 async function routeMode(msg, platform, config, args, agentRegistry, platformRegistry) {
-  // Owner-only
-  if (!isOwner(msg.senderId, config, msg)) {
-    await platform.send(msg.chatId, 'Owner only command.');
+  // Admin command (super-admin or a designated limited admin).
+  if (!isAdmin(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, 'Admin only command.');
     return;
   }
 
@@ -1392,6 +1413,124 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
   const agentNote = agentArg ? `, agent: ${agentArg}` : '';
   await platform.send(msg.chatId, `Chat mode set to: ${mode}${agentNote}`);
   logAudit({ action: 'mode', user_id: msg.senderId, chatId: msg.chatId, mode, agent: agentArg });
+}
+
+/**
+ * /admin — super-admin (owner) designates/revokes LIMITED admin windows.
+ * Flow: /admin → numbered list of chats → pick → confirm → PIN → added.
+ * Limited admins get mode/index/ask, NOT host shell (exec/read stay owner-only).
+ * Subcommands: /admin list, /admin remove <number>.
+ */
+async function routeAdmin(msg, platform, config, args, platformRegistry) {
+  if (!isOwner(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, 'Owner only command.');
+    return;
+  }
+  const parts = (args || '').trim().split(/\s+/).filter(Boolean);
+  const sub = parts[0] ? parts[0].toLowerCase() : '';
+  const admins = config.admins || [];
+  const nameOf = (id) => config.chats?.[id]?.name || id;
+
+  if (sub === 'list') {
+    if (admins.length === 0) { await platform.send(msg.chatId, 'No limited admins designated.'); return; }
+    const lines = admins.map((id, i) => `  ${i + 1}) ${nameOf(id)}`);
+    await platform.send(msg.chatId, `Limited admins:\n${lines.join('\n')}\n\nRemove with: /admin remove <number>`);
+    return;
+  }
+
+  if (sub === 'remove') {
+    if (admins.length === 0) { await platform.send(msg.chatId, 'No limited admins to remove.'); return; }
+    const n = parseInt(parts[1], 10);
+    if (!n || n < 1 || n > admins.length) {
+      const lines = admins.map((id, i) => `  ${i + 1}) ${nameOf(id)}`);
+      await platform.send(msg.chatId, `Usage: /admin remove <number>\n${lines.join('\n')}`);
+      return;
+    }
+    const removedId = admins[n - 1];
+    removeAdmin(config, removedId);
+    await platform.send(msg.chatId, `Removed limited admin: ${nameOf(removedId)}`);
+    logAudit({ action: 'admin_remove', user_id: msg.senderId, chatId: removedId });
+    return;
+  }
+
+  // Default: start the designation picker over all known chats (any platform),
+  // excluding the command channel and chats already designated.
+  const adminSet = new Set(admins.map(String));
+  const chats = Object.entries(config.chats || {})
+    .filter(([id]) => id !== msg.chatId && !adminSet.has(String(id)))
+    .map(([id, c]) => ({ id, title: c.name || id, lastActive: c.lastActive || '' }))
+    .sort((a, b) => b.lastActive.localeCompare(a.lastActive));
+
+  if (chats.length === 0) {
+    await platform.send(msg.chatId, 'No eligible chats to designate yet. (Chats appear here once they have been active.)');
+    return;
+  }
+  const list = chats.map((c, i) => `  ${i + 1}) ${c.title}`).join('\n');
+  if (!config._pendingAdmin) config._pendingAdmin = {};
+  config._pendingAdmin[msg.chatId] = { step: 'pick', matches: chats };
+  await platform.send(msg.chatId,
+    `Pick a chat to make a LIMITED admin (mode/index/ask — NOT shell):\n${list}\n\n` +
+    `Reply with a number. Or: /admin list, /admin remove <n>.`);
+}
+
+/** Drive the multi-step /admin designation flow (pick → confirm → PIN). */
+async function handleAdminFlowReply(msg, platform, config, text, pinManager) {
+  const pending = config._pendingAdmin[msg.chatId];
+  const nameOf = (c) => c.title || c.id;
+
+  if (pending.step === 'pick') {
+    if (!/^\d+$/.test(text)) {
+      await platform.send(msg.chatId, `Pick a number (1-${pending.matches.length}), or send a /command to cancel.`);
+      return;
+    }
+    const idx = parseInt(text, 10) - 1;
+    if (idx < 0 || idx >= pending.matches.length) {
+      await platform.send(msg.chatId, `Invalid choice. Pick 1-${pending.matches.length}.`);
+      return;
+    }
+    pending.selected = pending.matches[idx];
+    pending.step = 'confirm';
+    await platform.send(msg.chatId, `Make "${nameOf(pending.selected)}" a limited admin (mode/index/ask, no shell)? Reply "yes" to confirm.`);
+    return;
+  }
+
+  if (pending.step === 'confirm') {
+    if (!/^y(es)?$/i.test(text)) {
+      delete config._pendingAdmin[msg.chatId];
+      await platform.send(msg.chatId, 'Cancelled.');
+      return;
+    }
+    if (!pinManager.isEnabled()) {
+      // No PIN configured — promote directly (the owner already confirmed).
+      addAdmin(config, pending.selected.id);
+      const name = nameOf(pending.selected);
+      delete config._pendingAdmin[msg.chatId];
+      await platform.send(msg.chatId, `Done. "${name}" is now a limited admin. (No PIN is set — consider /pin.)`);
+      logAudit({ action: 'admin_add', user_id: msg.senderId, chatId: pending.selected.id });
+      return;
+    }
+    pending.step = 'pin';
+    await platform.send(msg.chatId, 'Enter your PIN to confirm:');
+    return;
+  }
+
+  if (pending.step === 'pin') {
+    if (!/^\d{4,6}$/.test(text)) {
+      await platform.send(msg.chatId, 'PIN must be 4-6 digits. Try again:');
+      return;
+    }
+    const result = pinManager.authenticate(msg.senderId, text);
+    if (!result.success) {
+      await platform.send(msg.chatId, result.reason);
+      if (result.locked) delete config._pendingAdmin[msg.chatId];
+      return;
+    }
+    addAdmin(config, pending.selected.id);
+    const name = nameOf(pending.selected);
+    delete config._pendingAdmin[msg.chatId];
+    await platform.send(msg.chatId, `Done. "${name}" is now a limited admin.`);
+    logAudit({ action: 'admin_add', user_id: msg.senderId, chatId: pending.selected.id });
+  }
 }
 
 function setChatMode(config, chatId, mode) {
@@ -2017,9 +2156,10 @@ async function routeHelp(msg, platform, config) {
     cmds.splice(1, 0,
       '/exec <cmd> - Run a shell command (owner)',
       '/read <path> - Read a file or directory (owner)',
-      '/index <path> <public|admin> - Index a document (owner)',
+      '/index <path> <public|admin> - Index a document (admin)',
       '/pin - Change PIN (owner)',
-      '/mode - List chat modes / /mode <business|silent|off> [target] (owner)',
+      '/admin - Designate/list/remove limited admins (owner)',
+      '/mode - List chat modes / /mode <business|silent|off> [target] (admin)',
       '/agent [name] - Show/set agent for this chat (owner)',
       '/agents - List all agents (owner)',
       '/remind <duration> <action> [--agent] - Set a reminder (owner)',
@@ -2030,6 +2170,12 @@ async function routeHelp(msg, platform, config) {
       '/mode business - Business persona menu (owner)',
       'Send a file to index it (owner, Telegram/Beeper)',
       'Use @agentname to invoke a specific agent per-message'
+    );
+  } else if (isAdmin(msg.senderId, config, msg)) {
+    // Limited admin: staff commands, no host shell.
+    cmds.splice(1, 0,
+      '/index <path> <public|admin> - Index a document (admin)',
+      '/mode - List chat modes / /mode <business|silent|off> [target] (admin)'
     );
   }
   await platform.send(msg.chatId, cmds.join('\n'));

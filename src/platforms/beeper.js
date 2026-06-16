@@ -163,6 +163,11 @@ class BeeperPlatform extends Platform {
     const text = msg.text || '';
     const isSelf = msg.sender?.is_self === true;
     const isPersonalChat = this._personalChats.has(chatId);
+    // A chat designated via /admin is a limited-admin command channel, even
+    // though it isn't the owner's note-to-self. Treat it like a personal chat
+    // for routing (commands + natural language), not as a customer.
+    const isAdminChat = Array.isArray(this.config?.admins)
+      && this.config.admins.map(String).includes(String(chatId));
     const mode = this._getChatMode(chatId);
 
     // Off mode: skip non-self messages entirely. Exception: self-messages in
@@ -180,6 +185,13 @@ class BeeperPlatform extends Platform {
       shouldProcess = true;
     } else if (isSelf && isPersonalChat && !text.startsWith(this.commandPrefix)) {
       // Self-message in personal chat → natural language ask / interactive reply
+      routeAs = 'natural';
+      shouldProcess = true;
+    } else if (isAdminChat && text.startsWith(this.commandPrefix)) {
+      // Command from a designated limited-admin chat
+      shouldProcess = true;
+    } else if (isAdminChat) {
+      // Natural language / interactive reply from a limited-admin chat
       routeAs = 'natural';
       shouldProcess = true;
     } else if (!isSelf && mode === 'business') {
@@ -208,6 +220,7 @@ class BeeperPlatform extends Platform {
       text,
       raw: msg,
       routeAs,
+      isAdminChat,
       network: msg.network || meta.network || '',
     });
 

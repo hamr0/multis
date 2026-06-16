@@ -1186,7 +1186,7 @@ describe('/mode business menu', () => {
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
     await router(msg('/mode business', { senderId: 'user2' }), platform);
-    assert.match(platform.sent[0].text, /Owner only/);
+    assert.match(platform.sent[0].text, /Admin only/);
   });
 
   it('wizard skip preserves existing values', async () => {
