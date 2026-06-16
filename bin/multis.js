@@ -870,10 +870,11 @@ async function runDoctor() {
     const netStr = networks.size > 0 ? ` (${[...networks].join(', ')})` : '';
     let beeperReachable = false;
     try {
+      const { makeClient, listAccounts } = require('../src/cli/setup-beeper');
       const fullUrl = url.startsWith('http') ? url : `http://${url}`;
-      await fetch(`${fullUrl}/v1/spec`, { signal: AbortSignal.timeout(2000) });
+      await listAccounts(makeClient({ url: fullUrl, token: config.platforms.beeper.mcp_token }));
       beeperReachable = true;
-    } catch { /* Desktop not reachable */ }
+    } catch { /* beeperbox not reachable */ }
     const beeperStatus = beeperReachable ? ok : fail;
     profileRows.push(['Beeper', `${host}${netStr} ${beeperStatus}`]);
   } else {

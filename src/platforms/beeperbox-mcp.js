@@ -43,30 +43,40 @@ class BeeperboxMcpClient {
 
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.timeout);
-    let res;
+    // The timeout spans the WHOLE request — including the response-body read.
+    // download_asset payloads ride base64 in the body, so a server that sends
+    // headers then stalls the body must still abort; hence the signal stays
+    // live and clearTimeout only fires in the outer finally (not right after
+    // headers arrive).
     try {
-      res = await this._fetch(this.url, { method: 'POST', headers, body, signal: ctrl.signal });
-    } catch (err) {
-      const reason = err.name === 'AbortError' ? `timeout after ${this.timeout}ms` : err.message;
-      throw new BeeperboxMcpError(`beeperbox MCP request failed (${method}): ${reason}`, { cause: err });
+      let res;
+      try {
+        res = await this._fetch(this.url, { method: 'POST', headers, body, signal: ctrl.signal });
+      } catch (err) {
+        const reason = err.name === 'AbortError' ? `timeout after ${this.timeout}ms` : err.message;
+        throw new BeeperboxMcpError(`beeperbox MCP request failed (${method}): ${reason}`, { cause: err });
+      }
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new BeeperboxMcpError(`beeperbox MCP HTTP ${res.status} (${method}): ${text.slice(0, 200)}`, { code: res.status });
+      }
+      let json;
+      try {
+        json = await res.json();
+      } catch (err) {
+        if (err.name === 'AbortError') {
+          throw new BeeperboxMcpError(`beeperbox MCP request failed (${method}): timeout after ${this.timeout}ms`, { cause: err });
+        }
+        throw new BeeperboxMcpError(`beeperbox MCP returned non-JSON (${method})`, { cause: err });
+      }
+      if (json.error) {
+        throw new BeeperboxMcpError(`beeperbox MCP error (${method}): ${json.error.code} ${json.error.message}`, { code: json.error.code });
+      }
+      return json.result;
     } finally {
       clearTimeout(timer);
     }
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new BeeperboxMcpError(`beeperbox MCP HTTP ${res.status} (${method}): ${text.slice(0, 200)}`, { code: res.status });
-    }
-    let json;
-    try {
-      json = await res.json();
-    } catch (err) {
-      throw new BeeperboxMcpError(`beeperbox MCP returned non-JSON (${method})`, { cause: err });
-    }
-    if (json.error) {
-      throw new BeeperboxMcpError(`beeperbox MCP error (${method}): ${json.error.code} ${json.error.message}`, { code: json.error.code });
-    }
-    return json.result;
   }
 
   /** Call a beeperbox MCP tool by name; returns the parsed tool-result value. */

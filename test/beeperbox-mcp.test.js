@@ -122,6 +122,25 @@ describe('BeeperboxMcpClient', () => {
     assert.equal(abortFired, true, 'the client must have called abort() on the signal');
   });
 
+  it('the timeout also covers the response-body read, not just headers', async () => {
+    // Regression: a server that sends headers (fetch resolves) then stalls the
+    // body must still abort. The signal has to stay live through res.json().
+    let bodyAbortFired = false;
+    const stallBody = (_url, opts) => Promise.resolve({
+      ok: true, status: 200,
+      json: () => new Promise((_resolve, reject) => {
+        opts.signal.addEventListener('abort', () => {
+          bodyAbortFired = true;
+          const e = new Error('The operation was aborted'); e.name = 'AbortError'; reject(e);
+        });
+      }),
+      text: async () => '',
+    });
+    const c = new BeeperboxMcpClient({ url: 'http://x', fetchImpl: stallBody, timeout: 20 });
+    await assert.rejects(() => c.callTool('slow-body'), /timeout after 20ms/);
+    assert.equal(bodyAbortFired, true, 'abort must reach the stalled body read');
+  });
+
   it('raises on a non-JSON response body', async () => {
     const f = fakeFetch(() => ({ ok: true, status: 200, json: async () => { throw new Error('Unexpected token'); }, text: async () => 'oops' }));
     await assert.rejects(() => client(f).callTool('x'), /non-JSON/);

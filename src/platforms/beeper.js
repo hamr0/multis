@@ -1,7 +1,6 @@
 const fs = require('fs');
 const { Platform } = require('./base');
 const { Message } = require('./message');
-const { logAudit } = require('../governance/audit');
 const { BeeperboxMcpClient } = require('./beeperbox-mcp');
 
 const DEFAULT_MCP_URL = 'http://localhost:23375';  // beeperbox MCP transport (watch/send)
@@ -121,9 +120,11 @@ class BeeperPlatform extends Platform {
           await this._handleMessage(msg);
         }
 
-        this._pollErrorLogged = false;
         if (!res.has_more) break;
       }
+      // Reset the log-once latch only after a fully clean tick — clearing it
+      // per-page would re-log a recurring mid-drain failure every tick.
+      this._pollErrorLogged = false;
     } catch (err) {
       if (!this._pollErrorLogged) {
         console.error(`Beeper: poll error — ${err.message}`);
