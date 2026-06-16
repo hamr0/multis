@@ -190,6 +190,7 @@ function loadConfig() {
     pin_timeout_hours: 24,
     pin_lockout_minutes: 60,
     prompt_injection_detection: true,
+    rate_limit: { enabled: true, burst_per_min: 10, daily_per_sender: 100 },
     ...config.security
   };
 

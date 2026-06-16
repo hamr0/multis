@@ -255,6 +255,53 @@ describe('Business escalation', () => {
     assert.match(custMsg.text, /refund/i);
   });
 
+  it('rate-limits a customer past the burst cap: canned reply + escalation, no LLM (#1)', async () => {
+    const env = createTestEnv({
+      allowed_users: ['user1'],
+      owner_id: 'user1',
+      security: { rate_limit: { enabled: true, burst_per_min: 2, daily_per_sender: 100 } },
+      business: { escalation: { escalate_keywords: [], admin_chat: 'admin_chat' } }
+    });
+    const platform = mockPlatform();
+    const llm = mockLLM('answer');
+    const router = createMessageRouter(env.config, { llm, indexer: stubIndexer([], { totalChunks: 1 }) });
+    router.registerPlatform('beeper', platform); // so escalation can route
+
+    const send = () => router(
+      msg('hello', { senderId: 'cust1', chatId: 'cust_chat', routeAs: 'business' }), platform);
+
+    await send(); await send();            // both under the cap → LLM answers
+    assert.strictEqual(llm.calls.length, 2, 'first two messages reach the LLM');
+
+    await send();                          // third trips the burst cap
+    assert.strictEqual(llm.calls.length, 2, 'blocked message must NOT reach the LLM');
+    assert.match(platform.lastTo('cust_chat').text, /flagged a human|limit/i, 'customer gets a handoff message');
+    assert.match(platform.lastTo('admin_chat').text, /Rate limit/i, 'admin is escalated to');
+
+    await send();                          // still blocked, but no repeat canned spam
+    assert.strictEqual(llm.calls.length, 2);
+  });
+
+  it('owner is never rate-limited in their own business chat', async () => {
+    const env = createTestEnv({
+      allowed_users: ['user1'],
+      owner_id: 'user1',
+      security: { rate_limit: { enabled: true, burst_per_min: 1, daily_per_sender: 100 } },
+      business: { escalation: { escalate_keywords: [] } }
+    });
+    const platform = mockPlatform();
+    const llm = mockLLM('answer');
+    const router = createMessageRouter(env.config, { llm, indexer: stubIndexer() });
+    // Owner messages in a business chat pause the bot (no LLM) but must never be
+    // counted/blocked as a customer — send several, none should hit the limiter.
+    for (let i = 0; i < 3; i++) {
+      await router(msg('note to self', { senderId: 'user1', chatId: 'c', routeAs: 'business' }), platform);
+    }
+    // No canned rate-limit message ever sent to the owner.
+    const last = platform.lastTo('c');
+    assert.ok(!last || !/flagged a human/i.test(last.text), 'owner must not see a rate-limit handoff');
+  });
+
   it('0 chunks still calls LLM (no canned escalation)', async () => {
     const env = createTestEnv({
       allowed_users: ['user1', 'cust1'],

@@ -8,6 +8,7 @@ const { buildRAGPrompt, buildMemorySystemPrompt, buildBusinessPrompt } = require
 const { getMemoryManager } = require('../memory/manager');
 const { runCapture, runCondenseMemory } = require('../memory/capture');
 const { PinManager, hashPin } = require('../security/pin');
+const { RateLimiter } = require('../security/rate-limit');
 const { detectInjection, logInjectionAttempt } = require('../security/injection');
 const { buildToolRegistry, getToolsForUser, loadToolsConfig } = require('../tools/registry');
 const { adaptTools } = require('../tools/adapter');
@@ -39,6 +40,31 @@ function isAdminPaused(chatId) {
 
 function clearAdminPauses() {
   _adminPaused.clear();
+}
+
+/**
+ * Notify the owner/admin channels. Mirrors the escalate tool's routing so
+ * non-LLM events (e.g. a rate-limit trip) can reach a human. Best-effort.
+ */
+async function notifyAdmins(platformRegistry, config, text) {
+  let sent = 0;
+  const override = config?.business?.escalation?.admin_chat;
+  if (override) {
+    for (const [, plat] of platformRegistry || []) {
+      if (plat?.send) { try { await plat.send(override, text); sent++; break; } catch { /* try next */ } }
+    }
+    return sent;
+  }
+  for (const [name, plat] of platformRegistry || []) {
+    try {
+      if (name === 'telegram' && config?.owner_id) {
+        await plat.send(config.owner_id, text); sent++;
+      } else if (name === 'beeper' && plat.getAdminChatIds) {
+        for (const chatId of plat.getAdminChatIds()) { await plat.send(chatId, text); sent++; }
+      }
+    } catch { /* best-effort notify */ }
+  }
+  return sent;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +233,13 @@ function createMessageRouter(config, deps = {}) {
   const memoryManagers = deps.memoryManagers || new Map();
   const _memBaseDir = deps.memoryBaseDir || PATHS.memory();
   const pinManager = deps.pinManager || new PinManager(config);
+  // Business-mode inbound limiter (per-sender). Disabled only if explicitly off.
+  const rlCfg = config.security?.rate_limit || {};
+  const rateLimiter = deps.rateLimiter
+    || (rlCfg.enabled === false ? null : new RateLimiter({
+      burstPerMin: rlCfg.burst_per_min,
+      dailyPerSender: rlCfg.daily_per_sender,
+    }));
   // gov is a lazy carrier — gov.resolve() returns {gate, policy, onLlmResult,
   // onToolResult, filterTools, HaltError}. Lazy because bareguard is ESM and
   // requires `await import()` on first use. Tests can pass deps.gov to inject
@@ -488,6 +521,26 @@ function createMessageRouter(config, deps = {}) {
           const mem = getMem(msg.chatId, { isAdmin: false });
           if (mem) { mem.appendMessage('user', msg.text); mem.appendToLog('user', msg.text); }
           return;
+        }
+
+        // Per-customer rate limit. On the cap we archive the message, hand off
+        // to a human, and stop the LLM — degrade, don't refuse (#1).
+        if (rateLimiter) {
+          const verdict = rateLimiter.consume(msg.senderId);
+          if (!verdict.allowed) {
+            const mem = getMem(msg.chatId, { isAdmin: false });
+            if (mem) { mem.appendMessage('user', msg.text); mem.appendToLog('user', msg.text); }
+            if (verdict.notify) {
+              const note = config.business?.rate_limit_message
+                || "Thanks for your patience — I've reached my limit here for now and have flagged a human to follow up with you.";
+              await platform.send(msg.chatId, note);
+              const who = config.chats?.[msg.chatId]?.name || msg.chatId;
+              await notifyAdmins(platformRegistry, config,
+                `[Rate limit] ${who} hit the ${verdict.scope} limit — bot paused for this customer; please follow up.`);
+              logAudit({ action: 'rate_limit', user_id: msg.senderId, chatId: msg.chatId, scope: verdict.scope });
+            }
+            return;
+          }
         }
       }
 
