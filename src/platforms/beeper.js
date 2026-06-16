@@ -251,8 +251,12 @@ class BeeperPlatform extends Platform {
       };
       this._chatMeta.set(chatId, meta);
       return meta;
-    } catch {
-      // Don't cache failures — retry on the next sighting.
+    } catch (err) {
+      // Don't cache failures — retry on the next sighting. Surface it: a
+      // transient get_chat failure makes us treat the chat as non-personal for
+      // this tick, which silently drops a self-command (it fails the
+      // personal-chat gate). Logging makes that visible instead of mysterious.
+      console.error(`Beeper: get_chat(${chatId}) failed — ${err.message}`);
       return { title: '', isNoteToSelf: false, network: '' };
     }
   }
