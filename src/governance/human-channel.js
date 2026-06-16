@@ -16,19 +16,40 @@
 const pendingHumanResponses = new Map(); // senderId → { resolve }
 
 /**
+ * Resolve the owner's approval channel (#7). Prefers Telegram, where owner_id is
+ * both the chat and the sender (DM), so the prompt and the reply-wait are
+ * deterministic. Returns null when there's no such channel — callers fall back
+ * to the requester (on a Beeper-only deploy the requester is the owner anyway).
+ */
+function resolveOwnerRoute(config, platformRegistry) {
+  const ownerId = config?.owner_id;
+  if (ownerId && platformRegistry?.get && platformRegistry.get('telegram')) {
+    return { senderId: String(ownerId), chatId: String(ownerId), platformName: 'telegram' };
+  }
+  return null;
+}
+
+/**
  * Build a humanPrompt closure. Pass the platformRegistry so the prompt is
  * routed to the right transport. PIN verification is layered inside.
  */
-function createHumanPrompt({ platformRegistry, pinManager, autoResponder, timeoutMs = 60_000 } = {}) {
+function createHumanPrompt({ platformRegistry, pinManager, config, autoResponder, timeoutMs = 60_000 } = {}) {
   return async function humanPrompt(event) {
     if (autoResponder) {
       return autoResponder(event);
     }
 
-    const ctx = event.action?._ctx || {};
-    const { senderId, chatId, platform: platformName } = ctx;
+    const reqCtx = event.action?._ctx || {};
+    // #7: route approvals to the OWNER, never the requester — otherwise any
+    // future non-owner-reachable ask-gated tool would be self-approvable. Falls
+    // back to the requester only when no deterministic owner channel exists
+    // (e.g. a Beeper-only deploy, where the requester note-to-self IS the owner).
+    const route = resolveOwnerRoute(config, platformRegistry) || {
+      senderId: reqCtx.senderId, chatId: reqCtx.chatId, platformName: reqCtx.platform,
+    };
+    const { senderId, chatId, platformName } = route;
     if (!senderId || !chatId || !platformName || !platformRegistry) {
-      return { decision: 'deny', reason: 'humanChannel: missing _ctx routing fields' };
+      return { decision: 'deny', reason: 'humanChannel: missing routing fields' };
     }
     const platform = platformRegistry.get(platformName);
     if (!platform || typeof platform.send !== 'function') {

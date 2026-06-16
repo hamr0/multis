@@ -96,6 +96,7 @@ function createGovernanceCarrier(config, opts = {}) {
         const humanPrompt = opts.humanPrompt || createHumanPrompt({
           platformRegistry,
           pinManager: opts.pinManager,
+          config,
           timeoutMs: (config?.security?.checkpoint_timeout || 60) * 1000,
         });
         // Capability-layer PIN (#5): privileged tools on the agent path prompt
