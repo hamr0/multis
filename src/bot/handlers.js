@@ -1983,7 +1983,7 @@ async function handleBeeperFileIndex(msg, platform, config, indexer) {
   }
 
   const fileName = attachment.fileName;
-  const srcURL = attachment.srcURL || attachment.id;
+  const srcURL = attachment.srcURL;
 
   // Parse scope from text: "/index public", "/index admin", "/index kb"
   const text = (msg.text || '').trim();
@@ -2077,7 +2077,7 @@ async function handleSilentAttachment(msg, platform, config, indexer, source) {
 
     try {
       const scope = `user:${msg.chatId}`;
-      const buffer = await platform.downloadAsset(attachment.srcURL || attachment.id);
+      const buffer = await platform.downloadAsset(attachment.srcURL);
       const count = await indexer.indexBuffer(buffer, attachment.fileName, scope);
       logAudit({ action: 'silent_index', user_id: msg.senderId, filename: attachment.fileName, chunks: count, scope, platform: 'beeper' });
     } catch (err) {
