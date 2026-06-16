@@ -49,7 +49,7 @@ src/
 │   ├── base.js           # Platform abstract class
 │   ├── message.js        # Normalized Message class (routeAs, isCommand, parseCommand)
 │   ├── telegram.js       # Telegram platform adapter
-│   ├── beeper.js         # Beeper Desktop API adapter (polling, mode routing)
+│   ├── beeper.js         # Beeper adapter — beeperbox MCP only (poll_messages cursor, source:"api" echo-guard, mode routing); raw :23373 kept for downloadAsset
 │   └── beeperbox-mcp.js  # Vanilla JSON-RPC client for beeperbox MCP verbs (poll_messages, send) — M-B step 3, no new dep
 ├── governance/
 │   ├── gate.js           # bareguard Gate factory (ESM dynamic import) + action translation

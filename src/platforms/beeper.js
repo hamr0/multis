@@ -3,64 +3,82 @@ const path = require('path');
 const { Platform } = require('./base');
 const { Message } = require('./message');
 const { logAudit } = require('../governance/audit');
+const { BeeperboxMcpClient } = require('./beeperbox-mcp');
 
-const DEFAULT_URL = 'http://localhost:23373';
+const DEFAULT_URL = 'http://localhost:23373';      // raw Beeper Desktop API (assets)
+const DEFAULT_MCP_URL = 'http://localhost:23375';  // beeperbox MCP transport (watch/send)
 const DEFAULT_POLL_INTERVAL = 3000;
+const MAX_PAGES_PER_TICK = 10; // has_more drain cap so one tick can't starve the loop
 const { PATHS } = require('../config');
 
 /**
- * Beeper Desktop API platform adapter.
- * Polls localhost:23373 for new messages, processes / commands from self in personal chats.
+ * Beeper platform adapter — consumes beeperbox's MCP watch/send verbs.
+ *
+ * Watch is a restart-resumable `poll_messages` cursor (replaces the old
+ * /v1/chats walk + hand-rolled seed/dedup/gap-reseed). Echo-guard is
+ * beeperbox's exact-id `source:"api"` tag (replaces the [multis] text prefix
+ * + _isLooping heuristic). Sends carry a unique client_tag. Policy (modes,
+ * personal-chat gating, command routing, owner) stays here — verbs live in
+ * beeperbox, policy lives in multis (PRD §E).
+ *
+ * The raw Desktop API (:23373) seam is retained only for asset download and
+ * handlers' chat discovery; beeperbox also exposes it. Native (non-beeperbox)
+ * Beeper Desktop has no MCP transport and is no longer a target of this adapter.
  */
 class BeeperPlatform extends Platform {
   constructor(config) {
     super('beeper', config);
     const bc = config.platforms?.beeper || {};
     this.baseUrl = bc.url || DEFAULT_URL;
+    this.mcpUrl = bc.mcp_url || DEFAULT_MCP_URL;
+    this.mcpToken = bc.mcp_token || process.env.MCP_AUTH_TOKEN || null;
     this.pollInterval = bc.poll_interval || DEFAULT_POLL_INTERVAL;
     this.commandPrefix = bc.command_prefix || '/';
-    this.token = null;
-    this.selfIds = new Set(); // account user IDs to detect self-messages
+    this.token = null;                  // raw Desktop API token (assets)
+    this.mcp = null;                    // BeeperboxMcpClient
+    this._cursor = null;                // poll_messages opaque cursor (restart-safe)
     this._pollTimer = null;
-    this._seen = new Set(); // message IDs we've already processed or seeded
-    this._processing = new Set(); // message IDs currently being handled (dedup guard)
-    this._initialized = false; // first poll seeds _lastSeen without processing
-    this._personalChats = new Set(); // chatIds that are self/note-to-self chats
-    this._botChatId = bc.bot_chat_id || null; // Telegram bot chat to exclude from polling
+    this._polling = false;              // overlap guard
+    this._initialized = false;
+    this._personalChats = new Set();    // chatIds that are note-to-self chats
+    this._chatMeta = new Map();         // chatId -> { title, isNoteToSelf, network }
+    this._botChatId = bc.bot_chat_id || null; // Telegram bot chat to exclude
+    this._sendSeq = 0;                  // client_tag uniqueness within this process
   }
 
   async start() {
-    this.token = this._loadToken();
-    if (!this.token) {
-      console.error('Beeper: no token found. Run: node src/cli/setup-beeper.js');
+    this.token = this._loadToken(); // best-effort: needed for asset download, not for MCP
+    this.mcp = new BeeperboxMcpClient({ url: this.mcpUrl, token: this.mcpToken });
+
+    // Liveness + contract check against beeperbox MCP.
+    try {
+      const accounts = await this.mcp.listAccounts();
+      const list = Array.isArray(accounts) ? accounts : accounts?.items || [];
+      console.log(`Beeper: connected via beeperbox MCP at ${this.mcpUrl} (${list.length} accounts)`);
+    } catch (err) {
+      console.error(`Beeper: beeperbox MCP unreachable at ${this.mcpUrl} — ${err.message}`);
       return false;
     }
 
-    // Verify token and discover self IDs
+    // Seed the watch cursor: reuse a persisted one (restart-resumable, no
+    // missed/duplicated messages), else seed "from now" via an empty poll.
     try {
-      const accounts = await this._api('GET', '/v1/accounts');
-      const list = Array.isArray(accounts) ? accounts : accounts.items || [];
-      for (const acc of list) {
-        if (acc.user?.id) this.selfIds.add(acc.user.id);
-        if (acc.accountID) this.selfIds.add(acc.accountID);
+      const saved = this._loadCursor();
+      if (saved) {
+        this._cursor = saved;
+        console.log('Beeper: resumed watch cursor from disk');
+      } else {
+        const seed = await this.mcp.pollMessages({});
+        this._cursor = seed.cursor;
+        this._saveCursor();
+        console.log('Beeper: seeded watch cursor (from now)');
       }
-      console.log(`Beeper: connected (${list.length} accounts)`);
     } catch (err) {
-      console.error(`Beeper: token invalid or Desktop not running — ${err.message}`);
-      return false;
-    }
-
-    // Seed _lastSeen with current message IDs so we don't process old messages
-    try {
-      await this._seedLastSeen();
-    } catch (err) {
-      console.error(`Beeper: seed error — ${err.message}`);
+      console.error(`Beeper: cursor seed error — ${err.message}`);
       return false;
     }
     this._initialized = true;
 
-    // Start polling
-    this._lastPollTime = Date.now();
     this._pollTimer = setInterval(() => this._poll(), this.pollInterval);
     console.log(`Beeper: polling every ${this.pollInterval}ms for / commands`);
     return true;
@@ -74,170 +92,33 @@ class BeeperPlatform extends Platform {
   }
 
   async send(chatId, text) {
-    // Prefix responses so they're distinguishable from user's own messages
-    const prefixed = `[multis] ${text}`;
-    await this._api('POST', `/v1/chats/${encodeURIComponent(chatId)}/messages`, { text: prefixed });
-  }
-
-  async _seedLastSeen() {
-    // NOTE: /v1/chats is hard-capped at 25, recency-ordered (the limit param is a
-    // lower bound the API ignores past 25). So polling only ever sees the 25
-    // most-recent chats — older/idle chats are invisible here by design. For full
-    // reach use /v1/messages/search, not /v1/chats. (M-B spike finding.)
-    const data = await this._api('GET', '/v1/chats?limit=20');
-    const chats = data.items || [];
-    for (const chat of chats) {
-      const chatId = chat.id || chat.chatID;
-      if (!chatId) continue;
-      if (chatId === this._botChatId) continue; // skip Telegram bot chat
-
-      if (this._isNoteToSelf(chat)) {
-        this._personalChats.add(chatId);
-      }
-
-      // Seed with limit=5 to match poll window — prevents reprocessing after restart
-      const msgData = await this._api('GET', `/v1/chats/${encodeURIComponent(chatId)}/messages?limit=5`);
-      const messages = msgData.items || [];
-      for (const m of messages) {
-        const id = String(m.id || m.messageID || '');
-        if (id) this._seen.add(id);
-      }
-    }
-    if (this._personalChats.size > 0) {
-      console.log(`Beeper: detected ${this._personalChats.size} personal/self chat(s)`);
-    }
+    // Unique client_tag → beeperbox tags the read-back source:"api" by exact id,
+    // so our own send is skipped on the next poll. No [multis] text prefix.
+    const client_tag = `multis-${process.pid}-${++this._sendSeq}`;
+    await this.mcp.sendMessage({ chat_id: chatId, text, client_tag });
   }
 
   async _poll() {
     if (!this._initialized) return;
     if (this._polling) return; // prevent overlapping polls
     this._polling = true;
-    const now = Date.now();
     try {
-      // Detect hibernate/sleep: if gap since last poll is >30s (expect ~3s), re-seed
-      if (this._lastPollTime && (now - this._lastPollTime) > 30000) {
-        console.log(`Beeper: poll gap detected (${Math.round((now - this._lastPollTime) / 1000)}s) — re-seeding`);
-        try {
-          await this._seedLastSeen();
-          this._lastPollTime = now;
-        } catch (err) {
-          // Seed failed (Desktop still reconnecting) — don't update _lastPollTime
-          // so next poll retries the re-seed instead of processing stale messages
-          console.error(`Beeper: re-seed failed, will retry — ${err.message}`);
+      // Drain the watch feed: poll_messages delivers oldest-first and advances
+      // the cursor only past what it returned, so has_more means "more is
+      // immediately fetchable" — keep going (bounded) before sleeping.
+      for (let page = 0; page < MAX_PAGES_PER_TICK; page++) {
+        const res = await this.mcp.pollMessages({ cursor: this._cursor });
+        this._cursor = res.cursor;
+        this._saveCursor();
+
+        const messages = res.messages || [];
+        for (const msg of messages) {
+          await this._handleMessage(msg);
         }
-        this._polling = false;
-        return; // skip this cycle either way
+
+        this._pollErrorLogged = false;
+        if (!res.has_more) break;
       }
-
-      const data = await this._api('GET', '/v1/chats?limit=20');
-      const chats = data.items || [];
-
-      for (const chat of chats) {
-        const chatId = chat.id || chat.chatID;
-        if (!chatId) continue;
-        if (chatId === this._botChatId) continue; // skip Telegram bot chat
-
-        const msgData = await this._api('GET', `/v1/chats/${encodeURIComponent(chatId)}/messages?limit=5`);
-        const messages = msgData.items || [];
-
-        // Messages are newest-first; process in reverse (oldest-first) for correct ordering
-        for (let i = messages.length - 1; i >= 0; i--) {
-          const msg = messages[i];
-          const msgId = String(msg.id || msg.messageID || '');
-          if (!msgId) continue;
-
-          // Skip already-seen or currently-processing messages
-          if (this._seen.has(msgId)) { continue; }
-          if (this._processing.has(msgId)) { continue; }
-
-          // Mark as seen
-          this._seen.add(msgId);
-
-          const isSelf = this._isSelf(msg);
-          const text = msg.text || '';
-          const isPersonalChat = this._personalChats.has(chatId);
-
-          // Skip our own responses, bot chats, and bot-to-bot loops
-          if (text.startsWith('[multis]')) continue;
-          const chatTitle = chat.title || chat.name || '';
-          if (/bot$/i.test(chatTitle) || /^bot/i.test(chatTitle)) continue;
-          if (this._isLooping(chatId, messages)) continue;
-
-          if (!this._messageCallback) continue;
-
-          const mode = this._getChatMode(chatId);
-
-          // Off mode: skip non-self messages entirely (no processing, no archiving)
-          // Exception: self-messages in personal chats always go through (commands + interactive replies)
-          if (mode === 'off') {
-            if (!isSelf) continue;
-            if (!isPersonalChat) continue;
-          }
-
-          // Determine how to route this message
-          let routeAs = null;
-          let shouldProcess = false;
-
-          if (isSelf && isPersonalChat && text.startsWith(this.commandPrefix)) {
-            // Explicit command from personal/note-to-self chat only
-            shouldProcess = true;
-          } else if (isSelf && isPersonalChat && !text.startsWith(this.commandPrefix)) {
-            // Self-message in personal/note-to-self chat → natural language ask / interactive reply
-            routeAs = 'natural';
-            shouldProcess = true;
-          } else if (!isSelf && mode === 'business') {
-            // Incoming message in a business-mode chat → auto-respond
-            routeAs = 'business';
-            shouldProcess = true;
-          }
-          // silent mode: archive to memory, no response
-          if (!shouldProcess && mode === 'silent') {
-            routeAs = 'silent';
-            shouldProcess = true;
-          }
-
-          if (shouldProcess) {
-            console.log(`Beeper: ${routeAs || 'command'} from ${chat.title || chatId}: ${text.slice(0, 80)}`);
-            this._processing.add(msgId);
-
-            const normalized = new Message({
-              id: msgId,
-              platform: 'beeper',
-              chatId,
-              chatName: chat.title || chat.name || '',
-              senderId: msg.senderID || msg.sender || '',
-              senderName: msg.senderName || '',
-              isSelf,
-              text,
-              raw: msg,
-              routeAs,
-              network: chat.network || '',
-            });
-
-            // Pass through file attachments for indexing
-            if (msg.attachments?.length > 0) {
-              normalized._attachments = msg.attachments;
-            }
-
-            try {
-              await this._messageCallback(normalized, this);
-            } catch (err) {
-              console.error(`Beeper: handler error — ${err.message}`);
-            } finally {
-              this._processing.delete(msgId);
-            }
-          }
-        }
-      }
-
-      // Cap seen set to prevent unbounded growth (keep last 500)
-      if (this._seen.size > 500) {
-        const arr = [...this._seen];
-        this._seen = new Set(arr.slice(-250));
-      }
-
-      this._lastPollTime = now;
-      this._pollErrorLogged = false;
     } catch (err) {
       if (!this._pollErrorLogged) {
         console.error(`Beeper: poll error — ${err.message}`);
@@ -248,35 +129,142 @@ class BeeperPlatform extends Platform {
     }
   }
 
-  _isLooping(chatId, messages) {
-    // If the 2 most recent messages in this chat are [multis] responses,
-    // we're in a bot-to-bot loop — stop responding
-    const recent = messages.slice(0, 2);
-    const multisCount = recent.filter(m => (m.text || '').startsWith('[multis]')).length;
-    return multisCount >= 2;
-  }
-
-  _isSelf(msg) {
-    const sender = msg.senderID || msg.sender || '';
-    return this.selfIds.has(sender);
-  }
-
   /**
-   * Note-to-self / saved-messages chat = exactly one participant, who is yourself.
-   * This is beeperbox's canonical rule (`participants.total===1 && items[0].isSelf`),
-   * adopted for parity (M-B §E). It's stricter and pagination-proof vs. the old
-   * `items.every(p=>p.isSelf)` — `total` is the true count, while `items` may be a
-   * paginated subset. Catches Beeper-native "Note to self" and per-platform saved
-   * chats (Telegram Saved Messages, WhatsApp "Send to yourself", …).
+   * Apply multis policy to one normalized beeperbox message and route it.
+   * Per-message try/catch keeps a handler error from wedging the drain loop;
+   * the cursor still advances (at-most-once delivery, errors logged not retried).
    */
-  _isNoteToSelf(chat) {
-    const p = chat.participants || chat.members || {};
-    const items = p.items || [];
-    return p.total === 1 && items[0]?.isSelf === true;
+  async _handleMessage(msg) {
+    const msgId = String(msg.id || '');
+    if (!msgId) return;
+
+    // Echo-guard: beeperbox tags messages it sent via send_message/note_to_self
+    // as source:"api" (exact-id matched). Skip our own programmatic sends.
+    if (msg.source === 'api') return;
+
+    const chatId = msg.chat_id;
+    if (!chatId) return;
+    if (chatId === this._botChatId) return; // skip Telegram bot chat
+
+    const meta = await this._chatMetaFor(chatId);
+    if (meta.isNoteToSelf) this._personalChats.add(chatId);
+
+    // Skip bot-to-bot chats by title heuristic (kept from the prior adapter).
+    if (/bot$/i.test(meta.title) || /^bot/i.test(meta.title)) return;
+
+    if (!this._messageCallback) return;
+
+    const text = msg.text || '';
+    const isSelf = msg.sender?.is_self === true;
+    const isPersonalChat = this._personalChats.has(chatId);
+    const mode = this._getChatMode(chatId);
+
+    // Off mode: skip non-self messages entirely. Exception: self-messages in
+    // personal chats always go through (commands + interactive replies).
+    if (mode === 'off') {
+      if (!isSelf) return;
+      if (!isPersonalChat) return;
+    }
+
+    let routeAs = null;
+    let shouldProcess = false;
+
+    if (isSelf && isPersonalChat && text.startsWith(this.commandPrefix)) {
+      // Explicit command from personal/note-to-self chat only
+      shouldProcess = true;
+    } else if (isSelf && isPersonalChat && !text.startsWith(this.commandPrefix)) {
+      // Self-message in personal chat → natural language ask / interactive reply
+      routeAs = 'natural';
+      shouldProcess = true;
+    } else if (!isSelf && mode === 'business') {
+      // Incoming message in a business-mode chat → auto-respond
+      routeAs = 'business';
+      shouldProcess = true;
+    }
+    // silent mode: archive to memory, no response
+    if (!shouldProcess && mode === 'silent') {
+      routeAs = 'silent';
+      shouldProcess = true;
+    }
+
+    if (!shouldProcess) return;
+
+    console.log(`Beeper: ${routeAs || 'command'} from ${meta.title || chatId}: ${text.slice(0, 80)}`);
+
+    const normalized = new Message({
+      id: msgId,
+      platform: 'beeper',
+      chatId,
+      chatName: meta.title || '',
+      senderId: msg.sender?.id || '',
+      senderName: msg.sender?.name || '',
+      isSelf,
+      text,
+      raw: msg,
+      routeAs,
+      network: msg.network || meta.network || '',
+    });
+
+    // NOTE: poll_messages does not carry attachments (media arrives as
+    // type:'MEDIA', text '[MEDIA]'). Attachment indexing via Beeper is paused
+    // pending a beeperbox verb (attachments on the normalized message +/- an
+    // asset-retrieval verb) — filed in the PRD lib-feedback log. No shim here
+    // (customer contract: push the lib, don't paper over).
+
+    try {
+      await this._messageCallback(normalized, this);
+    } catch (err) {
+      console.error(`Beeper: handler error — ${err.message}`);
+    }
   }
 
   /**
-   * Download an asset from Beeper Desktop API.
+   * Chat metadata (title, note-to-self flag, network) for routing. poll_messages
+   * carries only chat_id/network per message, so the title + note-to-self flag
+   * come from get_chat, cached on first sighting (these rarely/never change).
+   */
+  async _chatMetaFor(chatId) {
+    const cached = this._chatMeta.get(chatId);
+    if (cached) return cached;
+    try {
+      const c = await this.mcp.callTool('get_chat', { chat_id: chatId });
+      const meta = {
+        title: c?.title || '',
+        isNoteToSelf: c?.is_note_to_self === true,
+        network: c?.network || '',
+      };
+      this._chatMeta.set(chatId, meta);
+      return meta;
+    } catch {
+      // Don't cache failures — retry on the next sighting.
+      return { title: '', isNoteToSelf: false, network: '' };
+    }
+  }
+
+  _loadCursor() {
+    try {
+      const data = JSON.parse(fs.readFileSync(PATHS.beeperCursor(), 'utf8'));
+      return data.cursor || null;
+    } catch {
+      return null;
+    }
+  }
+
+  _saveCursor() {
+    try {
+      fs.writeFileSync(PATHS.beeperCursor(), JSON.stringify({ cursor: this._cursor, savedAt: new Date().toISOString() }));
+    } catch (err) {
+      if (!this._cursorSaveErrorLogged) {
+        console.error(`Beeper: cursor persist failed — ${err.message}`);
+        this._cursorSaveErrorLogged = true;
+      }
+    }
+  }
+
+  /**
+   * Download an asset from the raw Beeper Desktop API (beeperbox also exposes
+   * :23373). Retained for the asset path; reachable once beeperbox surfaces
+   * attachments on polled messages.
    * @param {string} mxcUrl - mxc:// URI (possibly with encryptedFileInfoJSON param)
    * @returns {string} local file path
    */

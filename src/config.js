@@ -23,6 +23,7 @@ const PATHS = {
   injectionLog: () => path.join(getMultisDir(), 'logs', 'injection.log'),
   daemonLog:    () => path.join(getMultisDir(), 'logs', 'daemon.log'),
   pid:          () => path.join(getMultisDir(), 'run', 'multis.pid'),
+  beeperCursor: () => path.join(getMultisDir(), 'run', 'beeper-cursor.json'),
 };
 
 // Legacy constants — point to default location. Prefer PATHS for new code.

@@ -8,6 +8,18 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 - **CI:** the publish workflow now polls the npm registry for ~2 min (was ~15s; `--prefer-online` skips npm's view cache) and accepts an `exit 0` publish even if the registry hasn't reflected it yet, so a successful-but-slow-to-reflect publish no longer reports a false failure.
 - **`publish.yml` is now manual-only (`workflow_dispatch`) — npm OIDC trusted publishing with provenance, idempotent, and verifies the registry end-state.**
 
+### Baresuite migration — M-B step 3, Phase 2 (rewire beeper.js onto beeperbox MCP)
+
+**`src/platforms/beeper.js` now consumes beeperbox's MCP verbs** instead of walking the raw `/v1/chats` API. The adapter is **beeperbox-MCP-only** (native Beeper Desktop has no MCP transport); the raw `:23373` seam is retained solely for `downloadAsset`, which beeperbox also exposes.
+
+- **Watch → `poll_messages` cursor.** One cursor-advancing poll per tick, drained across `has_more` pages (capped at 10/tick). The cursor persists to `~/.multis/run/beeper-cursor.json` and resumes across restart — no missed or duplicated messages. **Removed:** `_seedLastSeen`, the `/v1/chats?limit=20` walk, the `_seen`/`_processing` dedup sets, and the 30s-gap re-seed (the cursor makes all of it redundant). Also fixes the old recent-25-chats blindness — `poll_messages` is a global feed.
+- **Echo-guard → `source:"api"`.** The adapter skips messages beeperbox tagged as its own sends (exact-id matched upstream). **Removed:** the `[multis]` text prefix, `_isLooping`, and `selfIds`/`_isSelf` (routing now reads `sender.is_self` straight off the message).
+- **Send → `send_message` with a unique `client_tag`** (no more `[multis]` prefix).
+- **Chat metadata** (`title`, `is_note_to_self`) resolved via `get_chat`, cached per chat on first sighting.
+- **Policy unchanged** — modes (`off`/`silent`/`business`), personal-chat command gating, natural-language routing, owner model, `_personalChats`/`getAdminChatIds`.
+- **Tests:** `test/beeper.test.js` rebuilt on an injected MCP-client seam (cursor seed/resume, `has_more` drain + cap, `source:"api"` skip, bot-chat exclusion, `get_chat` caching, all routing modes). **434/434 green**; the echo-guard and drain-cap mechanism tests are mutation-proven.
+- **Known gap — attachments paused.** `poll_messages` doesn't carry attachments yet, so Beeper-sourced document indexing (owner sends a PDF → KB) is paused pending a beeperbox verb (PRD §7, 2026-06-16). No shim in multis (customer contract); the `downloadAsset` seam relights the moment beeperbox surfaces `attachments[]`.
+
 ### Baresuite migration — M-B step 3, Phase 1 (beeperbox MCP client)
 
 **Added `src/platforms/beeperbox-mcp.js`** — a vanilla JSON-RPC 2.0 client for beeperbox's MCP HTTP transport (**no new dependency** — global `fetch`; the transport is a plain stateless POST). Exposes the verbs multis composes (`poll_messages`, `send_message`, `note_to_self`, `list_accounts`) with explicit failure paths: HTTP status, JSON-RPC error+code, network failure, timeout (AbortController), non-JSON body, and MCP `isError`. **17 unit tests** (injected-fetch DI seam; the abort-mechanism and `isError` tests are mutation-proven) + a live smoke against the container. **Phase 2** — rewiring `src/platforms/beeper.js` onto this client (dropping the `[multis]` prefix, `_isLooping`, and the hand-rolled seed/dedup/wake-reseed machinery) — is next.
