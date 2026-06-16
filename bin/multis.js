@@ -6,7 +6,7 @@ const path = require('path');
 const readline = require('readline');
 const crypto = require('crypto');
 
-const { PATHS, getMultisDir } = require('../src/config');
+const { PATHS, getMultisDir, saveConfig } = require('../src/config');
 const MULTIS_DIR = getMultisDir();
 const PID_PATH = PATHS.pid();
 const CONFIG_PATH = PATHS.config();
@@ -133,10 +133,12 @@ async function runInit() {
     fs.mkdirSync(MULTIS_DIR, { recursive: true });
   }
 
-  // Load existing or create fresh config
+  // Load existing or create fresh config. Track whether a *saved* config existed
+  // (vs. template defaults) so a true first run doesn't offer "Enter to keep".
+  const hadSavedConfig = fs.existsSync(CONFIG_PATH);
   let config = {};
   const templatePath = path.join(__dirname, '..', '.multis-template', 'config.json');
-  if (fs.existsSync(CONFIG_PATH)) {
+  if (hadSavedConfig) {
     config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
     const profile = config.bot_mode === 'business' ? 'Business chatbot' : 'Personal assistant';
     const plats = [
@@ -158,7 +160,7 @@ async function runInit() {
   let useBeeper = false;
 
   // Check if we have a valid existing setup to offer Enter-to-keep
-  const hasExistingSetup = config.bot_mode &&
+  const hasExistingSetup = hadSavedConfig && config.bot_mode &&
     (config.platforms?.telegram?.enabled || config.platforms?.beeper?.enabled);
 
   if (hasExistingSetup) {
@@ -644,8 +646,10 @@ async function runInit() {
   }
   if (!config.allowed_users) config.allowed_users = [];
 
-  // Save
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
+  // Save — route through saveConfig so the config lands 0600 and ~/.multis 0700
+  // (it holds the PIN hash, LLM API key, and bot/MCP tokens). A raw writeFileSync
+  // here left them world-readable (0644) until some later save repaired the mode.
+  saveConfig(config);
 
   // Copy governance template if not present
   const govPath = PATHS.governance();
