@@ -6,7 +6,7 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [0.16.0] - 2026-06-16
 
-Milestone state of the `baresuite-migration-m3` branch: multis becomes the first baresuite customer (bare-agent + bareguard as the agent/governance core), Beeper is rewired to a pure beeperbox-MCP client across all three deploy shapes, and a full `/security` audit hardens the assistant. **483/483 green.** Awaiting the live LIVE‡ verification pass (PRD §10) before merge to `main`.
+Milestone state of the `baresuite-migration-m3` branch: multis becomes the first baresuite customer (bare-agent + bareguard as the agent/governance core), Beeper is rewired to a pure beeperbox-MCP client across all three deploy shapes, and two `/security` passes harden the assistant. **489/489 green.** Awaiting the live LIVE‡ verification pass (PRD §10) before merge to `main`.
 
 ### Security — full `/security` audit (8 findings) + limited-admin model
 
@@ -21,6 +21,18 @@ A standalone security pass over the whole branch. Each fix is red→green-proven
 - **#5 — PIN enforced at the capability layer on the agent path.** Privileged tools invoked by the LLM now prompt for the PIN through the single `humanChannel`, closing the gap where the agent path skipped the auth the slash path enforced. POC-validated before build.
 - **#7 — approvals route to the owner, not the requester.** A gate `ask` for a privileged action is sent to the owner's chat for approval, so a customer can never approve an action on their own behalf.
 - **Path-traversal in the indexing sink** (attacker-named attachment filenames) was fixed earlier in the branch — see the beeperbox v0.7.0 entry below.
+
+### Security — second `/security` pass (defense-in-depth)
+
+An independent 3-agent audit of the branch code surface; every finding grounded at `file:line` before action, red→green where behavioral. Residuals, accepted-as-designed, and verified-clean items are catalogued in PRD §11.
+
+- **Owner-only `admin` index scope.** A *limited admin* could `/index <file> admin` and plant content into the owner's trusted RAG/agent context; `admin` scope is now owner-only (limited admins manage the public KB only).
+- **Owner identity tightened (Beeper).** `isOwner` now requires `isSelf` **and** `isPersonalChat` (the note-to-self channel), not bare `isSelf` — a self-message in a random/silent chat, or in a designated limited-admin chat, no longer confers owner. *Behavior change:* the owner dropping a file **into a business chat** now silent-indexes instead of prompting (the scope prompt no longer leaks into a customer-facing chat); note-to-self still prompts.
+- **Exec env scrub.** The bot's own credentials (`ANTHROPIC`/`OPENAI`/`GEMINI`/`TELEGRAM`/`MCP_AUTH`) are stripped from the `/exec` child environment, so a command — including one driven by the LLM agent path — can't `echo $ANTHROPIC_API_KEY` and exfiltrate them.
+- **Audit-log redaction.** Known secret values are replaced with `***` in the audit log (an `/exec` command or stderr could otherwise persist an inline secret in plaintext). The secret-key list is single-sourced in `config.js` so the scrub and redaction can't drift.
+- **Attachment size ceiling.** `download_asset` caps the base64 decode (~25 MB) and `indexBuffer` rejects an oversized buffer **before** writing it to disk — the size cap previously ran only after the attachment was buffered in memory and written out.
+- **Rate-limiter eviction.** The per-sender map now sweeps fully-aged senders, so business mode (where any stranger can open a chat) can't grow it unbounded.
+- **Smaller hardening.** `config.json.bak` is `chmod 0600` (parity with `config.json`); the parallel `buildRAGPrompt` builder now nonce-fences retrieved chunks like the memory builder.
 
 ### Added — `/admin` limited-admin designation
 

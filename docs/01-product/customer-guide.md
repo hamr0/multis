@@ -612,8 +612,9 @@ All tool calls (shell commands, file reads, etc.) flow through a **bareguard Gat
 - **Denylist:** Dangerous commands like `rm`, `sudo`, `chmod`, `shutdown` (matched as regex patterns)
 - **Path restrictions:** Only allowed directories (like `~/Documents`) can be read or written
 - **Cost cap:** Optional per-run spending limit (set `max_cost_per_run` in config) — covers BOTH LLM tokens and tool execution. On halt, the bot pings you with current spend and asks whether to terminate
-- **Secrets redaction:** API keys (`ANTHROPIC_API_KEY`, etc.) are stripped from the audit log automatically
-- **Owner-only tools:** All host-reaching tools (shell exec, file read/send, system info, opening URLs, notifications, media control) are owner-only and cannot be granted to a customer, even by editing `tools.json` — a customer is never a privileged principal
+- **Secrets redaction:** the bot's own API keys/tokens (`ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, etc.) are stripped from **both** logs automatically — the gate decision log (`gate.jsonl`) and the app audit log (`audit.log`) — so an `/exec` command that happens to contain a secret never persists it in plaintext
+- **Exec isolation:** commands run via `/exec` run in a child shell with the bot's own credentials **removed from the environment** — a command (or an LLM-driven action) can't read `$ANTHROPIC_API_KEY` and leak it
+- **Owner-only tools:** All host-reaching tools (shell exec, file read/send, system info, opening URLs, notifications, media control) are owner-only and cannot be granted to a customer, even by editing `tools.json` — a customer is never a privileged principal. The `admin` document scope is owner-only too: a limited admin manages only the public knowledge base
 - **Approvals go to you:** confirmation/halt prompts route to the owner's channel, never to the chat that triggered them — no one can self-approve a privileged action
 - **Audit:** Every gate decision is logged at `~/.multis/logs/gate.jsonl` (structured by phase: gate, record, approval, halt, denied-owner, denied-pin). App-level events (pairing, mode change, etc.) stay at `~/.multis/logs/audit.log`
 
