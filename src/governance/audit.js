@@ -1,13 +1,12 @@
 const fs = require('fs');
 const path = require('path');
-const { PATHS } = require('../config');
+const { PATHS, SECRET_ENV_KEYS } = require('../config');
 
 // Audit entries can carry raw command/stderr strings (e.g. an /exec command the
 // owner typed with an inline secret). Replace any KNOWN secret value — the bot's
-// own credentials from the environment — with *** before it's persisted. Known
-// values only: precise, no false positives, never mangles a legitimate command.
-const SECRET_ENV_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'TELEGRAM_BOT_TOKEN', 'MCP_AUTH_TOKEN'];
-
+// own credentials from the environment (single source: config.SECRET_ENV_KEYS) —
+// with *** before it's persisted. Known values only: precise, no false
+// positives, never mangles a legitimate command.
 function knownSecrets() {
   return SECRET_ENV_KEYS
     .map(k => process.env[k])

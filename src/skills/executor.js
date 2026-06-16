@@ -2,16 +2,15 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { logAudit } = require('../governance/audit');
+const { SECRET_ENV_KEYS } = require('../config');
 
 const MAX_OUTPUT = 4000; // Telegram message limit ~4096 chars
 
 // The bot's own secrets live in process.env (loadEnv reads .env). A child shell
 // inherits them by default, so a command — especially one driven by the LLM
 // agent path if prompt-injected — could `echo $ANTHROPIC_API_KEY` and exfiltrate
-// them. Strip them from the exec child env; nothing a user runs via /exec needs
-// the bot's credentials.
-const SECRET_ENV_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'TELEGRAM_BOT_TOKEN', 'MCP_AUTH_TOKEN'];
-
+// them. Strip the credential keys (single source: config.SECRET_ENV_KEYS) from
+// the exec child env; nothing a user runs via /exec needs the bot's credentials.
 function scrubbedEnv() {
   const env = { ...process.env };
   for (const k of SECRET_ENV_KEYS) delete env[k];

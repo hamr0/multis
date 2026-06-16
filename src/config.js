@@ -116,6 +116,14 @@ function ensureMultisDir() {
 }
 
 /**
+ * The bot's own secret env vars — the single authority for "which environment
+ * keys hold credentials". Consumers that must not leak them (exec child-env
+ * scrub, audit-log redaction) import this list so the two enforcement points
+ * can never drift. Add a new provider/token key here and both inherit it.
+ */
+const SECRET_ENV_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'TELEGRAM_BOT_TOKEN', 'MCP_AUTH_TOKEN'];
+
+/**
  * Load .env file into process.env (simple key=value parser)
  */
 function loadEnv() {
@@ -407,6 +415,7 @@ module.exports = {
   ensureMultisDir,
   getMultisDir,
   setMultisDir,
+  SECRET_ENV_KEYS,
   PATHS,
   MULTIS_DIR,
   CONFIG_PATH
