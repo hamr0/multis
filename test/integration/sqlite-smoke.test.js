@@ -220,6 +220,25 @@ describe('SQLite smoke: indexer with real files', () => {
     assert.ok(count > 0);
   });
 
+  it('aborts a parse that exceeds the wall-clock timeout, passes fast results through', async () => {
+    const slow = new DocumentIndexer(new DocumentStore(path.join(tmpDir, 'to.db')), { parseTimeoutMs: 20 });
+    try {
+      // A parse slower than the deadline must be rejected. Resolve it shortly
+      // after (not never) and await it below so nothing dangles past the test.
+      const slowParse = new Promise((resolve) => setTimeout(() => resolve('too late'), 60));
+      await assert.rejects(
+        () => slow._withTimeout(slowParse, 10, 'hang.pdf'),
+        /timed out/,
+        'a parse slower than the deadline must reject'
+      );
+      await slowParse; // let the slow promise settle so it doesn't leak
+      // ...while a fast parse passes through untouched.
+      assert.strictEqual(await slow._withTimeout(Promise.resolve('ok'), 1000, 'x'), 'ok');
+    } finally {
+      slow.close();
+    }
+  });
+
   it('rejects files over the size cap (oversized-input guard)', async () => {
     const capped = new DocumentIndexer(new DocumentStore(path.join(tmpDir, 'cap.db')), { maxSize: 1024 });
     try {
