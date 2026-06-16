@@ -845,7 +845,9 @@ async function routeSearch(msg, platform, config, indexer, query) {
   }
 
   const admin = isOwner(msg.senderId, config, msg);
-  const roles = admin ? undefined : ['public', `user:${msg.chatId}`];
+  // Owner /search is scoped to public + admin; customer (user:*) scopes are not
+  // pulled by default (#6 — cross-customer data is an opt-in, not the default).
+  const roles = admin ? ['public', 'admin'] : ['public', `user:${msg.chatId}`];
   const results = indexer.search(query, 5, { roles });
 
   if (results.length === 0) {
@@ -996,8 +998,10 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
       }
     }
 
-    // Search for relevant documents (scoped)
-    const roles = admin ? undefined : ['public', `user:${msg.chatId}`];
+    // Search for relevant documents (scoped). The owner is scoped to public +
+    // admin — NOT customer (user:*) scopes — so customer-planted content can't
+    // surface in the owner's tool-enabled agent loop as trusted instructions (#6).
+    const roles = admin ? ['public', 'admin'] : ['public', `user:${msg.chatId}`];
     const chunks = indexer.search(question, 5, { roles });
 
     // Resolve agent (handles @mention, per-chat, mode default, fallback)

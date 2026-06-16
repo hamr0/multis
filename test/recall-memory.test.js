@@ -59,10 +59,12 @@ describe('recall_memory tool', () => {
     assert.ok(!result.includes('Luna brand food'), 'should not include doc content');
   });
 
-  it('owner can see all memory roles', async () => {
+  it('owner recall is scoped to admin memory, not customer memory (#6)', async () => {
+    // Owner recall must not surface customer (user:*) memory — a customer-planted
+    // note could otherwise enter the owner's tool-enabled agent loop.
     const ctx = { indexer: { store }, isOwner: true, chatId: 'owner1' };
     const result = await recallTool.execute({ query: 'refund order' }, ctx);
-    assert.ok(result.includes('refund policy'), 'owner should see customer memory');
+    assert.ok(!result.includes('refund policy'), 'owner must not see customer memory via recall');
   });
 
   it('non-owner only sees their own scoped memories', async () => {

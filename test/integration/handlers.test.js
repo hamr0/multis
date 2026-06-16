@@ -137,7 +137,7 @@ describe('RAG pipeline', () => {
     assert.deepStrictEqual(call.opts.roles, ['public', 'user:chat2']);
   });
 
-  it('admin search has no scope restriction', async () => {
+  it('admin search is scoped to public + admin (not customer scopes)', async () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();
     const llm = mockLLM('admin answer');
@@ -146,8 +146,10 @@ describe('RAG pipeline', () => {
 
     await router(msg('/ask admin question'), platform);
 
+    // #6: the owner is NOT pulled into customer (user:*) scopes by default —
+    // prevents customer-planted content from entering the tool-enabled loop.
     const call = indexer.searchCalls[0];
-    assert.strictEqual(call.opts.roles, undefined);
+    assert.deepStrictEqual(call.opts.roles, ['public', 'admin']);
   });
 });
 

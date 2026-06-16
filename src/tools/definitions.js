@@ -125,7 +125,9 @@ const TOOLS = [
     },
     execute: async ({ query }, ctx) => {
       if (!ctx.indexer) return 'Document indexer not available.';
-      const roles = ctx.isOwner ? undefined : ['public', `user:${ctx.chatId}`];
+      // Owner is scoped to public + admin (not customer user:* scopes) so a
+      // customer-planted chunk can't enter the owner's agent context (#6).
+      const roles = ctx.isOwner ? ['public', 'admin'] : ['public', `user:${ctx.chatId}`];
       const results = ctx.indexer.search(query, 5, { roles });
       if (results.length === 0) return 'No matching documents found.';
       return results.map((r, i) => {
@@ -148,7 +150,9 @@ const TOOLS = [
     },
     execute: async ({ query }, ctx) => {
       if (!ctx.indexer) return 'Memory search not available.';
-      const roles = ctx.isOwner ? undefined : [`user:${ctx.chatId}`];
+      // Owner conversation memory is captured under role 'admin'; scope owner
+      // recall to it and exclude customer (user:*) memory (#6).
+      const roles = ctx.isOwner ? ['admin'] : [`user:${ctx.chatId}`];
       const searchOpts = { roles, types: ['conv'] };
       // Try FTS search first; if empty (e.g. all stopwords), fall back to recent
       let results = ctx.indexer.store.search(query, 5, searchOpts);
