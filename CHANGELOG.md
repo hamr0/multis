@@ -4,6 +4,11 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+### Docs
+
+- **LIVE‡ verification run-sheet** (`docs/01-product/baresuite-migration-live-verification.md`) — the PRD §10 merge gate (the `LIVE‡` security rows: C1, A1–A3, SEC1–SEC6, SEC9–SEC10, plus SEC11–SEC12 spot-checks) turned into an ordered, copy-paste checklist with exact commands, grounded expected output (real reject strings, config knobs, audit signals), and a sign-off table. Makes the manual pre-merge pass mechanical.
+- **README rewrite** — reframed to the product's actual scope (a local-first chatbot/assistant for **personal *and* small-business** use), marked **`[WIP]`** with a `Status` section, and added a *Connects to* (today / planned) list. **Connection modes simplified to three** — Telegram, beeperbox-local, beeperbox-remote (the old lite/container/remote split was one component with a different `mcp_url`); self-hosting Matrix is demoted to a *"No Beeper?"* bottom note. Folded the redundant *How the chats get in* into Connection modes (keeping only the MCP-token config), and moved the architecture diagram and source map out to `system-state.md` (now pointers). 177 → 131 lines.
+
 ## [0.16.0] - 2026-06-16
 
 Milestone state of the `baresuite-migration-m3` branch: multis becomes the first baresuite customer (bare-agent + bareguard as the agent/governance core), Beeper is rewired to a pure beeperbox-MCP client across all three deploy shapes, and two `/security` passes harden the assistant. **489/489 green.** Awaiting the live LIVE‡ verification pass (PRD §10) before merge to `main`.

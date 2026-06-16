@@ -9,13 +9,20 @@
 ```
 
 <p align="center">
+  <img src="https://img.shields.io/badge/status-WIP-e8a33d" alt="status: work in progress">
   <img src="https://img.shields.io/github/package-json/v/hamr0/multis?label=version&color=2a4f8c" alt="version (auto from package.json)">
   <img src="https://img.shields.io/badge/license-Apache%202.0-2a4f8c" alt="license: Apache 2.0">
 </p>
 
-**A personal AI assistant that lives in the chat apps you already use.** Ask it about your documents, let it run things on your machine, or hand it a customer-facing chat to answer on your behalf — all from Telegram, WhatsApp, Signal, or any network you already have open. It runs on *your* computer, so your conversations and files never leave home, and a single governance gate stands between the AI and anything that matters.
+> **🚧 Work in progress.** The core is built and tested; a live end-to-end verification pass stands between here and the first tagged release. See [Status](#status).
+
+**A local-first chatbot and assistant for personal and small-business use.** Run it as your own *personal assistant* — ask it about your documents, let it run things on your machine — or point it at a *customer-facing chat* and let it answer on your behalf from your knowledge base. Either way it lives in the chat apps you already use, runs on *your* computer so your conversations and files never leave home, and puts a single governance gate between the AI and anything that matters.
 
 Think of it as a private assistant with your laptop's keys — but one that always asks before it does anything you'd want to be asked about.
+
+**Connects to:**
+- **Today** — Telegram (native bot), plus WhatsApp · Signal · Discord · iMessage · Instagram · Messenger and 50+ networks through [Beeper](#connection-modes). (Prefer no Beeper at all? [Self-host Matrix](#no-beeper-self-host-matrix).)
+- **Planned** — the live web (via [barebrowse](https://npmjs.com/package/barebrowse)) and Android / iOS device control (via [baremobile](https://npmjs.com/package/baremobile)).
 
 ## Why multis
 
@@ -28,17 +35,27 @@ Think of it as a private assistant with your laptop's keys — but one that alwa
 
 ## Connection modes
 
-multis meets you wherever your chats already live. Pick one — or run several at once.
+multis meets you wherever your chats already live. There are **three modes** — pick one, or run several at once.
 
 | Mode | What you get | What it needs | Best for |
 |------|--------------|---------------|----------|
 | **Telegram** | A private bot, working in minutes | A bot token. Nothing else. | Getting started, zero infrastructure |
-| **Beeper — lite** | WhatsApp/Signal/Discord/… through your existing Beeper Desktop | Beeper Desktop running on your laptop | Everyday use on the machine you already own |
-| **Beeper — container** | The same 50+ networks, headless, no GUI | Docker on a laptop, Raspberry Pi, or VPS | Always-on, runs without a screen attached |
-| **Beeper — remote** | multis here, your chats bridged on a box over there | The container on a VPS, reachable over the network | Keeping the bridge off your daily driver |
-| **Self-hosted Matrix** | Full control, no Beeper in the path | Your own Synapse + mautrix bridges | Maximum sovereignty |
+| **beeperbox — local** | WhatsApp/Signal/Discord/… 50+ networks via Beeper, on the machine you already use | beeperbox running on your laptop | Everyday use on your own machine |
+| **beeperbox — remote** | The same 50+ networks, off your daily driver | beeperbox on a Pi or VPS, reachable over the network | Always-on, no screen attached |
 
-Telegram is always available and needs no extra moving parts. Everything beyond Telegram is reached through **[beeperbox](https://github.com/hamr0/beeperbox)** — see [*How the chats get in*](#how-the-chats-get-in) below.
+Telegram is always available and needs no extra moving parts. Both beeperbox modes are the **same component** — [beeperbox](https://github.com/hamr0/beeperbox) — just running locally or on another box; the only thing that changes is the `mcp_url` you point at. It exposes Beeper's *watch / send / fetch* capabilities as a small set of MCP verbs, and multis is a **pure MCP client** that never touches Beeper's raw API:
+
+```jsonc
+// ~/.multis/config.json
+"platforms": {
+  "beeper": {
+    "mcp_url": "http://localhost:23375",     // beeperbox endpoint — localhost, or a remote box's address
+    "mcp_token": "<token, if you set one>"    // optional on loopback, required over a network
+  }
+}
+```
+
+Document indexing from chats (drop a PDF in a Beeper conversation → your KB) rides the same beeperbox verb surface, so it works even against a remote, MCP-only box. Requires beeperbox ≥ 0.8.0. Full per-mode setup is in the **[Customer Guide → Platforms](docs/01-product/customer-guide.md#6-platforms)**.
 
 ## Quick start
 
@@ -86,50 +103,7 @@ These are siblings multis can grow toward — same design DNA, drop-in when the 
 
 > The bare philosophy: small libraries that each do one thing, run locally, and compose — no 200MB framework, no vendor lock-in. multis is one of the first products built from them.
 
-## How it works
-
-```
-┌──────────────┐   ┌────────────────────────────────┐
-│  Telegram    │   │  beeperbox (MCP)               │
-│  Bot API     │   │  WhatsApp · Signal · Discord…  │
-└──────┬───────┘   └───────────────┬────────────────┘
-       │                           │
-┌──────▼───────────────────────────▼────────────────┐
-│                Message Router                      │
-│   commands · RAG ask · chat modes · doc upload     │
-└──────┬───────────────┬───────────────┬─────────────┘
-       │               │               │
-┌──────▼──┐      ┌──────▼──┐      ┌─────▼────────┐
-│ Skills  │      │   LLM   │      │  Indexer     │
-│ (shell, │      │  (any   │      │ (PDF · DOCX  │
-│  files) │      │ provider)│      │  · MD → FTS) │
-└────┬────┘      └────┬────┘      └──────┬───────┘
-     │                │                  │
-┌────▼────────────────▼──────────────────▼───────────┐
-│  SQLite  (FTS5 search · activation-decay memory)    │
-│  bareguard Gate  (allow / deny / ask · audit · cap) │
-└─────────────────────────────────────────────────────┘
-```
-
-### How the chats get in
-
-Everything past Telegram flows through **[beeperbox](https://github.com/hamr0/beeperbox)**, which exposes Beeper's *watch / send / fetch* capabilities as a small set of MCP verbs (cursor-based `poll_messages`, exact-id echo-guard, `send_message`, `download_asset`). multis is a **pure MCP client** — it never touches Beeper's raw API. The same verb surface is served three ways, so your config doesn't change with your deployment:
-
-```jsonc
-// ~/.multis/config.json
-"platforms": {
-  "beeper": {
-    "mcp_url": "http://localhost:23375",     // beeperbox MCP endpoint
-    "mcp_token": "<token, if you set one>"    // optional on loopback
-  }
-}
-```
-
-- **Lite** — `BEEPER_API=http://localhost:23373 node mcp/server.js` against your existing Beeper Desktop. Zero-dep, no container.
-- **Container** — headless Beeper + MCP in Docker on a laptop / Pi / VPS, no display needed.
-- **Remote** — the container on a VPS; multis talks to it over the network on `:23375` only.
-
-Document indexing from chats (a PDF dropped in a Beeper conversation → your KB) rides the same `download_asset` verb, so it works even against a remote, MCP-only beeperbox. Requires beeperbox ≥ 0.8.0.
+> **Under the hood** — message router, skills, LLM layer, indexer, and the bareguard Gate over a SQLite (FTS5 + activation-decay) store. The full architecture diagram and source map live in **[system-state.md](docs/00-context/system-state.md)**.
 
 ## Why not openclaw
 
@@ -140,36 +114,17 @@ multis borrows the good ideas — daemon architecture, the pairing flow, the `sk
 - **Documents it actually understands.** Section-aware chunking for PDF and DOCX means an answer can cite the chapter and section it came from.
 - **A flat router, not a gateway.** No plugin system, no gateway layer — a new command is a handler in one file.
 
-## Roadmap
+## No Beeper? Self-host Matrix
 
-- [x] Telegram bot + pairing
-- [x] Skills — shell exec, file read, governed at a single gate
-- [x] Document indexing — PDF / DOCX / MD → FTS5
-- [x] LLM RAG + chat modes + business escalation
-- [x] Activation-decay memory + per-chat profiles
-- [x] Daemon + CLI + PIN auth + data isolation
-- [x] **baresuite migration** — adopt bare-agent + bareguard as the agent/governance core
-- [x] **Beeper via beeperbox** — pure MCP client across lite / container / remote
-- [x] **Security batch + limited-admin model** (`/admin`)
-- [ ] Live end-to-end verification pass, then merge to `main`
-- [ ] Native litectx memory + document index
-- [ ] `npm install -g` packaging and onboarding polish
+If you'd rather not route through Beeper at all, you can start from scratch: run your own **Synapse + mautrix bridges** and point multis at them. It's the maximum-sovereignty path — no third party in the chat path — at the cost of more setup. See **[multi-platform docs](docs/02-features/multi-platform.md)**.
 
-## Project structure
+## Status
 
-```
-src/
-├── bot/handlers.js       # Message router + every command handler
-├── platforms/            # Telegram + beeperbox-MCP adapters, normalized Message
-├── llm/                  # bare-agent provider adapter + RAG prompts
-├── indexer/              # PDF/DOCX parsing, chunking, SQLite FTS5 store
-├── governance/           # bareguard Gate factory, single humanChannel, audit log
-├── skills/               # Shell exec, file read (gated by the Gate, not here)
-├── config.js             # ~/.multis/config.json + .env loader
-└── index.js              # Entry point
-```
+multis is **work in progress**. Built and tested today: Telegram + pairing, shell/file skills behind a single gate, PDF/DOCX/MD indexing → FTS5, LLM RAG with chat modes and business escalation, activation-decay memory, the daemon + CLI + PIN auth, the baresuite migration (bare-agent + bareguard), Beeper via beeperbox, and the limited-admin (`/admin`) security batch.
 
-Tech stack: Node.js (vanilla, minimal deps) · Telegraf · better-sqlite3 (FTS5) · pdfjs-dist · mammoth · bare-agent · bareguard. Deeper reference: **[docs hub](docs/README.md)** and the [knowledge base](docs/00-context/knowledge-base.md).
+**Before the first tagged release:** a live end-to-end verification pass, then merge to `main`. **Then:** native litectx memory and `npm install -g` packaging. Full roadmap and per-POC status: **[PRD](docs/01-product/baresuite-migration-prd.md)**.
+
+Stack: Node.js (vanilla, minimal deps) · Telegraf · better-sqlite3 (FTS5) · pdfjs-dist · mammoth · bare-agent · bareguard. Architecture and source map: **[system-state.md](docs/00-context/system-state.md)** · all docs: **[docs hub](docs/README.md)**.
 
 ## License
 
