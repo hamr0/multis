@@ -49,7 +49,8 @@ src/
 │   ├── base.js           # Platform abstract class
 │   ├── message.js        # Normalized Message class (routeAs, isCommand, parseCommand)
 │   ├── telegram.js       # Telegram platform adapter
-│   └── beeper.js         # Beeper Desktop API adapter (polling, mode routing)
+│   ├── beeper.js         # Beeper Desktop API adapter (polling, mode routing)
+│   └── beeperbox-mcp.js  # Vanilla JSON-RPC client for beeperbox MCP verbs (poll_messages, send) — M-B step 3, no new dep
 ├── governance/
 │   ├── gate.js           # bareguard Gate factory (ESM dynamic import) + action translation
 │   ├── human-channel.js  # humanPrompt closure — single callback for every ask/halt event

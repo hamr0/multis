@@ -8,9 +8,11 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 - **CI:** the publish workflow now polls the npm registry for ~2 min (was ~15s; `--prefer-online` skips npm's view cache) and accepts an `exit 0` publish even if the registry hasn't reflected it yet, so a successful-but-slow-to-reflect publish no longer reports a false failure.
 - **`publish.yml` is now manual-only (`workflow_dispatch`) — npm OIDC trusted publishing with provenance, idempotent, and verifies the registry end-state.**
 
-### Baresuite migration — M-B step 3 (foundation validated; Beeper adapter rewire pending)
+### Baresuite migration — M-B step 3, Phase 1 (beeperbox MCP client)
 
-Validated beeperbox's watch + echo primitives **end-to-end against a live container** — the foundation for replacing multis's hand-rolled Beeper poll loop and `[multis]`-prefix echo hack. **No multis code changed yet**; the `src/platforms/beeper.js` rewire onto `poll_messages` lands next.
+**Added `src/platforms/beeperbox-mcp.js`** — a vanilla JSON-RPC 2.0 client for beeperbox's MCP HTTP transport (**no new dependency** — global `fetch`; the transport is a plain stateless POST). Exposes the verbs multis composes (`poll_messages`, `send_message`, `note_to_self`, `list_accounts`) with explicit failure paths: HTTP status, JSON-RPC error+code, network failure, timeout (AbortController), non-JSON body, and MCP `isError`. **17 unit tests** (injected-fetch DI seam; the abort-mechanism and `isError` tests are mutation-proven) + a live smoke against the container. **Phase 2** — rewiring `src/platforms/beeper.js` onto this client (dropping the `[multis]` prefix, `_isLooping`, and the hand-rolled seed/dedup/wake-reseed machinery) — is next.
+
+Foundation validated end-to-end against a live container (the basis for Phase 2):
 
 - **`poll_messages`** (beeperbox PR #11) — cursor-based passive watch; proven **exactly-once within a single cursor chain** (4 sequential sends, 0 dup / 0 loss) — the property the old NaN-dedup / wake-flood bugs broke.
 - **Exact-id echo-guard** (beeperbox PR #13) — `source:"api"` now resolves `pendingMessageID` → final bridge id and matches by **exact id, not text**. Verified with the discriminating test: two identical-text sends each tagged with their own `client_tag`, no crossing — closes beeperbox's CI-unverifiable limit. Lets multis drop both the `[multis]` prefix **and** `_isLooping`.
