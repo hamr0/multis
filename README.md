@@ -36,7 +36,11 @@ See the **[Customer Guide](docs/01-product/customer-guide.md)** for full setup i
 
 ### Beeper support runs through beeperbox
 
-multis's Beeper integration is provided by **[beeperbox](https://github.com/hamr0/beeperbox)** — a Docker container that exposes Beeper's watch/send capabilities as MCP verbs. multis talks to beeperbox's **MCP transport** on `:23375` (cursor-based `poll_messages`, exact-id echo-guard, `send_message`); a bare local Beeper Desktop (which has no MCP transport) is no longer a target of the adapter. beeperbox runs on your laptop, a Raspberry Pi, or a VPS — headless, no GUI display needed.
+multis's Beeper integration is provided by **[beeperbox](https://github.com/hamr0/beeperbox)** — which exposes Beeper's watch/send capabilities as MCP verbs (cursor-based `poll_messages`, exact-id echo-guard, `send_message`). multis is a **pure MCP client** on `:23375`; it doesn't poll Beeper's raw API directly. beeperbox runs three ways, same verbs each time:
+
+- **Full container** — headless Beeper + MCP in Docker, on a laptop / Raspberry Pi / VPS (no GUI display needed).
+- **Lite mode** — `mcp/server.js` is zero-dep vanilla Node; point it at your **existing local Beeper Desktop** and run just the verb server: `BEEPER_API=http://localhost:23373 BEEPER_TOKEN=<tok> node mcp/server.js`. No container, no Electron.
+- **Remote** — the container on a VPS, multis talking to it over the network.
 
 ```jsonc
 // ~/.multis/config.json
