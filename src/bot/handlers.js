@@ -1209,7 +1209,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
 
   // Beeper: no args → list chats with current modes (read-only, no PIN needed)
   if (!mode) {
-    if (config?.chats || platform._api) {
+    if (config?.chats || typeof platform?.listInbox === 'function') {
       const allChats = listBeeperChats(platform, config);
       if (!allChats || allChats.length === 0) {
         await platform.send(msg.chatId, 'No chats found.');
@@ -1385,13 +1385,14 @@ async function findBeeperChat(platform, search, config) {
     if (matches.length > 0) return matches;
   }
 
-  // Fall back to Beeper API for undiscovered chats
-  if (!platform?._api) return null;
+  // Fall back to the beeperbox list_inbox verb (MCP, not raw :23373 — works
+  // against a remote beeperbox) for undiscovered chats.
+  if (typeof platform?.listInbox !== 'function') return null;
   try {
     backupConfig();
     const botChatId = platform._botChatId || null;
-    const data = await platform._api('GET', '/v1/chats?limit=100');
-    const chats = (data.items || []).map(c => ({
+    const list = await platform.listInbox(100);
+    const chats = list.map(c => ({
       id: c.id || c.chatID,
       title: c.title || c.name || '',
       network: c.network || '',

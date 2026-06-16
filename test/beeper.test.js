@@ -310,6 +310,34 @@ describe('BeeperPlatform', () => {
       );
     });
 
+    it('still starts (with a warning) when beeperbox reports 0 accounts', async () => {
+      await withFakeClient(
+        class {
+          async listAccounts() { return []; }
+          async pollMessages() { return { cursor: 'seed', messages: [], has_more: false, seeded: true }; }
+        },
+        async (BeeperPlatform) => {
+          const bp = new BeeperPlatform(makeConfig());
+          const ok = await bp.start();
+          assert.strictEqual(ok, true, 'reachable-but-empty is not a fatal error');
+          assert.strictEqual(bp._initialized, true);
+          await bp.stop();
+        }
+      );
+    });
+
+    it('aborts on an auth failure (401/403) from the MCP server', async () => {
+      await withFakeClient(
+        class { async listAccounts() { const e = new Error('Unauthorized'); e.code = 403; throw e; } },
+        async (BeeperPlatform) => {
+          const bp = new BeeperPlatform(makeConfig({ mcp_token: 'bad' }));
+          const ok = await bp.start();
+          assert.strictEqual(ok, false);
+          assert.strictEqual(bp._initialized, false);
+        }
+      );
+    });
+
     it('resumes a persisted cursor across restart (no re-seed)', async () => {
       fs.writeFileSync(path.join(tmp.multisDir, 'run', 'beeper-cursor.json'), JSON.stringify({ cursor: 'saved-cursor' }));
       let seeded = false;
@@ -586,6 +614,36 @@ describe('BeeperPlatform', () => {
       await bp._poll();
       assert.strictEqual(received.length, 1);
       assert.strictEqual(received[0].chatId, 'cB');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // listInbox — chat discovery via the list_inbox MCP verb (not raw :23373)
+  // -------------------------------------------------------------------------
+
+  describe('listInbox', () => {
+    it('returns normalized chats from the list_inbox verb', async () => {
+      const { BeeperPlatform } = loadBeeper();
+      const bp = new BeeperPlatform(makeConfig());
+      let calledWith = null;
+      bp.mcp = {
+        async callTool(name, args) {
+          calledWith = { name, args };
+          return [{ id: 'c1', title: 'Alice', network: 'telegram', is_note_to_self: false }];
+        },
+      };
+      const chats = await bp.listInbox(50);
+      assert.strictEqual(calledWith.name, 'list_inbox');
+      assert.strictEqual(calledWith.args.limit, 50);
+      assert.strictEqual(chats[0].title, 'Alice');
+    });
+
+    it('unwraps an { items } envelope', async () => {
+      const { BeeperPlatform } = loadBeeper();
+      const bp = new BeeperPlatform(makeConfig());
+      bp.mcp = { async callTool() { return { items: [{ id: 'c2', title: 'Bob' }] }; } };
+      const chats = await bp.listInbox();
+      assert.strictEqual(chats[0].id, 'c2');
     });
   });
 

@@ -50,13 +50,22 @@ class BeeperPlatform extends Platform {
     this.token = this._loadToken(); // best-effort: needed for asset download, not for MCP
     this.mcp = new BeeperboxMcpClient({ url: this.mcpUrl, token: this.mcpToken });
 
-    // Liveness + contract check against beeperbox MCP.
+    // Liveness + contract check against beeperbox MCP (container, local `node
+    // mcp/server.js` lite mode, or remote — same verbs).
     try {
       const accounts = await this.mcp.listAccounts();
       const list = Array.isArray(accounts) ? accounts : accounts?.items || [];
-      console.log(`Beeper: connected via beeperbox MCP at ${this.mcpUrl} (${list.length} accounts)`);
+      if (list.length === 0) {
+        console.warn(`Beeper: beeperbox MCP reachable at ${this.mcpUrl} but 0 accounts connected — is Beeper logged in / are bridges linked? Watching will see nothing until an account exists.`);
+      } else {
+        const nets = list.map((a) => a.network || a.network_label).filter(Boolean).join(', ');
+        console.log(`Beeper: connected via beeperbox MCP at ${this.mcpUrl} (${list.length} account(s): ${nets})`);
+      }
     } catch (err) {
-      console.error(`Beeper: beeperbox MCP unreachable at ${this.mcpUrl} — ${err.message}`);
+      const hint = (err.code === 401 || err.code === 403)
+        ? 'auth failed — check platforms.beeper.mcp_token / MCP_AUTH_TOKEN'
+        : 'unreachable — is beeperbox running? (container, `node mcp/server.js` lite mode, or remote)';
+      console.error(`Beeper: beeperbox MCP at ${this.mcpUrl} ${hint} — ${err.message}`);
       return false;
     }
 
@@ -239,6 +248,18 @@ class BeeperPlatform extends Platform {
       // Don't cache failures — retry on the next sighting.
       return { title: '', isNoteToSelf: false, network: '' };
     }
+  }
+
+  /**
+   * Recent chats via beeperbox's `list_inbox` verb — for `/mode` chat
+   * discovery (handlers.findBeeperChat). MCP, not raw `:23373`, so it works
+   * against a remote beeperbox where only `:23375` is reachable. Excludes the
+   * bot's own note-to-self chat (beeperbox does this). Normalized chat shape:
+   * { id, title, network, is_group, is_note_to_self, last_message_at, unread_count }.
+   */
+  async listInbox(limit = 100) {
+    const chats = await this.mcp.callTool('list_inbox', { limit });
+    return Array.isArray(chats) ? chats : chats?.items || [];
   }
 
   _loadCursor() {
