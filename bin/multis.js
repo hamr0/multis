@@ -171,46 +171,49 @@ async function runInit() {
     console.log('');
   }
 
-  console.log('  1) Personal assistant (Telegram)');
-  console.log('     ' + c.dim('Your private AI. Commands, docs, search.'));
-  console.log('');
-  console.log('  2) Personal assistant (Beeper) ' + c.dim('— recommended'));
-  console.log('     ' + c.dim('Same, plus all your messengers archived and searchable.'));
-  console.log('');
-  console.log('  3) Business chatbot (Beeper)');
-  console.log('     ' + c.dim('Auto-respond to customers across all channels.'));
+  console.log('  1) Personal assistant   ' + c.dim('— your private AI: commands, your docs, search'));
+  console.log('  2) Business chatbot      ' + c.dim('— auto-responds to customers, escalates to you'));
 
-  const step1Default = hasExistingSetup ? '' : '2';
-  const step1Hint = hasExistingSetup ? 'Enter to keep, or choose 1/2/3' : '1/2/3';
-  const setupChoice = (await ask(`\nChoose (${step1Hint}) [${step1Default || 'keep'}]: `)).trim() || step1Default;
+  const modeDefault = hasExistingSetup ? '' : '1';
+  const modeHint = hasExistingSetup ? 'Enter to keep current, or 1/2' : '1/2';
+  const modeChoice = (await ask(`\nChoose (${modeHint}) [${modeDefault || 'keep'}]: `)).trim() || modeDefault;
 
-  if (!setupChoice && hasExistingSetup) {
-    // Keep existing setup
+  if (!modeChoice && hasExistingSetup) {
+    // Keep existing setup entirely
     useTelegram = !!config.platforms?.telegram?.enabled;
     useBeeper = !!config.platforms?.beeper?.enabled;
     const profile = config.bot_mode === 'business' ? 'Business chatbot' : 'Personal assistant';
     const plats = [useTelegram && 'Telegram', useBeeper && 'Beeper'].filter(Boolean).join(' + ');
-    console.log(c.ok(`Keeping: ${plats}, ${config.bot_mode} mode`));
+    console.log(c.ok(`Keeping: ${profile} (${plats})`));
   } else {
-    switch (setupChoice || '2') {
-      case '1':
-        useTelegram = true;
-        config.bot_mode = 'personal';
-        break;
-      case '3': {
-        useBeeper = true;
-        config.bot_mode = 'business';
-        const addTg = (await ask('\nAlso use Telegram as a second admin channel? (y/n) [n]: ')).trim().toLowerCase();
-        if (addTg === 'y' || addTg === 'yes') useTelegram = true;
-        break;
-      }
-      default: // '2' or anything else
-        useBeeper = true;
-        config.bot_mode = 'personal';
-        break;
+    config.bot_mode = modeChoice === '2' ? 'business' : 'personal';
+
+    if (config.bot_mode === 'personal') {
+      // Branch: Telegram-only bot, or Telegram + Beeper (messenger reach)
+      console.log(`\n${c.bold('Personal')} — how do you want to run it?`);
+      console.log('  1) Your personal bot');
+      console.log('     ' + c.dim('Just a Telegram bot. Nothing else to install.'));
+      console.log('  2) Personal bot + messenger assistant');
+      console.log('     ' + c.dim('Telegram + Beeper — connects all your messengers:'));
+      console.log('     ' + c.dim('WhatsApp · Signal · Telegram · Messenger + 50 more.'));
+      console.log('     ' + c.dim('Command it from Telegram or your Beeper Note-to-self.'));
+      const pChoice = (await ask('\nChoose (1/2) [1]: ')).trim() || '1';
+      useTelegram = true;            // both personal paths include the Telegram bot
+      useBeeper = pChoice === '2';   // option 2 adds Beeper for messenger reach
+    } else {
+      // Business runs through Beeper — a Telegram bot can't see your real contacts,
+      // so reaching customers on their own channels requires the Beeper bridge.
+      console.log(`\n${c.bold('Business')} — runs through Beeper`);
+      console.log('  ' + c.dim('Reaches customers across every channel you\'ve bridged:'));
+      console.log('  ' + c.dim('WhatsApp · Signal · Telegram · Messenger + 50 more.'));
+      console.log('  ' + c.dim('You control it from your Beeper Note-to-self.'));
+      useBeeper = true;
+      const addTg = (await ask('\nAlso add Telegram as a backup admin channel? (y/n) [n]: ')).trim().toLowerCase();
+      if (addTg === 'y' || addTg === 'yes') useTelegram = true;
     }
+
     const platformNames = [useTelegram && 'Telegram', useBeeper && 'Beeper'].filter(Boolean).join(' + ');
-    console.log(c.ok(`${platformNames}, ${config.bot_mode} mode`));
+    console.log(c.ok(`${config.bot_mode} mode — ${platformNames}`));
   }
 
   if (!config.platforms) config.platforms = {};
@@ -350,25 +353,60 @@ async function runInit() {
     if (!skipBeeper) try {
       const beeper = require('../src/cli/setup-beeper');
 
-      console.log(c.dim('Beeper runs through beeperbox (container / lite / remote) — get it running first.'));
+      console.log(c.dim('Beeper runs through beeperbox (container / lite / remote).'));
       console.log(c.dim('  See https://github.com/hamr0/beeperbox\n'));
 
-      const urlInput = (await ask(`beeperbox MCP URL [${beeper.DEFAULT_MCP_URL}]: `)).trim();
-      const mcpUrl = urlInput || beeper.DEFAULT_MCP_URL;
-      const mcpToken = (await ask('MCP token (blank if none / loopback): ')).trim() || null;
-
-      console.log('Checking beeperbox MCP...');
-      const client = beeper.makeClient({ url: mcpUrl, token: mcpToken });
+      let mcpUrl = beeper.DEFAULT_MCP_URL;
+      let mcpToken = null;
+      let client = null;
       let list = null;
+
+      // Probe the default loopback endpoint first. A beeperbox on localhost is
+      // open (no auth) by design, so if one is already running we can adopt it
+      // and skip the URL + token prompts entirely.
+      console.log(c.dim(`Looking for a running beeperbox at ${beeper.DEFAULT_MCP_URL} ...`));
+      const probeClient = beeper.makeClient({ url: beeper.DEFAULT_MCP_URL, token: null });
       try {
-        list = await beeper.listAccounts(client);
-      } catch (err) {
-        const hint = (err.code === 401 || err.code === 403)
-          ? 'auth failed — check the MCP token'
-          : 'unreachable — is beeperbox running at that URL?';
-        console.log(c.warn(hint));
-        await ask('Press Enter to retry...');
-        try { list = await beeper.listAccounts(client); } catch { /* handled below */ }
+        list = await beeper.listAccounts(probeClient);
+        client = probeClient;
+      } catch { /* none on loopback (or it needs a token) — fall through to manual entry */ }
+
+      if (list) {
+        const accts = list.map(beeper.accountLabel).join(', ') || 'no accounts linked yet';
+        console.log(c.ok(`Found beeperbox — ${list.length} account${list.length !== 1 ? 's' : ''} (${accts})`));
+        const ans = (await ask(`Use this one? ${c.dim('[Enter = yes · or paste a different URL]')} `)).trim();
+        if (/^https?:\/\//i.test(ans)) {
+          mcpUrl = ans;          // a different endpoint — re-resolve below
+          list = null; client = null;
+        }
+        // otherwise (blank / "yes") keep the probed beeperbox: mcpUrl stays default, client/list reused
+      } else {
+        console.log(c.dim('  None on loopback.'));
+        const urlInput = (await ask(`beeperbox MCP URL [${beeper.DEFAULT_MCP_URL}]: `)).trim();
+        mcpUrl = urlInput || beeper.DEFAULT_MCP_URL;
+      }
+
+      // Only ask for a token when we don't already have a working client — i.e. a
+      // remote/exposed beeperbox, the one case that actually requires MCP_AUTH_TOKEN.
+      if (!list) {
+        console.log(c.dim('\n  MCP token — a bearer guard on the beeperbox endpoint (its MCP_AUTH_TOKEN env var).'));
+        console.log(c.dim('  • Local/loopback beeperbox: leave blank — it is open to your machine only.'));
+        console.log(c.dim('  • Remote/exposed beeperbox: paste the MCP_AUTH_TOKEN you set when launching it.'));
+        console.log(c.dim('  Not your Beeper Desktop token — that one lives in beeperbox as BEEPER_TOKEN, never here.'));
+        mcpToken = (await ask('  MCP token [blank]: ')).trim() || null;
+
+        console.log('Checking beeperbox MCP...');
+        client = beeper.makeClient({ url: mcpUrl, token: mcpToken });
+        try {
+          list = await beeper.listAccounts(client);
+        } catch (err) {
+          const hint = (err.code === 401 || err.code === 403)
+            ? 'auth failed — check the MCP token'
+            : 'unreachable — is beeperbox running at that URL?';
+          console.log(c.warn(hint));
+          await ask('Press Enter to retry...');
+          try { list = await beeper.listAccounts(client); } catch { /* handled below */ }
+        }
       }
 
       if (list) {
@@ -672,9 +710,17 @@ async function runInit() {
     }
   }
 
-  if (!config.owner_id) {
+  // Owner setup differs per platform: Telegram pairs via /start (owner_id);
+  // Beeper's owner is your Note-to-self channel (isSelf), so it needs no pairing.
+  const tgEnabled = !!config.platforms?.telegram?.enabled;
+  const beeperEnabled = !!config.platforms?.beeper?.enabled;
+  if (tgEnabled && !config.owner_id) {
     console.log(`\n  Pairing code: ${c.bold(config.pairing_code)}`);
-    console.log('  Send /start <code> to your bot to pair as owner.');
+    console.log(`  Send ${c.bold('/start ' + config.pairing_code)} to your Telegram bot to pair as owner.`);
+  }
+  if (beeperEnabled) {
+    console.log(`\n  Beeper: you're the owner via your ${c.bold('Note-to-self')} chat.`);
+    console.log('  Open it and send /help to get started.');
   }
 
   console.log(`\nRun ${c.bold('multis')} to launch.`);

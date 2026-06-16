@@ -4,6 +4,12 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+### Changed — `multis init` wizard
+
+- **Branched setup flow.** Step 1 now asks the two real questions separately instead of a flat 3-item list: first **what** (Personal assistant / Business chatbot), then **how to run it**, branched by that choice. Personal → *Your personal bot* (Telegram only) or *Personal bot + messenger assistant* (Telegram + Beeper, all messengers). Business → runs through Beeper (a Telegram bot can't see your real contacts), with an opt-in "also add Telegram as a backup admin channel?".
+- **Owner guidance now matches the path — fixes a stray pairing code.** The end screen previously printed "Pairing code … send /start to your bot" whenever `owner_id` was unset, including Beeper-only setups that have no bot to pair with. Now: Telegram paths show the pairing code; Beeper paths show *"you're the owner via your Note-to-self chat"* (per the `isSelf && isPersonalChat` model); both can show when both are enabled.
+- **beeperbox auto-detect.** The Beeper step probes `localhost:23375` first; if a beeperbox is already running it shows the account count + labels and offers to adopt it (Enter = yes, or paste a different URL), skipping the URL **and** token prompts. The MCP-token prompt now appears only for a remote/manual endpoint and explains what the token is (its `MCP_AUTH_TOKEN`), that loopback needs none, and that it is **not** the Beeper Desktop `BEEPER_TOKEN`.
+
 ### Docs
 
 - **LIVE‡ verification run-sheet** (`docs/01-product/baresuite-migration-live-verification.md`) — the PRD §10 merge gate (the `LIVE‡` security rows: C1, A1–A3, SEC1–SEC6, SEC9–SEC10, plus SEC11–SEC12 spot-checks) turned into an ordered, copy-paste checklist with exact commands, grounded expected output (real reject strings, config knobs, audit signals), and a sign-off table. Makes the manual pre-merge pass mechanical.
