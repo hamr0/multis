@@ -11,7 +11,7 @@
     },
     "beeper": {
       "enabled": false,
-      "url": "http://localhost:23373",
+      "mcp_url": "http://localhost:23375",
       "command_prefix": "/",
       "poll_interval": 3000
     }

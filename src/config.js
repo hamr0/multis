@@ -18,7 +18,6 @@ const PATHS = {
   memory:       () => path.join(getMultisDir(), 'data', 'memory', 'chats'),
   governance:   () => path.join(getMultisDir(), 'auth', 'governance.json'),
   pinSessions:  () => path.join(getMultisDir(), 'auth', 'pin_sessions.json'),
-  beeperToken:  () => path.join(getMultisDir(), 'auth', 'beeper-token.json'),
   auditLog:     () => path.join(getMultisDir(), 'logs', 'audit.log'),
   injectionLog: () => path.join(getMultisDir(), 'logs', 'injection.log'),
   daemonLog:    () => path.join(getMultisDir(), 'logs', 'daemon.log'),

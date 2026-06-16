@@ -1,11 +1,9 @@
 const fs = require('fs');
-const path = require('path');
 const { Platform } = require('./base');
 const { Message } = require('./message');
 const { logAudit } = require('../governance/audit');
 const { BeeperboxMcpClient } = require('./beeperbox-mcp');
 
-const DEFAULT_URL = 'http://localhost:23373';      // raw Beeper Desktop API (assets)
 const DEFAULT_MCP_URL = 'http://localhost:23375';  // beeperbox MCP transport (watch/send)
 const DEFAULT_POLL_INTERVAL = 3000;
 const MAX_PAGES_PER_TICK = 10; // has_more drain cap so one tick can't starve the loop
@@ -21,20 +19,19 @@ const { PATHS } = require('../config');
  * personal-chat gating, command routing, owner) stays here — verbs live in
  * beeperbox, policy lives in multis (PRD §E).
  *
- * The raw Desktop API (:23373) seam is retained only for asset download and
- * handlers' chat discovery; beeperbox also exposes it. Native (non-beeperbox)
- * Beeper Desktop has no MCP transport and is no longer a target of this adapter.
+ * multis speaks ONLY the beeperbox MCP transport (:23375) — watch, send, chat
+ * discovery (list_inbox), and asset bytes (download_asset). It no longer touches
+ * the raw Desktop API (:23373) at all. Native (non-beeperbox) Beeper Desktop has
+ * no MCP transport and is not a target of this adapter.
  */
 class BeeperPlatform extends Platform {
   constructor(config) {
     super('beeper', config);
     const bc = config.platforms?.beeper || {};
-    this.baseUrl = bc.url || DEFAULT_URL;
     this.mcpUrl = bc.mcp_url || DEFAULT_MCP_URL;
     this.mcpToken = bc.mcp_token || process.env.MCP_AUTH_TOKEN || null;
     this.pollInterval = bc.poll_interval || DEFAULT_POLL_INTERVAL;
     this.commandPrefix = bc.command_prefix || '/';
-    this.token = null;                  // raw Desktop API token (assets)
     this.mcp = null;                    // BeeperboxMcpClient
     this._cursor = null;                // poll_messages opaque cursor (restart-safe)
     this._pollTimer = null;
@@ -47,7 +44,6 @@ class BeeperPlatform extends Platform {
   }
 
   async start() {
-    this.token = this._loadToken(); // best-effort: needed for asset download, not for MCP
     this.mcp = new BeeperboxMcpClient({ url: this.mcpUrl, token: this.mcpToken });
 
     // Liveness + contract check against beeperbox MCP (container, local `node
@@ -324,46 +320,6 @@ class BeeperPlatform extends Platform {
     return botMode === 'personal' ? 'silent' : 'business';
   }
 
-  _loadToken() {
-    // Config/secret-store first so pointing multis at a beeperbox container is a
-    // pure config change (M-B §E swap-by-config): set platforms.beeper.token, or
-    // export BEEPER_TOKEN (the same var name beeperbox uses — share it across both).
-    const configToken = this.config.platforms?.beeper?.token;
-    if (configToken) return configToken;
-    if (process.env.BEEPER_TOKEN) return process.env.BEEPER_TOKEN;
-
-    // Otherwise the local Beeper Desktop OAuth token file (default deploy).
-    try {
-      const data = JSON.parse(fs.readFileSync(PATHS.beeperToken(), 'utf8'));
-      return data.access_token;
-    } catch {
-      // Also check legacy location
-      const legacyPath = path.join(__dirname, '..', '..', '.beeper-storage', 'desktop-token.json');
-      try {
-        const data = JSON.parse(fs.readFileSync(legacyPath, 'utf8'));
-        return data.access_token;
-      } catch {
-        return null;
-      }
-    }
-  }
-
-  async _api(method, apiPath, body) {
-    const opts = {
-      method,
-      headers: {
-        'Authorization': `Bearer ${this.token}`,
-        'Content-Type': 'application/json',
-      },
-    };
-    if (body) opts.body = JSON.stringify(body);
-    const res = await fetch(`${this.baseUrl}${apiPath}`, opts);
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`${res.status} ${res.statusText}: ${text}`);
-    }
-    return res.json();
-  }
 }
 
 module.exports = { BeeperPlatform };

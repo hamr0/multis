@@ -110,7 +110,6 @@ describe('BeeperPlatform', () => {
     it('uses default URLs and poll interval when not configured', () => {
       const { BeeperPlatform } = loadBeeper();
       const bp = new BeeperPlatform({ platforms: {} });
-      assert.strictEqual(bp.baseUrl, 'http://localhost:23373');
       assert.strictEqual(bp.mcpUrl, 'http://localhost:23375');
       assert.strictEqual(bp.pollInterval, 3000);
       assert.strictEqual(bp.commandPrefix, '/');
@@ -119,12 +118,10 @@ describe('BeeperPlatform', () => {
     it('respects custom config values', () => {
       const { BeeperPlatform } = loadBeeper();
       const bp = new BeeperPlatform(makeConfig({
-        url: 'http://localhost:9999',
         mcp_url: 'http://localhost:8888',
         poll_interval: 500,
         command_prefix: '!!',
       }));
-      assert.strictEqual(bp.baseUrl, 'http://localhost:9999');
       assert.strictEqual(bp.mcpUrl, 'http://localhost:8888');
       assert.strictEqual(bp.pollInterval, 500);
       assert.strictEqual(bp.commandPrefix, '!!');
@@ -136,53 +133,6 @@ describe('BeeperPlatform', () => {
       assert.strictEqual(bp._initialized, false);
       assert.strictEqual(bp._cursor, null);
       assert.strictEqual(bp._personalChats.size, 0);
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // Token loading (raw Desktop API token, for asset download)
-  // -------------------------------------------------------------------------
-
-  describe('_loadToken', () => {
-    let savedEnvToken;
-    beforeEach(() => { savedEnvToken = process.env.BEEPER_TOKEN; delete process.env.BEEPER_TOKEN; });
-    afterEach(() => { if (savedEnvToken === undefined) delete process.env.BEEPER_TOKEN; else process.env.BEEPER_TOKEN = savedEnvToken; });
-
-    it('prefers config platforms.beeper.token (swap-by-config for beeperbox)', () => {
-      const { BeeperPlatform } = loadBeeper();
-      fs.writeFileSync(path.join(tmp.multisDir, 'auth', 'beeper-token.json'), JSON.stringify({ access_token: 'file_tok' }));
-      const bp = new BeeperPlatform(makeConfig({ token: 'cfg_tok' }));
-      assert.strictEqual(bp._loadToken(), 'cfg_tok');
-    });
-
-    it('falls back to BEEPER_TOKEN env when no config token', () => {
-      const { BeeperPlatform } = loadBeeper();
-      process.env.BEEPER_TOKEN = 'env_tok';
-      const bp = new BeeperPlatform(makeConfig());
-      assert.strictEqual(bp._loadToken(), 'env_tok');
-    });
-
-    it('loads token from ~/.multis/auth/beeper-token.json', () => {
-      const { BeeperPlatform } = loadBeeper();
-      fs.writeFileSync(
-        path.join(tmp.multisDir, 'auth', 'beeper-token.json'),
-        JSON.stringify({ access_token: 'tok_123' })
-      );
-      const bp = new BeeperPlatform(makeConfig());
-      assert.strictEqual(bp._loadToken(), 'tok_123');
-    });
-
-    it('returns null when no token file exists', () => {
-      const { BeeperPlatform } = loadBeeper();
-      const bp = new BeeperPlatform(makeConfig());
-      assert.strictEqual(bp._loadToken(), null);
-    });
-
-    it('returns null for malformed token file', () => {
-      const { BeeperPlatform } = loadBeeper();
-      fs.writeFileSync(path.join(tmp.multisDir, 'auth', 'beeper-token.json'), 'not json');
-      const bp = new BeeperPlatform(makeConfig());
-      assert.strictEqual(bp._loadToken(), null);
     });
   });
 
