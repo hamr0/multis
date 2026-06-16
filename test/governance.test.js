@@ -135,6 +135,12 @@ describe('ownerCheck — multis owner gate', () => {
     assert.match(r, /owner privileges/);
   });
 
+  it('non-owner denied send_file (no file exfiltration to customers)', () => {
+    const r = ownerCheck('send_file', { isOwner: false });
+    assert.match(r, /owner privileges/);
+    assert.strictEqual(ownerCheck('send_file', { isOwner: true }), null);
+  });
+
   it('non-owner allowed for non-shell tools', () => {
     assert.strictEqual(ownerCheck('search_docs', { isOwner: false }), null);
     assert.strictEqual(ownerCheck('recall_memory', { isOwner: false }), null);

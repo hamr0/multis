@@ -10,9 +10,32 @@ const { logAudit } = require('../governance/audit');
  * Ported from aurora_context_doc.indexer.DocumentIndexer (Python).
  */
 class DocumentIndexer {
-  constructor(store = null) {
+  constructor(store = null, limits = {}) {
     this.store = store || new DocumentStore();
     this.chunker = new DocumentChunker();
+    // Bound untrusted attachment input. Defaults match the config template;
+    // createMessageRouter passes config.documents through.
+    this.maxSize = limits.maxSize ?? 10 * 1024 * 1024;
+    this.maxPdfPages = limits.maxPdfPages ?? 2000;
+    this.parseTimeoutMs = limits.parseTimeoutMs ?? 30000;
+  }
+
+  /**
+   * Race a parse against a wall-clock deadline so a pathological document can't
+   * hang the indexer indefinitely. pdfjs can't be cancelled cleanly, so the
+   * page cap (enforced in parsePDF) is the real OOM guard; this bounds latency.
+   */
+  _withTimeout(promise, ms, label) {
+    if (!ms) return promise;
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`Parse timed out after ${ms}ms: ${path.basename(label)}`)),
+        ms
+      );
+      if (timer.unref) timer.unref();
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
   }
 
   /**
@@ -27,6 +50,17 @@ class DocumentIndexer {
       throw new Error(`File not found: ${filePath}`);
     }
 
+    // Enforce the size cap before parsing — a malicious/oversized document is
+    // rejected before it can be loaded into memory.
+    if (this.maxSize) {
+      const { size } = fs.statSync(resolved);
+      if (size > this.maxSize) {
+        throw new Error(
+          `File too large: ${(size / 1048576).toFixed(1)} MB exceeds limit of ${(this.maxSize / 1048576).toFixed(1)} MB`
+        );
+      }
+    }
+
     const parser = getParser(resolved);
     if (!parser) {
       const ext = path.extname(resolved);
@@ -36,8 +70,12 @@ class DocumentIndexer {
     // Delete existing chunks for this file (re-index)
     this.store.deleteByFile(resolved);
 
-    // Parse
-    const rawChunks = await parser(resolved);
+    // Parse (page cap + wall-clock timeout bound untrusted input)
+    const rawChunks = await this._withTimeout(
+      parser(resolved, { maxPages: this.maxPdfPages }),
+      this.parseTimeoutMs,
+      resolved
+    );
     if (!rawChunks || rawChunks.length === 0) {
       return 0;
     }

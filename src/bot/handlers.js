@@ -199,7 +199,11 @@ function isPaired(msgOrCtx, config) {
  * Takes a normalized Message and routes to the appropriate handler.
  */
 function createMessageRouter(config, deps = {}) {
-  const indexer = deps.indexer || new DocumentIndexer();
+  const indexer = deps.indexer || new DocumentIndexer(null, {
+    maxSize: config.documents?.maxSize,
+    maxPdfPages: config.documents?.maxPdfPages,
+    parseTimeoutMs: config.documents?.parseTimeoutMs,
+  });
   const memoryManagers = deps.memoryManagers || new Map();
   const _memBaseDir = deps.memoryBaseDir || PATHS.memory();
   const pinManager = deps.pinManager || new PinManager(config);

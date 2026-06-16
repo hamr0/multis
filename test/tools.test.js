@@ -133,8 +133,8 @@ describe('getToolsForUser', () => {
     const userTools = getToolsForUser(allTools, false, {});
     // exec is owner_only by default
     assert.ok(!userTools.find(t => t.name === 'exec'), 'non-owner should not see exec');
-    // open_url is not owner_only
-    assert.ok(userTools.find(t => t.name === 'open_url'), 'non-owner should see open_url');
+    // customer-safe tools remain visible
+    assert.ok(userTools.find(t => t.name === 'search_docs'), 'non-owner should see search_docs');
   });
 
   it('respects config override for owner_only', () => {
@@ -142,6 +142,22 @@ describe('getToolsForUser', () => {
     const config = { tools: { exec: { enabled: true, owner_only: false } } };
     const userTools = getToolsForUser(allTools, false, config);
     assert.ok(userTools.find(t => t.name === 'exec'), 'exec with owner_only:false should be visible');
+  });
+
+  it('FORCE_OWNER_ONLY host tools cannot be re-exposed to non-owners via config', () => {
+    const allTools = buildToolRegistry({}, 'linux');
+    // A stale tools.json trying to grant host tools to customers must not win.
+    const config = { tools: {
+      send_file: { enabled: true, owner_only: false },
+      open_url: { enabled: true, owner_only: false },
+      system_info: { enabled: true, owner_only: false },
+      notify: { enabled: true, owner_only: false },
+      media_control: { enabled: true, owner_only: false },
+    } };
+    const userTools = getToolsForUser(allTools, false, config);
+    for (const name of ['send_file', 'open_url', 'system_info', 'notify', 'media_control']) {
+      assert.ok(!userTools.find(t => t.name === name), `non-owner must not see ${name}`);
+    }
   });
 });
 

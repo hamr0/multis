@@ -220,6 +220,25 @@ describe('SQLite smoke: indexer with real files', () => {
     assert.ok(count > 0);
   });
 
+  it('rejects files over the size cap (oversized-input guard)', async () => {
+    const capped = new DocumentIndexer(new DocumentStore(path.join(tmpDir, 'cap.db')), { maxSize: 1024 });
+    try {
+      const big = path.join(tmpDir, 'big.txt');
+      fs.writeFileSync(big, 'x'.repeat(4096)); // 4 KB > 1 KB cap
+      await assert.rejects(
+        () => capped.indexFile(big, 'public'),
+        /File too large/,
+        'a 4 KB file must be rejected under a 1 KB cap'
+      );
+      // A file under the cap still indexes fine — proves the guard isn't blanket-rejecting.
+      const small = path.join(tmpDir, 'small.txt');
+      fs.writeFileSync(small, 'widgets are great');
+      assert.ok(await capped.indexFile(small, 'public') > 0, 'under-cap file should index');
+    } finally {
+      capped.close();
+    }
+  });
+
   it('search returns relevant chunks from indexed files', () => {
     const results = indexer.search('reset widget', 5);
     assert.ok(results.length > 0);

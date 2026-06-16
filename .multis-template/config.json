@@ -22,7 +22,8 @@
     "baseUrl": "",
     "model": "claude-haiku-4-5-20251001",
     "temperature": 0.7,
-    "maxTokens": 2048
+    "maxTokens": 2048,
+    "max_tool_rounds": 5
   },
   "security": {
     "pin_hash": null,
@@ -53,6 +54,8 @@
   },
   "documents": {
     "maxSize": 10485760,
+    "maxPdfPages": 2000,
+    "parseTimeoutMs": 30000,
     "allowedTypes": ["pdf", "docx", "txt", "md"]
   },
   "governance": {

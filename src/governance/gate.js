@@ -199,7 +199,7 @@ function makeActionTranslator(defaultTranslator) {
  * wireGate's policy.
  */
 function ownerCheck(toolName, ctx) {
-  const shellTools = new Set(['exec', 'read_file', 'grep_files', 'find_files']);
+  const shellTools = new Set(['exec', 'read_file', 'send_file', 'grep_files', 'find_files']);
   if (!ctx?.isOwner && shellTools.has(toolName)) {
     return 'This tool requires owner privileges.';
   }

@@ -11,7 +11,8 @@ const { DocChunk } = require('./chunk');
  *   Tier 3: No TOC → one chunk per page with clean per-page text
  *   (Tier 2: font-size heading detection — deferred)
  */
-async function parsePDF(filePath) {
+async function parsePDF(filePath, opts = {}) {
+  const maxPages = opts.maxPages ?? 0;
   const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
   const buffer = fs.readFileSync(filePath);
   const data = new Uint8Array(buffer);
@@ -19,6 +20,11 @@ async function parsePDF(filePath) {
   const absPath = path.resolve(filePath);
 
   try {
+    // Reject page-count bombs before iterating pages (where memory grows).
+    if (maxPages && pdf.numPages > maxPages) {
+      throw new Error(`PDF has ${pdf.numPages} pages, exceeds limit of ${maxPages}`);
+    }
+
     // Extract per-page text (needed for both tiers)
     const pageTexts = [];
     for (let i = 1; i <= pdf.numPages; i++) {

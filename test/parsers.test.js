@@ -158,6 +158,19 @@ describe('parsePDF', () => {
       assert.ok(c instanceof DocChunk);
     }
   });
+
+  it('rejects PDFs over the page cap (page-bomb guard)', async () => {
+    const twoPage = path.join(FIXTURES, 'two-page.pdf');
+    // Sanity: parses fine when under/at the cap or when disabled.
+    assert.ok((await parsePDF(twoPage, { maxPages: 2 })).length > 0, 'at cap should parse');
+    assert.ok((await parsePDF(twoPage, { maxPages: 0 })).length > 0, 'maxPages 0 disables cap');
+    // Over the cap → throw before iterating pages.
+    await assert.rejects(
+      () => parsePDF(twoPage, { maxPages: 1 }),
+      /exceeds limit of 1/,
+      'a 2-page PDF must be rejected when maxPages is 1'
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

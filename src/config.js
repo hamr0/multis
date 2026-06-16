@@ -244,6 +244,23 @@ function loadConfig() {
     ...config.memory
   };
 
+  // Ensure a tool-round cap is always set so the bareguard gate bounds the
+  // agent loop even for configs created before this knob existed (unbounded =
+  // a runaway loop / cost amplifier).
+  if (!config.llm) config.llm = {};
+  if (config.llm.max_tool_rounds == null) config.llm.max_tool_rounds = 5;
+
+  // Document parser limits — bound untrusted attachment input (file size, PDF
+  // page count, parse wall-clock) to prevent OOM / decompression bombs.
+  if (!config.documents) config.documents = {};
+  config.documents = {
+    maxSize: 10485760,
+    maxPdfPages: 2000,
+    parseTimeoutMs: 30000,
+    allowedTypes: ['pdf', 'docx', 'txt', 'md'],
+    ...config.documents
+  };
+
   // Migrate: set first allowed user as owner if owner_id missing
   if (!config.owner_id && config.allowed_users && config.allowed_users.length > 0) {
     config.owner_id = config.allowed_users[0];

@@ -60,17 +60,39 @@ function getToolsForUser(tools, isOwner, toolsConfig) {
 
   return tools.filter(tool => {
     const setting = toolSettings[tool.name];
-    // Default owner_only based on tool name for sensitive tools
-    const ownerOnly = setting?.owner_only ?? DEFAULT_OWNER_ONLY[tool.name] ?? false;
+    // FORCE_OWNER_ONLY is a hard floor: these host-reaching tools can never be
+    // granted to a non-owner, even by a stale ~/.multis/tools.json. Other tools
+    // fall back to the tools.json setting, then the per-name default.
+    const ownerOnly = FORCE_OWNER_ONLY.has(tool.name)
+      || (setting?.owner_only ?? DEFAULT_OWNER_ONLY[tool.name] ?? false);
     if (ownerOnly && !isOwner) return false;
     return true;
   });
 }
 
+// Host-reaching tools that MUST stay owner-only regardless of tools.json. These
+// can read/exfiltrate host state or drive the machine, and a customer is never a
+// privileged principal (see security model). exec/read_file/grep_files/find_files
+// are additionally hard-denied for non-owners at the bareguard gate (ownerCheck),
+// so they don't need the floor here — but these five have no gate-level check, so
+// the registry is their only boundary.
+const FORCE_OWNER_ONLY = new Set([
+  'send_file',
+  'system_info',
+  'open_url',
+  'notify',
+  'media_control',
+]);
+
 // Default owner_only settings (used when tools.json doesn't specify)
 const DEFAULT_OWNER_ONLY = {
   exec: true,
   read_file: true,
+  send_file: true,
+  system_info: true,
+  open_url: true,
+  notify: true,
+  media_control: true,
   clipboard: true,
   screenshot: true,
   phone_call: true,
@@ -87,5 +109,6 @@ module.exports = {
   loadToolsConfig,
   buildToolRegistry,
   getToolsForUser,
-  DEFAULT_OWNER_ONLY
+  DEFAULT_OWNER_ONLY,
+  FORCE_OWNER_ONLY
 };
