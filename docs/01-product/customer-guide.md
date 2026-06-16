@@ -308,24 +308,27 @@ Set this up with `multis init` option 3 (Business chatbot).
 | `/help` | Show available commands |
 | *(plain text)* | Treated as `/ask <your text>` |
 
-### Owner-Only Commands
+### Owner / Admin Commands
 
-| Command | Description |
-|---------|-------------|
-| `/exec <command>` | Run a shell command on your machine (PIN required) |
-| `/read <path>` | Read a file or list a directory (PIN required) |
-| `/index <path> <public\|admin>` | Index a document or directory (PIN required) |
-| `/pin` | Change or set your PIN |
-| `/mode [mode] [target]` | View or set chat modes (business/silent/off) |
-| `/agent [name]` | View or assign an agent to this chat |
-| `/agents` | List all configured agents |
-| `/remind <duration> <action>` | Set a one-shot reminder (e.g. `/remind 30m call dentist`) |
-| `/cron <expr> <action>` | Set a recurring task (e.g. `/cron 0 9 * * 1-5 morning briefing`) |
-| `/jobs` | List all active reminders and cron jobs |
-| `/cancel <job-id>` | Cancel a scheduled job |
-| `/plan <goal>` | Break a goal into steps and execute them |
-| `/mode business` | Business persona menu (setup, show, clear, global default, assign chats) |
-| `@agentname <message>` | Route one message to a specific agent |
+The **owner** (super-admin, set at setup) can do everything below. A **limited admin** (a chat you designate with `/admin`) gets the staff commands — `/mode`, `/index`, `/ask` — but **not** host shell (`/exec`, `/read`) or `/admin` itself.
+
+| Command | Who | Description |
+|---------|-----|-------------|
+| `/exec <command>` | Owner | Run a shell command on your machine (PIN required) |
+| `/read <path>` | Owner | Read a file or list a directory (PIN required) |
+| `/index <path> <public\|admin>` | Admin | Index a document or directory |
+| `/pin` | Owner | Change or set your PIN |
+| `/admin` | Owner | Designate / list / remove limited admins (`/admin`, `/admin list`, `/admin remove <n>`) |
+| `/mode [mode] [target]` | Admin | View or set chat modes (business/silent/off) |
+| `/agent [name]` | Owner | View or assign an agent to this chat |
+| `/agents` | Owner | List all configured agents |
+| `/remind <duration> <action>` | Owner | Set a one-shot reminder (e.g. `/remind 30m call dentist`) |
+| `/cron <expr> <action>` | Owner | Set a recurring task (e.g. `/cron 0 9 * * 1-5 morning briefing`) |
+| `/jobs` | Owner | List all active reminders and cron jobs |
+| `/cancel <job-id>` | Owner | Cancel a scheduled job |
+| `/plan <goal>` | Owner | Break a goal into steps and execute them |
+| `/mode business` | Owner | Business persona menu (setup, show, clear, global default, assign chats) |
+| `@agentname <message>` | Owner | Route one message to a specific agent |
 
 ---
 
@@ -431,7 +434,7 @@ Index your documents so the bot can answer questions about them.
 | Markdown | `.md` | Splits on `#` headings |
 | Plain text | `.txt` | Indexed as a single chunk |
 
-**Max file size:** 10 MB
+**Max file size:** 10 MB (enforced before parsing). PDFs are also capped at 2000 pages and parsing is bounded by a wall-clock timeout, so an oversized or malformed document can't exhaust memory. All three are configurable under `documents` in `~/.multis/config.json` (`maxSize`, `maxPdfPages`, `parseTimeoutMs`).
 
 ### Indexing from Chat
 
@@ -463,9 +466,9 @@ The scope is required — the bot asks for it if you forget.
 | Scope | Who can search | Use for |
 |-------|---------------|---------|
 | `public` (or `kb`) | Everyone (customers in business mode, paired users) | Product manuals, FAQs, public knowledge |
-| `admin` | Owner only | Private notes, internal docs, sensitive info |
+| `admin` | Owner / staff | Private notes, internal docs, sensitive info |
 
-Customer messages in business mode only search `public` documents. The owner always searches everything.
+Customer messages in business mode search `public` documents plus that customer's own captured chat memory. The owner searches `public` + `admin` — but **not** other customers' captured memory by default. This is deliberate: it stops text a customer planted in their chat from later surfacing in your tool-enabled assistant as if it were a trusted instruction. (Retrieved document and memory text is also fenced as untrusted reference data for the same reason.)
 
 ### Checking Your Index
 
@@ -581,12 +584,14 @@ Restart after editing config: `multis restart`
 
 ### PIN-Protected Commands
 
-These commands require PIN authentication:
+These privileged capabilities require PIN authentication:
 - `/exec` — run shell commands
 - `/read` — read files
 - `/index` — index documents
 
-When you send a protected command, the bot asks for your PIN. After entering the correct PIN, your session is active for 24 hours (configurable).
+When you use one, the bot asks for your PIN. After entering the correct PIN, your session is active for 24 hours (configurable).
+
+**The PIN also guards the natural-language path.** If you ask in plain language ("delete the logs in ~/tmp") and the assistant goes to run a shell command or read a file while your PIN session is stale, it prompts `🔒 That action needs your PIN. Reply with your PIN:` and continues the same action once you reply. So rephrasing a command as a sentence can't sidestep the PIN. (`pin_prompt_timeout` in config bounds how long it waits.)
 
 ### Changing Your PIN
 
@@ -608,10 +613,19 @@ All tool calls (shell commands, file reads, etc.) flow through a **bareguard Gat
 - **Path restrictions:** Only allowed directories (like `~/Documents`) can be read or written
 - **Cost cap:** Optional per-run spending limit (set `max_cost_per_run` in config) — covers BOTH LLM tokens and tool execution. On halt, the bot pings you with current spend and asks whether to terminate
 - **Secrets redaction:** API keys (`ANTHROPIC_API_KEY`, etc.) are stripped from the audit log automatically
-- **Owner-only tools:** Shell exec and file read require owner privileges
-- **Audit:** Every gate decision is logged at `~/.multis/logs/gate.jsonl` (structured by phase: gate, record, approval, halt). App-level events (pairing, mode change, etc.) stay at `~/.multis/logs/audit.log`
+- **Owner-only tools:** All host-reaching tools (shell exec, file read/send, system info, opening URLs, notifications, media control) are owner-only and cannot be granted to a customer, even by editing `tools.json` — a customer is never a privileged principal
+- **Approvals go to you:** confirmation/halt prompts route to the owner's channel, never to the chat that triggered them — no one can self-approve a privileged action
+- **Audit:** Every gate decision is logged at `~/.multis/logs/gate.jsonl` (structured by phase: gate, record, approval, halt, denied-owner, denied-pin). App-level events (pairing, mode change, etc.) stay at `~/.multis/logs/audit.log`
 
 Edit `~/.multis/auth/governance.json` to customize allowed/denied commands and paths.
+
+### Business-mode rate limiting
+
+In business mode each customer is rate-limited so a contact stuck in a loop can't run up your LLM bill or overload the process. Defaults: ~10 messages/minute (burst) and 100/day per customer. When a customer hits the cap, the bot **doesn't go silent** — it sends one short "I've flagged a human to follow up" message and escalates to you, so a genuinely busy customer reaches a person instead of a wall. Tune under `security.rate_limit` in `~/.multis/config.json` (`enabled`, `burst_per_min`, `daily_per_sender`); the message is `business.rate_limit_message`.
+
+### Bounding the agent loop
+
+`llm.max_tool_rounds` (default 5) caps how many tool calls the assistant can chain in a single reply, so it can't run away. Adjust in config.
 
 ---
 
@@ -893,17 +907,51 @@ Restart after changing: `multis restart`
 
 ## 18. Adding a Second Admin
 
-Currently, multis has a single owner model — the first person to pair becomes the owner. Other paired users can use basic commands (`/ask`, `/search`, `/memory`) but not owner commands.
+There is one **super-admin** (the owner) — the first person to pair, set at setup. The super-admin is fixed and is the only one who can run host shell (`/exec`, `/read`), change the PIN, or designate other admins.
 
-To pair a second user:
+You can promote another chat to a **limited admin** — staff who help run the bot (manage chat modes, update the knowledge base) without access to your machine.
 
-1. Run `multis status` or check the startup logs for the pairing code
-2. Have the user send `/start <pairing_code>` to the bot on Telegram
-3. They'll be paired as a regular user (not owner)
+### Designate a limited admin
 
-To make someone the owner, edit `~/.multis/config.json` and set `owner_id` to their user ID, then restart.
+From an admin window, send:
 
-**Note:** There can only be one owner. Owner-only commands (`/exec`, `/read`, `/index`, `/mode`, `/pin`, etc.) are restricted to the owner.
+```
+/admin
+```
+
+The bot lists your active chats, numbered. Reply with a number, confirm, then enter your PIN:
+
+```
+Pick a chat to make a LIMITED admin (mode/index/ask — NOT shell):
+  1) Acme Support
+  2) Jordan
+Reply with a number.
+> 1
+Make "Acme Support" a limited admin (mode/index/ask, no shell)? Reply "yes" to confirm.
+> yes
+Enter your PIN to confirm:
+> ••••
+Done. "Acme Support" is now a limited admin.
+```
+
+From then on, messages from that chat are treated as a command channel: that person can use `/mode`, `/index`, `/ask` and the bot's natural-language help. They **cannot** use `/exec`, `/read`, or `/admin`.
+
+### Manage limited admins
+
+```
+/admin list            # show current limited admins
+/admin remove 1        # revoke by number
+```
+
+**What a limited admin can and can't do:**
+
+| | Super-admin (owner) | Limited admin |
+|---|---|---|
+| `/mode`, `/index`, `/ask`, monitoring | ✅ | ✅ |
+| `/exec`, `/read` (host shell) | ✅ (PIN) | ❌ |
+| `/admin`, `/pin` | ✅ | ❌ |
+
+All admins share the **one** PIN (the super-admin's), set at setup or with `/pin`.
 
 ---
 
