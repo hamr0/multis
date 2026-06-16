@@ -80,6 +80,11 @@ function ensureMultisDir() {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
+  // ~/.multis holds secrets — config.json (PIN hash + LLM API key + bot/MCP
+  // tokens), auth/, and logs/. Lock the tree to the owner (0700) so other local
+  // users can't traverse in and read them. Idempotent repair of an existing
+  // world-readable dir; best-effort (e.g. Windows).
+  try { fs.chmodSync(dir, 0o700); } catch { /* best-effort */ }
 
   // Migrate flat layout to subdirs (idempotent)
   migrateLegacy();
@@ -266,6 +271,10 @@ function saveConfig(config) {
   ensureMultisDir();
   const configPath = PATHS.config();
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8');
+  // Holds the PIN hash, LLM API key, and bot/MCP tokens — owner-only. mode on
+  // writeFileSync only applies on create, so chmod every save to repair an
+  // existing 0644 file too. Best-effort (non-POSIX FS).
+  try { fs.chmodSync(configPath, 0o600); } catch { /* best-effort */ }
 }
 
 /**
