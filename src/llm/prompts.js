@@ -66,9 +66,11 @@ function buildRAGPrompt(question, chunks, persona) {
     return `--- Document ${i + 1} [${meta}] ---\n${chunk.content}`;
   });
 
+  // Retrieved chunks are untrusted (indexed docs / captured chats). Fence them
+  // like buildMemorySystemPrompt does — the question stays outside the fence.
   return {
     system: base,
-    user: `${formattedChunks.join('\n\n')}\n\n---\nQuestion: ${question}`
+    user: `${fenceUntrusted('excerpts retrieved from indexed documents', formattedChunks.join('\n\n'))}\n\n---\nQuestion: ${question}`
   };
 }
 

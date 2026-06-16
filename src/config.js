@@ -305,7 +305,12 @@ function saveConfig(config) {
 function backupConfig() {
   const configPath = PATHS.config();
   if (fs.existsSync(configPath)) {
-    fs.copyFileSync(configPath, configPath + '.bak');
+    const backupPath = configPath + '.bak';
+    fs.copyFileSync(configPath, backupPath);
+    // The backup holds the same secrets (PIN hash, API key, tokens). copyFileSync
+    // carries the source mode, but assert 0600 like saveConfig so the .bak can
+    // never lag behind on perms. Best-effort (non-POSIX FS).
+    try { fs.chmodSync(backupPath, 0o600); } catch { /* best-effort */ }
   }
 }
 
@@ -345,7 +350,13 @@ function addAllowedUser(userId) {
  * (senderId is platform-specific, won't match Telegram owner_id).
  */
 function isOwner(userId, config, msg) {
-  if (msg && msg.isSelf) return true;
+  // On Beeper the owner is identified by the account's own note-to-self chat —
+  // `isSelf` AND `isPersonalChat`. Requiring the personal-chat signal (not bare
+  // `isSelf`) keeps the owner grant from leaning solely on the transport flag:
+  // a self-message in a random/silent chat, or in a designated limited-admin
+  // chat, no longer confers owner. Defense-in-depth over the platform's own
+  // routing gate (PRD §11.1). Telegram never sets isSelf → uses owner_id below.
+  if (msg && msg.isSelf && msg.isPersonalChat) return true;
   return String(config.owner_id) === String(userId);
 }
 

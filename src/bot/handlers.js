@@ -910,6 +910,15 @@ async function routeIndex(msg, platform, config, indexer, args) {
     return;
   }
 
+  // The `admin` scope is the owner's trusted RAG context (owner queries retrieve
+  // public+admin and inject it into the tool-enabled agent loop). A limited admin
+  // manages only the public KB — letting one write `admin` would plant trusted
+  // content into the owner's privileged context. Restrict admin scope to owner.
+  if (role === 'admin' && !isOwner(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, 'Only the owner can index to the admin scope. Use: /index <path> public');
+    return;
+  }
+
   const expanded = filePath.replace(/^~/, process.env.HOME || process.env.USERPROFILE);
 
   try {

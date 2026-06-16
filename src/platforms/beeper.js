@@ -6,6 +6,7 @@ const { BeeperboxMcpClient } = require('./beeperbox-mcp');
 const DEFAULT_MCP_URL = 'http://localhost:23375';  // beeperbox MCP transport (watch/send)
 const DEFAULT_POLL_INTERVAL = 3000;
 const MAX_PAGES_PER_TICK = 10; // has_more drain cap so one tick can't starve the loop
+const MAX_ASSET_BYTES = 25 * 1024 * 1024; // hard ceiling on a downloaded attachment (DoS guard)
 const { PATHS } = require('../config');
 
 /**
@@ -221,6 +222,7 @@ class BeeperPlatform extends Platform {
       raw: msg,
       routeAs,
       isAdminChat,
+      isPersonalChat,
       network: msg.network || meta.network || '',
     });
 
@@ -319,6 +321,15 @@ class BeeperPlatform extends Platform {
     const res = await this.mcp.callTool('download_asset', { src_url: srcUrl });
     if (!res || typeof res.data_base64 !== 'string') {
       throw new Error('download_asset returned no data');
+    }
+    // Bound the decode: the attachment is attacker-sized (a chat sender controls
+    // the file) and beeperbox returns it base64 in the MCP body. Reject before
+    // Buffer.from materializes a huge buffer (base64 length ≈ bytes * 4/3).
+    const estBytes = (res.data_base64.length * 3) / 4;
+    if (estBytes > MAX_ASSET_BYTES) {
+      throw new Error(
+        `Attachment too large: ~${(estBytes / 1048576).toFixed(1)} MB exceeds limit of ${(MAX_ASSET_BYTES / 1048576).toFixed(0)} MB`
+      );
     }
     return Buffer.from(res.data_base64, 'base64');
   }

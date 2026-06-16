@@ -109,6 +109,16 @@ class DocumentIndexer {
    * @returns {Promise<number>} - Number of chunks created
    */
   async indexBuffer(buffer, filename, scope = 'kb') {
+    // Reject an oversized buffer BEFORE writing it to disk. indexFile enforces
+    // maxSize too, but only after stat-ing the temp file — by then an
+    // attacker-sized attachment (chat sender controls the bytes) is already
+    // buffered in memory and written out. Check the in-memory length first.
+    if (this.maxSize && buffer && buffer.length > this.maxSize) {
+      throw new Error(
+        `Attachment too large: ${(buffer.length / 1048576).toFixed(1)} MB exceeds limit of ${(this.maxSize / 1048576).toFixed(1)} MB`
+      );
+    }
+
     // Write to temp file, index it, then clean up
     const tmpDir = path.join(require('../config').MULTIS_DIR, 'tmp');
     if (!fs.existsSync(tmpDir)) {

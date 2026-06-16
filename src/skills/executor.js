@@ -5,6 +5,19 @@ const { logAudit } = require('../governance/audit');
 
 const MAX_OUTPUT = 4000; // Telegram message limit ~4096 chars
 
+// The bot's own secrets live in process.env (loadEnv reads .env). A child shell
+// inherits them by default, so a command — especially one driven by the LLM
+// agent path if prompt-injected — could `echo $ANTHROPIC_API_KEY` and exfiltrate
+// them. Strip them from the exec child env; nothing a user runs via /exec needs
+// the bot's credentials.
+const SECRET_ENV_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'TELEGRAM_BOT_TOKEN', 'MCP_AUTH_TOKEN'];
+
+function scrubbedEnv() {
+  const env = { ...process.env };
+  for (const k of SECRET_ENV_KEYS) delete env[k];
+  return env;
+}
+
 /**
  * Execute a shell command. Governance (command allowlist/denylist) is handled
  * by the bareguard Gate (wired via bare-agent's wireGate), not here.
@@ -18,7 +31,8 @@ function execCommand(command, userId) {
       encoding: 'utf8',
       timeout: 10000,
       maxBuffer: 1024 * 1024,
-      shell: '/bin/bash'
+      shell: '/bin/bash',
+      env: scrubbedEnv()
     });
 
     const trimmed = output.length > MAX_OUTPUT

@@ -19,9 +19,13 @@ describe('admin model helpers', () => {
   before(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-admin-')); setMultisDir(tmp); });
   after(() => { setMultisDir(null); fs.rmSync(tmp, { recursive: true, force: true }); });
 
-  it('owner and beeper-self are always admin', () => {
+  it('owner is admin; a beeper note-to-self message is owner, bare isSelf is not', () => {
     assert.ok(isAdmin('u1', { owner_id: 'u1', admins: [] }, {}));
-    assert.ok(isAdmin('anyone', { owner_id: 'u1', admins: [] }, { isSelf: true }));
+    // Beeper owner channel = note-to-self: isSelf AND isPersonalChat.
+    assert.ok(isAdmin('anyone', { owner_id: 'u1', admins: [] }, { isSelf: true, isPersonalChat: true }));
+    // isSelf WITHOUT the note-to-self signal must NOT confer owner (PRD §11.1):
+    // a self-message in a random/silent chat is not the owner channel.
+    assert.ok(!isAdmin('anyone', { owner_id: 'u1', admins: [] }, { isSelf: true }));
   });
 
   it('a designated chat is a limited admin; others are not', () => {

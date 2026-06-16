@@ -72,4 +72,21 @@ describe('RateLimiter', () => {
     const rl = new RateLimiter({ burstPerMin: 0, dailyPerSender: 0, now });
     for (let i = 0; i < 50; i++) assert.strictEqual(rl.consume('a').allowed, true);
   });
+
+  // Security regression: without eviction the per-sender map grows once per
+  // distinct senderId forever (business mode = any stranger). A size-triggered
+  // sweep must drop senders whose every hit has aged out.
+  it('evicts fully-aged senders once the sweep threshold is crossed', () => {
+    const now = fakeClock();
+    const rl = new RateLimiter({ burstPerMin: 5, dailyPerSender: 100, now });
+    rl._sweepAt = 3; // shrink so the test doesn't need 5000 senders
+    rl.consume('a'); rl.consume('b'); rl.consume('c');
+    assert.strictEqual(rl._hits.size, 3);
+    now.advance(86_400_001); // every existing hit ages out of the 24h window
+    rl.consume('d');          // size (3) >= sweepAt → sweep runs before 'd'
+    assert.strictEqual(rl._hits.has('a'), false, 'aged sender evicted');
+    assert.strictEqual(rl._hits.has('b'), false);
+    assert.strictEqual(rl._hits.has('c'), false);
+    assert.ok(rl._hits.has('d'), 'active sender retained');
+  });
 });

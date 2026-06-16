@@ -23,6 +23,10 @@ class RateLimiter {
     this._now = now || (() => Date.now());
     this._hits = new Map();      // senderId → number[] (timestamps, ascending)
     this._notified = new Set();  // senderIds we've already escalated this block
+    // Bound total tracked senders: in business mode any stranger can open a chat,
+    // so without eviction the maps grow once per distinct senderId forever. Sweep
+    // out fully-aged senders when we cross this many keys.
+    this._sweepAt = 5000;
   }
 
   /**
@@ -36,6 +40,18 @@ class RateLimiter {
     const now = this._now();
     const minAgo = now - 60_000;
     const dayAgo = now - 86_400_000;
+
+    // Periodic eviction: drop senders whose every hit has aged out of the
+    // longest window. Triggered by size so the O(n) sweep is amortized, not
+    // per-call. Keeps both maps bounded for a long-running daemon.
+    if (this._hits.size >= this._sweepAt) {
+      for (const [k, ts] of this._hits) {
+        if (!ts.some(t => t > dayAgo)) {
+          this._hits.delete(k);
+          this._notified.delete(k);
+        }
+      }
+    }
 
     let hits = this._hits.get(key) || [];
     // Prune anything older than the longest window we track.

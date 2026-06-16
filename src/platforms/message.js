@@ -4,7 +4,7 @@
  * Beeper messages are commands only when prefixed with / from personal chats.
  */
 class Message {
-  constructor({ id, platform, chatId, chatName, senderId, senderName, isSelf, text, raw, routeAs, network, isAdminChat }) {
+  constructor({ id, platform, chatId, chatName, senderId, senderName, isSelf, text, raw, routeAs, network, isAdminChat, isPersonalChat }) {
     this.id = id;
     this.platform = platform;
     this.chatId = chatId;
@@ -19,6 +19,12 @@ class Message {
     this.routeAs = routeAs || null;
     /** @type {boolean} Beeper: a chat designated a limited admin via /admin. */
     this.isAdminChat = isAdminChat || false;
+    /**
+     * @type {boolean} Beeper: the account's own note-to-self chat (the owner
+     * channel). Gates the owner grant so `isSelf` alone — e.g. a self-message in
+     * a random/silent chat — does not confer owner (PRD §11.1).
+     */
+    this.isPersonalChat = isPersonalChat || false;
   }
 
   /**

@@ -315,3 +315,46 @@ describe('logInjectionAttempt', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Audit secret redaction + exec env scrub (security batch, /security pass)
+// ---------------------------------------------------------------------------
+
+const { logAudit, readAuditLogs } = require('../src/governance/audit');
+const { execCommand } = require('../src/skills/executor');
+const { setMultisDir } = require('../src/config');
+
+const SECRET = 'sk-ant-SECRETVALUE123456';
+
+describe('audit secret redaction + exec env scrub', () => {
+  let tmpDir;
+  let origKey;
+
+  before(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-audit-test-'));
+    setMultisDir(tmpDir);                 // redirect the audit log into tmp
+    origKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = SECRET;
+  });
+
+  after(() => {
+    if (origKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = origKey;
+    setMultisDir(null);                   // restore default dir resolution
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('replaces a known secret value with *** in logged fields', () => {
+    logAudit({ action: 'exec', user_id: 'u1', command: `curl -H "Authorization: Bearer ${SECRET}"`, status: 'success' });
+    const logs = readAuditLogs(10);
+    const last = logs[logs.length - 1];
+    assert.ok(!JSON.stringify(last).includes(SECRET), 'secret value must not appear in the audit log');
+    assert.match(last.command, /\*\*\*/);
+  });
+
+  it('exec child env does not expose the bot secret', () => {
+    const res = execCommand('printf %s "$ANTHROPIC_API_KEY"', 'u1');
+    assert.strictEqual(res.success, true);
+    assert.ok(!String(res.output).includes(SECRET), 'scrubbed key must not reach the exec child');
+  });
+});

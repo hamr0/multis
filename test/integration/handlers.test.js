@@ -508,6 +508,46 @@ describe('Owner commands', () => {
     await router(msg('/index'), platform);
     assert.match(platform.sent[0].text, /Usage/);
   });
+
+  // Security regression: the `admin` scope is the owner's trusted RAG context.
+  // A limited admin manages only the public KB — it must not be able to plant
+  // content into the owner's privileged scope.
+  it('limited admin CANNOT /index to the admin scope', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1', admins: ['staffchat'] });
+    const platform = mockPlatform();
+    let called = false;
+    const indexer = stubIndexer();
+    indexer.indexFile = async () => { called = true; return 5; };
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
+
+    await router(msg('/index /tmp/x.pdf admin', { senderId: 'staff', chatId: 'staffchat' }), platform);
+    assert.strictEqual(called, false, 'admin-scope index must not run for a limited admin');
+    assert.match(platform.lastTo('staffchat').text, /only the owner/i);
+  });
+
+  it('limited admin CAN /index to the public scope', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1', admins: ['staffchat'] });
+    const platform = mockPlatform();
+    let indexedRole = null;
+    const indexer = stubIndexer();
+    indexer.indexFile = async (p, role) => { indexedRole = role; return 5; };
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
+
+    await router(msg('/index /tmp/x.pdf public', { senderId: 'staff', chatId: 'staffchat' }), platform);
+    assert.strictEqual(indexedRole, 'public');
+  });
+
+  it('owner CAN /index to the admin scope', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    let indexedRole = null;
+    const indexer = stubIndexer();
+    indexer.indexFile = async (p, role) => { indexedRole = role; return 5; };
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
+
+    await router(msg('/index /tmp/x.pdf admin'), platform);
+    assert.strictEqual(indexedRole, 'admin');
+  });
 });
 
 // ---------------------------------------------------------------------------
