@@ -77,7 +77,16 @@ class DocumentIndexer {
       fs.mkdirSync(tmpDir, { recursive: true });
     }
 
-    const tmpPath = path.join(tmpDir, filename);
+    // filename is attacker-controlled (a chat sender names the attachment), so
+    // strip any directory components before joining — basename neutralizes
+    // path traversal (`../../etc/x`, absolute paths) while preserving the
+    // extension the parser dispatches on. Reject degenerate names outright.
+    const safeName = path.basename(filename || '');
+    if (!safeName || safeName === '.' || safeName === '..') {
+      throw new Error('Invalid attachment filename');
+    }
+
+    const tmpPath = path.join(tmpDir, safeName);
     fs.writeFileSync(tmpPath, buffer);
 
     try {

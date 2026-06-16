@@ -257,4 +257,28 @@ describe('SQLite smoke: indexer with real files', () => {
     assert.ok(results.length > 0);
     assert.match(results[0].content, /quantum/i);
   });
+
+  it('indexBuffer does not let a traversal filename escape the temp dir', async () => {
+    // Regression: attachment filenames are attacker-controlled (a chat sender
+    // names the file). A raw path.join(tmpDir, filename) let `../../` escape and
+    // overwrite/delete arbitrary files. Place a sentinel exactly where a raw
+    // join WOULD land, then prove a traversal name leaves it untouched.
+    const tmpRoot = path.join(require('../../src/config').MULTIS_DIR, 'tmp');
+    const evilName = path.join('..', '..', '..', '..', '..', '..', '..', '..', 'tmp', `multis-sentinel-${process.pid}.txt`);
+    const escapeTarget = path.join(tmpRoot, evilName); // clamps to <fsroot>/tmp/multis-sentinel-*.txt
+    fs.mkdirSync(path.dirname(escapeTarget), { recursive: true });
+    fs.writeFileSync(escapeTarget, 'DO NOT TOUCH');
+    try {
+      await indexer.indexBuffer(Buffer.from('pwned'), evilName, 'public');
+      assert.ok(fs.existsSync(escapeTarget), 'traversal filename must not delete a file outside the temp dir');
+      assert.strictEqual(fs.readFileSync(escapeTarget, 'utf8'), 'DO NOT TOUCH', 'traversal filename must not overwrite a file outside the temp dir');
+    } finally {
+      if (fs.existsSync(escapeTarget)) fs.unlinkSync(escapeTarget);
+    }
+  });
+
+  it('indexBuffer rejects a degenerate filename', async () => {
+    await assert.rejects(() => indexer.indexBuffer(Buffer.from('x'), '..', 'public'), /Invalid attachment filename/);
+    await assert.rejects(() => indexer.indexBuffer(Buffer.from('x'), '', 'public'), /Invalid attachment filename/);
+  });
 });
