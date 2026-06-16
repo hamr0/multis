@@ -1,19 +1,10 @@
 const fs = require('fs');
-const os = require('os');
-const path = require('path');
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const { createMessageRouter, buildAgentRegistry, resolveAgent, clearAdminPauses } = require('../../src/bot/handlers');
 const { updateChatMeta, backupConfig } = require('../../src/config');
 const { PinManager, hashPin } = require('../../src/security/pin');
 const { createTestEnv, mockPlatform, mockLLM, msg } = require('../helpers/setup');
-
-/** Create a real temp file that downloadAsset can "return" so fs.readFileSync works */
-function tmpFile(content = 'test content') {
-  const p = path.join(os.tmpdir(), `multis-test-${Date.now()}`);
-  fs.writeFileSync(p, content);
-  return p;
-}
 
 // ---------------------------------------------------------------------------
 // Pairing
@@ -878,7 +869,7 @@ describe('Beeper file indexing', () => {
     let indexedName = null, indexedRole = null;
     const indexer = stubIndexer();
     indexer.indexBuffer = async (buf, name, role) => { indexedName = name; indexedRole = role; return 3; };
-    platform.downloadAsset = async (url) => tmpFile();
+    platform.downloadAsset = async (url) => Buffer.from('test content');
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
     const m = msg('/index kb', {
@@ -925,7 +916,7 @@ describe('Beeper file indexing', () => {
     let indexedRole = null;
     const indexer = stubIndexer();
     indexer.indexBuffer = async (buf, name, role) => { indexedRole = role; return 5; };
-    platform.downloadAsset = async () => tmpFile();
+    platform.downloadAsset = async () => Buffer.from('test content');
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
     env.config._pendingIndex = {
@@ -946,7 +937,7 @@ describe('Beeper file indexing', () => {
     let indexedRole = null;
     const indexer = stubIndexer();
     indexer.indexBuffer = async (buf, name, role) => { indexedRole = role; return 2; };
-    platform.downloadAsset = async () => tmpFile();
+    platform.downloadAsset = async () => Buffer.from('test content');
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
     env.config._pendingIndex = {

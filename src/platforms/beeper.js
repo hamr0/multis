@@ -214,11 +214,21 @@ class BeeperPlatform extends Platform {
       network: msg.network || meta.network || '',
     });
 
-    // NOTE: poll_messages does not carry attachments (media arrives as
-    // type:'MEDIA', text '[MEDIA]'). Attachment indexing via Beeper is paused
-    // pending a beeperbox verb (attachments on the normalized message +/- an
-    // asset-retrieval verb) — filed in the PRD lib-feedback log. No shim here
-    // (customer contract: push the lib, don't paper over).
+    // Attachments: beeperbox (>=0.7.0) surfaces attachments[] on each message
+    // ({file_name, mime_type, src_url, size, is_voice_note}). Map to multis's
+    // _attachments shape (fileName/srcURL) that the handlers indexing pipeline
+    // consumes; bytes are fetched on demand via the download_asset verb
+    // (downloadAsset below), so doc-indexing works over a remote :23375-only
+    // beeperbox too — no raw :23373 needed.
+    if (Array.isArray(msg.attachments) && msg.attachments.length) {
+      normalized._attachments = msg.attachments.map((a) => ({
+        fileName: a.file_name || '',
+        srcURL: a.src_url || '',
+        mimeType: a.mime_type || '',
+        size: a.size,
+        isVoiceNote: a.is_voice_note === true,
+      }));
+    }
 
     try {
       await this._messageCallback(normalized, this);
@@ -283,17 +293,20 @@ class BeeperPlatform extends Platform {
   }
 
   /**
-   * Download an asset from the raw Beeper Desktop API (beeperbox also exposes
-   * :23373). Retained for the asset path; reachable once beeperbox surfaces
-   * attachments on polled messages.
-   * @param {string} mxcUrl - mxc:// URI (possibly with encryptedFileInfoJSON param)
-   * @returns {string} local file path
+   * Fetch an attachment's bytes via beeperbox's `download_asset` MCP verb.
+   * The verb proxies Beeper's asset serve and returns the bytes base64-encoded
+   * over the MCP line (:23375), so this works against a remote beeperbox where
+   * the raw :23373 API is not reachable. Callers already hold the attachment's
+   * file_name from _attachments, so we reference by src_url (bytes only).
+   * @param {string} srcUrl - attachment src_url (mxc:// / localmxc:// / file://)
+   * @returns {Promise<Buffer>} the attachment bytes
    */
-  async downloadAsset(mxcUrl) {
-    const result = await this._api('POST', '/v1/assets/download', { url: mxcUrl });
-    if (result.error) throw new Error(`Download failed: ${result.error}`);
-    // srcURL is "file:///path" — strip protocol
-    return result.srcURL.replace(/^file:\/\//, '');
+  async downloadAsset(srcUrl) {
+    const res = await this.mcp.callTool('download_asset', { src_url: srcUrl });
+    if (!res || typeof res.data_base64 !== 'string') {
+      throw new Error('download_asset returned no data');
+    }
+    return Buffer.from(res.data_base64, 'base64');
   }
 
   getAdminChatIds() {

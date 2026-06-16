@@ -271,14 +271,14 @@ Changes made via bot commands (`/mode business`, `/mode`, `/agent`, `/pin`) are 
 
 **Honest limitations:**
 - **~25 recent chats.** Beeper's live-sync keeps only the most-recent chats hot, so very idle chats may not surface in the watch feed. This is a Beeper-API limit, not multis's.
-- **Attachments are paused over a remote link.** Receiving a file (PDF/doc) for indexing works when beeperbox's raw API is reachable locally; over a remote MCP-only connection it's pending a beeperbox attachment verb. Sending text and reading messages are unaffected.
+- **Attachments work over local and remote** (requires beeperbox ≥ 0.7.0). Receiving a file (PDF/doc) for indexing works on any deploy shape — the bytes come through beeperbox's `download_asset` MCP verb on `:23375`, so a remote MCP-only connection works too (no raw Beeper API needed).
 - **Echo-guard is reliable** — beeperbox tags the bot's own sends by exact message id, so multis never responds to itself (no fragile text-matching).
 
 **Commands:** Use the `/` prefix in your personal (Note to Self) chat. Commands are only accepted from messages you send yourself — not from contacts.
 
 **Business mode:** In chats set to business mode, incoming messages from contacts trigger automatic LLM responses. Your self-sent messages in those chats are treated as commands.
 
-**File uploads:** Send a document in Beeper; the bot asks for the scope (public/admin/skip) before indexing. (Available when beeperbox's asset path is reachable — see limitations.)
+**File uploads:** Send a document in Beeper; the bot asks for the scope (public/admin/skip) before indexing. (Requires beeperbox ≥ 0.7.0 — works on local and remote deploys.)
 
 ### Using Both Together
 

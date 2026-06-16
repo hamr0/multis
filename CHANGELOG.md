@@ -8,6 +8,15 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 - **CI:** the publish workflow now polls the npm registry for ~2 min (was ~15s; `--prefer-online` skips npm's view cache) and accepts an `exit 0` publish even if the registry hasn't reflected it yet, so a successful-but-slow-to-reflect publish no longer reports a false failure.
 - **`publish.yml` is now manual-only (`workflow_dispatch`) — npm OIDC trusted publishing with provenance, idempotent, and verifies the registry end-state.**
 
+### Baresuite migration — M-B step 3, Beeper attachments consumption (beeperbox v0.7.0)
+
+**Beeper-sourced document indexing is un-paused** — the gap noted in Phase 2 ("owner sends a PDF → KB") is closed by consuming beeperbox **v0.7.0**'s attachment verbs (no shim — the lib grew the capability, multis consumes its public API).
+
+- **`attachments[]` → `_attachments`.** `BeeperPlatform._handleMessage` now maps beeperbox's normalized `attachments[]` (`{type,file_name,mime_type,src_url,size,is_voice_note}`) onto the message's `_attachments` (`{fileName,srcURL,mimeType,size,isVoiceNote}`) that the `handlers.js` indexing pipeline already consumed. The dormant owner-`/index`, scope-prompt, and silent-capture paths re-light.
+- **`downloadAsset()` → the `download_asset` MCP verb.** Replaces the raw `:23373` `/v1/assets/download` call; returns the attachment **bytes as a Buffer** (base64 over the MCP line). This is what makes attachment indexing work against a **remote `:23375`-only beeperbox**, not just a local one. The three `handlers.js` call sites drop the old path→`readFileSync` hop.
+- **Verified live against the v0.7.0 container:** a real 706112-byte PDF round-trips byte-exact (valid `%PDF-` header) via both `download_asset` reference paths *and* through `BeeperPlatform.downloadAsset`. **442/442 green** (+4 adapter tests: attachment mapping, no-attachments case, verb call + args, no-data throw — mutation-proven).
+- **Follow-up (multis-side, deferred):** the adapter's raw-`:23373` plumbing (`_api`/`baseUrl`/`_loadToken`) is now orphaned and can be removed — multis becomes a pure MCP client for Beeper end-to-end.
+
 ### Baresuite migration — M-B step 3, Phase 3 (backend validation, MCP chat discovery, onboarding reframe)
 
 - **3a — startup validation/logging:** `BeeperPlatform.start()` distinguishes an auth failure (401/403 → check `mcp_token`) from an unreachable endpoint, warns (without aborting) when beeperbox is reachable but reports 0 accounts, and logs the connected networks.

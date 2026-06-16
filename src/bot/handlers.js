@@ -335,8 +335,7 @@ function createMessageRouter(config, deps = {}) {
       const scope = choice === '1' ? 'public' : 'admin';
       try {
         await platform.send(msg.chatId, `Downloading and indexing: ${pending.fileName} (${scope})...`);
-        const localPath = await platform.downloadAsset(pending.srcURL);
-        const buffer = require('fs').readFileSync(localPath);
+        const buffer = await platform.downloadAsset(pending.srcURL);
         const count = await indexer.indexBuffer(buffer, pending.fileName, scope);
         await platform.send(msg.chatId, `Indexed ${count} chunks from ${pending.fileName} [${scope}]`);
         logAudit({ action: 'index_upload', user_id: msg.senderId, filename: pending.fileName, chunks: count, scope, platform: 'beeper' });
@@ -2002,8 +2001,7 @@ async function handleBeeperFileIndex(msg, platform, config, indexer) {
 
   try {
     await platform.send(msg.chatId, `Downloading and indexing: ${fileName} (${scope})...`);
-    const localPath = await platform.downloadAsset(srcURL);
-    const buffer = require('fs').readFileSync(localPath);
+    const buffer = await platform.downloadAsset(srcURL);
     const count = await indexer.indexBuffer(buffer, fileName, scope);
     await platform.send(msg.chatId, `Indexed ${count} chunks from ${fileName} [${scope}]`);
     logAudit({ action: 'index_upload', user_id: msg.senderId, filename: fileName, chunks: count, scope, platform: 'beeper' });
@@ -2079,8 +2077,7 @@ async function handleSilentAttachment(msg, platform, config, indexer, source) {
 
     try {
       const scope = `user:${msg.chatId}`;
-      const localPath = await platform.downloadAsset(attachment.srcURL || attachment.id);
-      const buffer = require('fs').readFileSync(localPath);
+      const buffer = await platform.downloadAsset(attachment.srcURL || attachment.id);
       const count = await indexer.indexBuffer(buffer, attachment.fileName, scope);
       logAudit({ action: 'silent_index', user_id: msg.senderId, filename: attachment.fileName, chunks: count, scope, platform: 'beeper' });
     } catch (err) {

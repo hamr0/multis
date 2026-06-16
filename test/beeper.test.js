@@ -34,7 +34,7 @@ function makeConfig(overrides = {}) {
 }
 
 // A normalized beeperbox message (the poll_messages / read_chat schema).
-function bbMsg({ id, chat_id = 'c1', text = '', is_self = false, source = 'external', network = 'telegram', sender_name = '', timestamp = '2026-06-16T00:00:00.000Z' } = {}) {
+function bbMsg({ id, chat_id = 'c1', text = '', is_self = false, source = 'external', network = 'telegram', sender_name = '', timestamp = '2026-06-16T00:00:00.000Z', attachments = [] } = {}) {
   return {
     id: String(id),
     chat_id,
@@ -47,6 +47,7 @@ function bbMsg({ id, chat_id = 'c1', text = '', is_self = false, source = 'exter
     reply_to: null,
     source,
     client_tag: null,
+    attachments,
   };
 }
 
@@ -614,6 +615,83 @@ describe('BeeperPlatform', () => {
       await bp._poll();
       assert.strictEqual(received.length, 1);
       assert.strictEqual(received[0].chatId, 'cB');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // attachments — beeperbox (>=0.7.0) attachments[] → _attachments, and the
+  // download_asset MCP verb (no raw :23373; works on a remote :23375 beeperbox)
+  // -------------------------------------------------------------------------
+
+  describe('attachments', () => {
+    function makeBp(loadBeeper, { pollQueue, chats } = {}) {
+      const { BeeperPlatform } = loadBeeper();
+      const bp = new BeeperPlatform(makeConfig());
+      bp._initialized = true;
+      bp.mcp = fakeMcp({ pollQueue, chats });
+      return bp;
+    }
+
+    it('maps beeperbox attachments[] onto the normalized message _attachments', async () => {
+      const bp = makeBp(loadBeeper, {
+        pollQueue: [{ cursor: 'c1', has_more: false, messages: [
+          bbMsg({ id: '10', text: '/index kb', is_self: true, attachments: [
+            { type: 'unknown', file_name: 'resume.pdf', mime_type: 'application/pdf',
+              src_url: 'file:///root/.config/BeeperTexts/media/abc', size: 706112, is_voice_note: false },
+          ] }),
+        ] }],
+        chats: { c1: { title: 'Notes', is_note_to_self: true } },
+      });
+      const received = [];
+      bp.onMessage(async (msg) => received.push(msg));
+      await bp._poll();
+      assert.strictEqual(received.length, 1);
+      assert.deepStrictEqual(received[0]._attachments, [{
+        fileName: 'resume.pdf',
+        srcURL: 'file:///root/.config/BeeperTexts/media/abc',
+        mimeType: 'application/pdf',
+        size: 706112,
+        isVoiceNote: false,
+      }]);
+    });
+
+    it('leaves _attachments unset when the message carries no attachments', async () => {
+      const bp = makeBp(loadBeeper, {
+        pollQueue: [{ cursor: 'c1', has_more: false, messages: [
+          bbMsg({ id: '11', text: 'hi', is_self: true }),
+        ] }],
+        chats: { c1: { title: 'Notes', is_note_to_self: true } },
+      });
+      const received = [];
+      bp.onMessage(async (msg) => received.push(msg));
+      await bp._poll();
+      assert.strictEqual(received.length, 1);
+      assert.strictEqual(received[0]._attachments, undefined);
+    });
+
+    it('downloadAsset fetches bytes via the download_asset verb and returns a Buffer', async () => {
+      const { BeeperPlatform } = loadBeeper();
+      const bp = new BeeperPlatform(makeConfig());
+      let calledWith = null;
+      bp.mcp = {
+        async callTool(name, args) {
+          calledWith = { name, args };
+          return { content_type: 'application/pdf', encoding: 'base64',
+            data_base64: Buffer.from('%PDF-1.4 hello').toString('base64') };
+        },
+      };
+      const buf = await bp.downloadAsset('file:///root/.config/BeeperTexts/media/abc');
+      assert.strictEqual(calledWith.name, 'download_asset');
+      assert.deepStrictEqual(calledWith.args, { src_url: 'file:///root/.config/BeeperTexts/media/abc' });
+      assert.ok(Buffer.isBuffer(buf));
+      assert.strictEqual(buf.toString(), '%PDF-1.4 hello');
+    });
+
+    it('downloadAsset throws when the verb returns no data', async () => {
+      const { BeeperPlatform } = loadBeeper();
+      const bp = new BeeperPlatform(makeConfig());
+      bp.mcp = { async callTool() { return { content_type: 'application/pdf' }; } };
+      await assert.rejects(() => bp.downloadAsset('mxc://x'), /no data/);
     });
   });
 

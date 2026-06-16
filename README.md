@@ -52,7 +52,7 @@ multis's Beeper integration is provided by **[beeperbox](https://github.com/hamr
 }
 ```
 
-Set `BEEPER_TOKEN` (or `platforms.beeper.token`) too — the same token beeperbox uses — for asset/attachment retrieval. Validated end-to-end against a beeperbox 0.6.0 container.
+Attachment/asset retrieval (PDF/doc indexing from Beeper) goes through beeperbox's `download_asset` MCP verb on `:23375` — no raw Beeper token needed in multis, and it works over a remote MCP-only connection. Requires beeperbox ≥ 0.7.0. Validated end-to-end against a beeperbox 0.7.0 container.
 
 ## How It Works
 

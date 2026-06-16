@@ -29,9 +29,14 @@ The ask is to make that a *supported, safe, documented* path.
 ## The actual gaps to develop
 
 **1. A first-class entry point / distribution.** Today you must clone the repo and run a file by path.
-Provide a supported install: an npm package with a `bin` (e.g. `npx @beeperbox/mcp` / `beeperbox-mcp`)
-— trivial since it's zero-dep — or, at minimum, a documented, version-pinned standalone invocation.
-*(beeperbox's call on npm-bin vs documented-file.)*
+Provide a supported install: an npm package with a `bin` — trivial since it's zero-dep — or, at minimum,
+a documented, version-pinned standalone invocation.
+**DECISION (owner, 2026-06-16): publish an unscoped npm package `beeperbox-mcp` with a `bin`** —
+consumers run `npx beeperbox-mcp`. Chosen over scoped/unpublished/file-only because it's the only option
+consistent with the rest of the suite (`bare-agent`/`bareguard`/`litectx`/`barebrowse`/`baremobile` are
+all unscoped npm). Implies: an npm account, an `NPM_TOKEN` secret, and a gated publish step in beeperbox's
+`release.yml` (a beeperbox-repo CI change — sign-off + token live there, not in multis). multis is
+transport-agnostic: it only needs a reachable MCP URL, so this packaging choice does not affect multis.
 
 **2. 🐛 Sent-ledger path defaults to a container-only location.** `ledgerPath()` returns
 `/root/.config/beeperbox-sent-ledger.json` (`server.js:488`). On a normal host (non-root, no `/root`)
