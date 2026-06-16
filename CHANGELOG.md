@@ -8,6 +8,15 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 - **CI:** the publish workflow now polls the npm registry for ~2 min (was ~15s; `--prefer-online` skips npm's view cache) and accepts an `exit 0` publish even if the registry hasn't reflected it yet, so a successful-but-slow-to-reflect publish no longer reports a false failure.
 - **`publish.yml` is now manual-only (`workflow_dispatch`) — npm OIDC trusted publishing with provenance, idempotent, and verifies the registry end-state.**
 
+### Baresuite migration — M-B step 3, Phase 3 (backend validation, MCP chat discovery, onboarding reframe)
+
+- **3a — startup validation/logging:** `BeeperPlatform.start()` distinguishes an auth failure (401/403 → check `mcp_token`) from an unreachable endpoint, warns (without aborting) when beeperbox is reachable but reports 0 accounts, and logs the connected networks.
+- **3b — chat discovery off raw `:23373`:** new `BeeperPlatform.listInbox()` over the `list_inbox` MCP verb; `findBeeperChat()` and `/mode`'s chat listing now use it, so a remote `:23375`-only beeperbox works end-to-end. (`downloadAsset` still uses raw `:23373` until beeperbox ships an attachments verb.)
+- **3e — onboarding reframe (guide + wizard):**
+  - **Wizard (`setup-beeper.js`) retired the OAuth-PKCE-against-`:23373` flow.** multis no longer logs itself into Beeper Desktop — the Beeper token lives in beeperbox. The wizard now prompts for the beeperbox MCP URL (+ optional token), verifies via `listAccounts`, lists accounts, and detects the Telegram bot chat via `list_inbox`. `multis doctor` / post-start / status now probe the MCP endpoint instead of `:23373/v1/spec`.
+  - **Customer guide** reframed to the three deploy shapes (full container / lite / remote) with a topology diagram and an honest limitations matrix; the old "Beeper can't run on a VPS" guidance is reversed (the container runs headless).
+- **Tests:** +`listInbox`, +`start` zero-accounts/auth-failure cases. 438/438 green; echo-guard and drain-cap mechanism tests mutation-proven; both the adapter and the wizard helpers live-smoked against a running container.
+
 ### Baresuite migration — M-B step 3, Phase 2 (rewire beeper.js onto beeperbox MCP)
 
 **`src/platforms/beeper.js` now consumes beeperbox's MCP verbs** instead of walking the raw `/v1/chats` API — multis is a pure MCP client for watch/send (only `downloadAsset` still touches raw `:23373`, pending an attachments verb). **Bare Beeper Desktop is still supported**, not dropped: beeperbox's `mcp/server.js` is zero-dep vanilla Node and takes `BEEPER_API`, so it runs standalone against an existing local Desktop ("lite mode") and presents the same verbs as the full container. multis talks MCP to whichever shape is deployed — container, local-lite, or remote.

@@ -717,12 +717,12 @@ multis init
   │   ├─ Wait for /start (60s) → auto-pair as owner
   │   └─ Timeout: warn, continue (pair later)
   │
-  ├─ Step 2b: Beeper setup (if selected)
-  │   ├─ Re-init: shows "configured (url) ✓" + Enter to keep
-  │   ├─ Check Desktop API at localhost:23373
-  │   ├─ OAuth PKCE flow (reuses setup-beeper.js exports)
-  │   ├─ List connected accounts
-  │   └─ Show always-on warnings + recovery key reminder
+  ├─ Step 2b: Beeper setup (if selected) — via beeperbox MCP
+  │   ├─ Re-init: shows "configured (mcp_url) ✓" + Enter to keep
+  │   ├─ Prompt beeperbox MCP URL (:23375) + optional MCP token
+  │   ├─ Verify via listAccounts verb (reuses setup-beeper.js exports)
+  │   ├─ List connected accounts; detect bot chat via list_inbox
+  │   └─ Show always-on warnings (beeperbox must be running)
   │
   ├─ Step 3: LLM provider
   │   ├─ Re-init: shows "Provider (model) ✓" + Enter to keep
