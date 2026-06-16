@@ -35,13 +35,15 @@ Think of it as a private assistant with your laptop's keys — but one that alwa
 
 ## Connection modes
 
-multis meets you wherever your chats already live. There are **three modes** — pick one, or run several at once.
+These modes are about **how chats reach multis** — pick one, or run several at once.
 
 | Mode | What you get | What it needs | Best for |
 |------|--------------|---------------|----------|
 | **Telegram** | A private bot, working in minutes | A bot token. Nothing else. | Getting started, zero infrastructure |
-| **beeperbox — local** | WhatsApp/Signal/Discord/… 50+ networks via Beeper, on the machine you already use | beeperbox running on your laptop | Everyday use on your own machine |
-| **beeperbox — remote** | The same 50+ networks, off your daily driver | beeperbox on a Pi or VPS, reachable over the network | Always-on, no screen attached |
+| **beeperbox — local** | WhatsApp/Signal/Discord/… 50+ networks via Beeper, on the same machine as multis | Beeper Desktop + beeperbox alongside multis (your laptop, or a GUI home server) | When Beeper Desktop already runs next to multis |
+| **beeperbox — remote** | The same 50+ networks, bridge living elsewhere | beeperbox (container) on a Pi or VPS, reachable over the network | When the bridge should stay off the machine multis runs on |
+
+> **Personal assistant or chatbot? That's set by where *multis* runs — a separate choice from the modes above.** Run multis on a machine you own (your laptop, or a GUI home server) and it's a **personal assistant**: it can act on *that* machine (`/exec`, `/read`) and answer your chats. Run multis on a VPS and it's an **always-on chatbot**: it controls the VPS, not your personal files. The mode above decides *how chats get in*; this decides *what multis can do*. (A GUI home server gives you both at once — personal-assistant reach **and** always-on.)
 
 Telegram is always available and needs no extra moving parts. Both beeperbox modes are the **same component** — [beeperbox](https://github.com/hamr0/beeperbox) — just running locally or on another box; the only thing that changes is the `mcp_url` you point at. It exposes Beeper's *watch / send / fetch* capabilities as a small set of MCP verbs, and multis is a **pure MCP client** that never touches Beeper's raw API:
 
