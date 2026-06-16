@@ -34,16 +34,21 @@ multis start            # run as background daemon
 
 See the **[Customer Guide](docs/01-product/customer-guide.md)** for full setup instructions, command reference, and troubleshooting.
 
-### Self-hosting Beeper on a VPS (no laptop) — beeperbox
+### Beeper support runs through beeperbox
 
-The Beeper platform normally talks to a local Beeper Desktop. To run headless on a VPS instead, point multis at **[beeperbox](https://github.com/hamr0/beeperbox)** — a Docker container that exposes the same Beeper Desktop API. It's a **config-only swap**, no code change:
+multis's Beeper integration is provided by **[beeperbox](https://github.com/hamr0/beeperbox)** — a Docker container that exposes Beeper's watch/send capabilities as MCP verbs. multis talks to beeperbox's **MCP transport** on `:23375` (cursor-based `poll_messages`, exact-id echo-guard, `send_message`); a bare local Beeper Desktop (which has no MCP transport) is no longer a target of the adapter. beeperbox runs on your laptop, a Raspberry Pi, or a VPS — headless, no GUI display needed.
 
 ```jsonc
 // ~/.multis/config.json
-"platforms": { "beeper": { "url": "http://localhost:23373", "token": "<beeperbox token>" } }
+"platforms": {
+  "beeper": {
+    "mcp_url": "http://localhost:23375",    // beeperbox MCP transport
+    "mcp_token": "<MCP_AUTH_TOKEN, if set>" // optional; loopback needs none
+  }
+}
 ```
 
-(Or export `BEEPER_TOKEN` — the same env var beeperbox uses.) Validated end-to-end against a beeperbox container.
+Set `BEEPER_TOKEN` (or `platforms.beeper.token`) too — the same token beeperbox uses — for asset/attachment retrieval. Validated end-to-end against a beeperbox 0.6.0 container.
 
 ## How It Works
 
