@@ -127,32 +127,36 @@ multis init
 
 Run `multis init` to set everything up interactively. The wizard walks through four steps and can be re-run at any time to change settings.
 
-### Step 1: Choose Your Mode
+### Step 1: What do you want?
+
+First, pick what the bot is *for*:
 
 ```
 What do you need?
-  1. Personal assistant (Telegram only)
-  2. Personal assistant (Beeper) — recommended
-  3. Business chatbot (Beeper) — with optional Telegram admin channel
+  1) Personal assistant   — your private AI: commands, your docs, search
+  2) Business chatbot     — auto-responds to customers, escalates to you
 ```
 
-- **Option 1** sets up Telegram only. Simple, works anywhere.
-- **Option 2** connects Beeper, giving you access to WhatsApp, Signal, and other bridges through a single bot.
-- **Option 3** enables business mode where the bot auto-responds to customer messages on Beeper, while you manage it from Telegram.
+Then the wizard branches on that choice:
+
+**Personal — how do you want to run it?**
+- **1) Your personal bot** — just a Telegram bot. Nothing else to install.
+- **2) Personal bot + messenger assistant** — Telegram **+** Beeper, connecting all your messengers (WhatsApp · Signal · Telegram · Messenger + 50 more). Command it from Telegram or your Beeper Note-to-self.
+
+**Business — runs through Beeper.** A Telegram *bot* only sees people who message the bot directly — it can't reach your real contacts. To answer customers on their own channels you bridge them through Beeper, so business always uses Beeper, controlled from your Beeper Note-to-self. The wizard offers to also add Telegram as a backup admin channel.
 
 ### Step 2: Connect Platforms
 
-**Telegram:**
+**Telegram** (your personal bot, or a business admin channel):
 1. Open Telegram, search for `@BotFather`
 2. Send `/newbot`, pick a name and username
-3. Copy the bot token (looks like `123456:ABC-DEF...`)
-4. Paste it into the wizard
-5. The wizard verifies the token, then waits up to 60 seconds for you to open the bot in Telegram and send `/start` to pair as owner
+3. Copy the bot token (looks like `123456:ABC-DEF...`) and paste it in
+4. The wizard verifies the token, then waits up to 60 seconds for you to open the bot and send `/start` — that pairs you as **owner** (`owner_id`).
 
-**Beeper (via beeperbox):**
-1. Get beeperbox running first — the Docker container, or its lite server against your local Beeper Desktop (see [Platforms → Beeper](#beeper) for the three shapes and [beeperbox](https://github.com/hamr0/beeperbox) for setup + the Beeper token).
-2. In the wizard, enter your beeperbox MCP URL (default `http://localhost:23375`) and an MCP token if you set one.
-3. The wizard verifies it can reach beeperbox and lists your connected accounts (WhatsApp, Signal, etc.) for confirmation.
+**Beeper** (via beeperbox):
+1. Get beeperbox running first — the Docker container, or its lite server against your local Beeper Desktop (see [Platforms → Beeper](#beeper) for the shapes and [beeperbox](https://github.com/hamr0/beeperbox) for setup + the Beeper token).
+2. The wizard **probes `http://localhost:23375` automatically**: if a beeperbox is already running it shows your connected accounts (WhatsApp, Signal, etc.) and you press Enter to use it — no URL or token to type. Otherwise it asks for the MCP URL, plus an MCP token *only* if you exposed beeperbox over a network. A local/loopback box needs no token — and this MCP token is **not** your Beeper Desktop `BEEPER_TOKEN`.
+3. With Beeper you're the **owner via your Note-to-self chat** (no pairing code) — just open Note-to-self and send `/help`.
 
 ### Step 3: Choose an LLM Provider
 
@@ -235,7 +239,7 @@ Changes made via bot commands (`/mode business`, `/mode`, `/agent`, `/pin`) are 
 
 **How it works:** multis uses the Telegram Bot API via long polling. Your bot receives messages in real time as long as multis is running.
 
-**Pairing:** The first person to send `/start <pairing_code>` becomes the owner. The pairing code is printed when multis starts. Additional users can pair with the same code.
+**Pairing:** The first person to send `/start <pairing_code>` becomes the owner. The pairing code is printed when multis starts. Additional users can pair with the same code. *(Pairing is Telegram-only — on Beeper there's no code: you're the owner via your Note-to-self chat, detected automatically. See [Beeper](#beeper).)*
 
 **Commands:** All commands use the `/` prefix (`/ask`, `/exec`, `/help`, etc.). Plain text messages are treated as questions.
 
