@@ -16,7 +16,7 @@ const { getPlatform } = require('../tools/platform');
 const { Loop, Retry, CircuitBreaker } = require('bare-agent');
 const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler');
 const { createGate } = require('../governance/gate');
-const { createHumanPrompt, handleHumanReply, hasPendingHumanReply } = require('../governance/human-channel');
+const { createHumanPrompt, createPinChallenge, handleHumanReply, hasPendingHumanReply } = require('../governance/human-channel');
 const PKG_VERSION = require('../../package.json').version;
 
 // ---------------------------------------------------------------------------
@@ -98,9 +98,17 @@ function createGovernanceCarrier(config, opts = {}) {
           pinManager: opts.pinManager,
           timeoutMs: (config?.security?.checkpoint_timeout || 60) * 1000,
         });
+        // Capability-layer PIN (#5): privileged tools on the agent path prompt
+        // for PIN via the same reply-wait the approval flow uses.
+        const pinChallenge = opts.pinChallenge || createPinChallenge({
+          platformRegistry,
+          pinManager: opts.pinManager,
+          timeoutMs: (config?.security?.pin_prompt_timeout || 120) * 1000,
+        });
         const built = await createGate({
           config,
           humanPrompt,
+          pinChallenge,
           auditPath: opts.auditPath,
           budgetFile: opts.budgetFile,
           fileless: opts.fileless,

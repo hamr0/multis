@@ -72,6 +72,10 @@ const INJECTION_ASK_PATTERNS = [
 // so an "always ask" declared on tool names lands on the type the gate evaluates.
 const TOOL_TYPE = { exec: 'bash', read_file: 'read', send_file: 'read', grep_files: 'read', find_files: 'read' };
 
+// Tools that require a fresh PIN session on the agent (natural-language) path,
+// mirroring the slash-command PIN gate. read_file/exec touch the host directly.
+const PIN_CLASS = new Set(['exec', 'read_file']);
+
 /**
  * @param {object} args
  * @param {RegExp[]} [args.safeAskPatterns]  bareguard's SAFE_DEFAULT_ASK_PATTERNS,
@@ -303,6 +307,20 @@ async function createGate(opts = {}) {
         await gate.record(action, { phase: 'denied-owner', reason: ownerDeny });
       } catch { /* audit write must not break the deny path */ }
       return ownerDeny;
+    }
+    // PIN at the capability layer (#5): a privileged tool reached via the
+    // natural-language agent path must clear a fresh PIN, same as the slash
+    // command. pinChallenge no-ops when PIN is unset or the session is fresh
+    // (so the slash path, already authed by the router, never double-prompts).
+    if (opts.pinChallenge && ctx?.isOwner && PIN_CLASS.has(toolName)) {
+      const ok = await opts.pinChallenge(ctx);
+      if (!ok) {
+        try {
+          const action = makeActionTranslator(defaultTranslator)(toolName, args, ctx);
+          await gate.record(action, { phase: 'denied-pin', reason: 'PIN required' });
+        } catch { /* audit write must not break the deny path */ }
+        return 'PIN required — action cancelled.';
+      }
     }
     return wired.policy(toolName, args, ctx);
   };

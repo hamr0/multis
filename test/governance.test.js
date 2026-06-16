@@ -308,3 +308,53 @@ describe('createGate — budget halt via humanChannel', () => {
     assert.strictEqual(captured.action._ctx.chatId, 'c1');
   });
 });
+
+describe('createGate — PIN at the capability layer (#5)', () => {
+  let bundle;
+  let pinReturn;
+  const pinCalls = [];
+
+  before(async () => {
+    bundle = await createGate({
+      config: { security: { checkpoint_tools: [] } }, // isolate from the always-ask flags
+      governance: GOV,
+      fileless: true,
+      humanPrompt: async () => ({ decision: 'deny' }),
+      pinChallenge: async (ctx) => { pinCalls.push(ctx); return pinReturn; },
+    });
+  });
+
+  it('owner exec on the agent path is allowed only after the PIN challenge passes', async () => {
+    pinCalls.length = 0; pinReturn = true;
+    const verdict = await bundle.policy('exec', { command: 'ls' }, { isOwner: true, senderId: 'u1', chatId: 'c1', platform: 'telegram' });
+    assert.strictEqual(verdict, true);
+    assert.strictEqual(pinCalls.length, 1, 'PIN challenge runs for exec');
+  });
+
+  it('a failed PIN challenge cancels the privileged action', async () => {
+    pinCalls.length = 0; pinReturn = false;
+    const verdict = await bundle.policy('exec', { command: 'ls' }, { isOwner: true, senderId: 'u1', chatId: 'c1', platform: 'telegram' });
+    assert.match(verdict, /PIN required/);
+    assert.strictEqual(pinCalls.length, 1);
+  });
+
+  it('read_file is PIN-gated too', async () => {
+    pinCalls.length = 0; pinReturn = false;
+    const verdict = await bundle.policy('read_file', { path: '~/notes.txt' }, { isOwner: true, senderId: 'u1', chatId: 'c1', platform: 'telegram' });
+    assert.match(verdict, /PIN required/);
+    assert.strictEqual(pinCalls.length, 1);
+  });
+
+  it('non-PIN-class tools do not trigger a PIN challenge', async () => {
+    pinCalls.length = 0; pinReturn = false;
+    await bundle.policy('search_docs', { query: 'x' }, { isOwner: true, senderId: 'u1', chatId: 'c1', platform: 'telegram' });
+    assert.strictEqual(pinCalls.length, 0, 'search_docs is not privileged');
+  });
+
+  it('non-owner is denied by ownerCheck before any PIN challenge', async () => {
+    pinCalls.length = 0; pinReturn = true;
+    const verdict = await bundle.policy('exec', { command: 'ls' }, { isOwner: false, senderId: 'cust', chatId: 'c2', platform: 'beeper' });
+    assert.match(verdict, /owner privileges/);
+    assert.strictEqual(pinCalls.length, 0, 'PIN challenge must not run for non-owners');
+  });
+});

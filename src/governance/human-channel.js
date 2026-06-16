@@ -67,6 +67,53 @@ function createHumanPrompt({ platformRegistry, pinManager, autoResponder, timeou
   };
 }
 
+/**
+ * Build a PIN challenge for the gate policy (#5). When a PIN-class tool (exec,
+ * read_file) is invoked on the agent/natural-language path and the owner's PIN
+ * session is stale, the gate calls this: it prompts in the owner's chat, waits
+ * for the reply via the SAME pendingHumanResponses path the approval flow uses
+ * (so the router's reply handler delivers it), verifies, and resolves true/false
+ * so the same tool call resumes or is cancelled. No second LLM round.
+ *
+ * Returns a function (ctx) => Promise<boolean>. true = allow (PIN fresh, not
+ * configured, or just verified); false = deny (timeout, wrong PIN, lockout, or
+ * no channel to prompt on — fails closed).
+ */
+function createPinChallenge({ platformRegistry, pinManager, timeoutMs = 120_000 } = {}) {
+  return async function pinChallenge(ctx) {
+    if (!pinManager || !pinManager.isEnabled()) return true; // no PIN configured
+    const auth = pinManager.needsAuth(ctx?.senderId);
+    if (auth === false) return true; // session still fresh
+
+    const platform = platformRegistry?.get(ctx?.platform);
+    if (!platform || typeof platform.send !== 'function') return false; // can't prompt → deny
+
+    if (auth === 'locked') {
+      try { await platform.send(ctx.chatId, 'Locked out due to failed PIN attempts. Try again later.'); } catch { /* ignore */ }
+      return false;
+    }
+
+    try {
+      await platform.send(ctx.chatId, '🔒 That action needs your PIN. Reply with your PIN:');
+    } catch {
+      return false;
+    }
+
+    const reply = await waitForReply(ctx.senderId, timeoutMs);
+    if (reply == null) {
+      try { await platform.send(ctx.chatId, 'PIN timed out — action cancelled.'); } catch { /* ignore */ }
+      return false;
+    }
+    const result = pinManager.authenticate(ctx.senderId, reply.trim());
+    if (!result.success) {
+      try { await platform.send(ctx.chatId, result.reason); } catch { /* ignore */ }
+      return false;
+    }
+    try { await platform.send(ctx.chatId, 'PIN accepted.'); } catch { /* ignore */ }
+    return true;
+  };
+}
+
 function summarizeEvent(event) {
   if (event.kind === 'halt') {
     const spent = event.context?.spent || {};
@@ -139,6 +186,7 @@ function _clearAllPending() {
 
 module.exports = {
   createHumanPrompt,
+  createPinChallenge,
   handleHumanReply,
   hasPendingHumanReply,
   _clearAllPending,
