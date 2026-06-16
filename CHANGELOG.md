@@ -4,6 +4,28 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-06-16
+
+Milestone state of the `baresuite-migration-m3` branch: multis becomes the first baresuite customer (bare-agent + bareguard as the agent/governance core), Beeper is rewired to a pure beeperbox-MCP client across all three deploy shapes, and a full `/security` audit hardens the assistant. **483/483 green.** Awaiting the live LIVE‡ verification pass (PRD §10) before merge to `main`.
+
+### Security — full `/security` audit (8 findings) + limited-admin model
+
+A standalone security pass over the whole branch. Each fix is red→green-proven (a regression test that fails without the fix, passes with it); the agent-path PIN fix (#5) was POC-validated first. Findings recorded in `docs/01-product/baresuite-migration-prd.md` §8.
+
+- **Owner/admin model clarified.** The **super-admin** is the owner set at setup. `/admin` designates *limited* admins — staff who get knowledge-base commands (`/mode`, `/index`, `/ask`) but **never** host shell (`/exec`, `/read`) or `/admin`/`/pin` themselves. A single shared PIN gates the privileged surface.
+- **#2/#3 — host tools are owner-only at the floor.** A `FORCE_OWNER_ONLY` floor in the tool registry plus `send_file` gated at the capability layer close the host-access surface; `~/.multis` is locked to `0700` and `config.json` to `0600` (it holds the PIN hash and tokens — previously world-readable).
+- **#4 — parser input is bounded.** PDF/DOCX ingest now honours size / page / timeout knobs, so a hostile or pathological document can't hang or exhaust the indexer.
+- **#8 — the agent loop is bounded.** `max_tool_rounds` carries a default cap, so a runaway tool-calling loop terminates cleanly via the gate.
+- **#6 — owner RAG is scoped and fenced.** Owner queries retrieve only `admin`+`kb` scopes, and retrieved document content is fenced as untrusted (it can't smuggle instructions into the prompt).
+- **#1 — per-customer rate limit on business-mode inbound.** An abusive customer chat **degrades to escalation** (notify the owner) rather than refusing service — bounded without going dark.
+- **#5 — PIN enforced at the capability layer on the agent path.** Privileged tools invoked by the LLM now prompt for the PIN through the single `humanChannel`, closing the gap where the agent path skipped the auth the slash path enforced. POC-validated before build.
+- **#7 — approvals route to the owner, not the requester.** A gate `ask` for a privileged action is sent to the owner's chat for approval, so a customer can never approve an action on their own behalf.
+- **Path-traversal in the indexing sink** (attacker-named attachment filenames) was fixed earlier in the branch — see the beeperbox v0.7.0 entry below.
+
+### Added — `/admin` limited-admin designation
+
+- **`/admin`** (owner-only) designates, lists, and revokes limited-admin chats: `/admin` (pick a chat to promote), `/admin list`, `/admin remove <n>`. Limited admins get `/mode`, `/index`, `/ask`; host shell and admin management stay owner-only. Revocation takes effect immediately. `/help` is role-aware — owner, limited admin, and customer each see their own command block.
+
 ### Changed
 - **CI:** the publish workflow now polls the npm registry for ~2 min (was ~15s; `--prefer-online` skips npm's view cache) and accepts an `exit 0` publish even if the registry hasn't reflected it yet, so a successful-but-slow-to-reflect publish no longer reports a false failure.
 - **`publish.yml` is now manual-only (`workflow_dispatch`) — npm OIDC trusted publishing with provenance, idempotent, and verifies the registry end-state.**

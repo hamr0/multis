@@ -1,6 +1,6 @@
 {
   "name": "multis",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "A personal chatbot and assistant that runs on your computer",
   "main": "src/index.js",
   "bin": {
@@ -20,7 +20,7 @@
     "local-first"
   ],
   "author": "hamr0",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/hamr0/multis.git"
