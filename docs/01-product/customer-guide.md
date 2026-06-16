@@ -86,10 +86,10 @@ Everything stays on your machine. Your documents are indexed locally in SQLite. 
 
 ### For Beeper users
 
-Beeper Desktop must be:
-- Installed and logged in
-- Running with the **Developer API enabled** (Settings > Developers > toggle on)
-- Open whenever you want multis to respond to messages
+Beeper is reached through **beeperbox** (see [Platforms → Beeper](#beeper) for the three deploy shapes). You need:
+- A **beeperbox** endpoint reachable by multis — either the Docker container (headless Beeper inside) or beeperbox's lite server pointed at a local Beeper Desktop.
+- A Beeper account logged in to whichever Beeper Desktop beeperbox fronts, with the **Developer API enabled** (Settings > Developers > toggle on).
+- Whatever runs beeperbox (your computer or an always-on box) must be up whenever you want multis to respond.
 
 ### For fully local (no cloud) setup
 
@@ -149,13 +149,10 @@ What do you need?
 4. Paste it into the wizard
 5. The wizard verifies the token, then waits up to 60 seconds for you to open the bot in Telegram and send `/start` to pair as owner
 
-**Beeper:**
-1. Open Beeper Desktop
-2. Go to Settings > Developers > enable the API toggle
-3. The wizard detects Beeper on `localhost:23373`
-4. A browser window opens for authorization
-5. Approve access and the wizard saves your token
-6. Your connected accounts (WhatsApp, Signal, etc.) are listed for confirmation
+**Beeper (via beeperbox):**
+1. Get beeperbox running first — the Docker container, or its lite server against your local Beeper Desktop (see [Platforms → Beeper](#beeper) for the three shapes and [beeperbox](https://github.com/hamr0/beeperbox) for setup + the Beeper token).
+2. In the wizard, enter your beeperbox MCP URL (default `http://localhost:23375`) and an MCP token if you set one.
+3. The wizard verifies it can reach beeperbox and lists your connected accounts (WhatsApp, Signal, etc.) for confirmation.
 
 ### Step 3: Choose an LLM Provider
 
@@ -248,18 +245,40 @@ Changes made via bot commands (`/mode business`, `/mode`, `/agent`, `/pin`) are 
 
 ### Beeper
 
-**How it works:** multis polls the Beeper Desktop API on `localhost:23373` every 3 seconds. This gives you access to all your Beeper-bridged chats (WhatsApp, Signal, Instagram, etc.) through one bot.
+**How it works:** multis reaches Beeper through **[beeperbox](https://github.com/hamr0/beeperbox)** — a small server that exposes Beeper's watch/send capabilities as MCP verbs (cursor-based new-message polling, a reliable echo-guard so the bot never answers itself, send). multis is a **pure MCP client** — it does not poll Beeper's raw API itself. This reaches all your Beeper-bridged chats (WhatsApp, Signal, Instagram, etc.) through one bot.
+
+```
+  multis  ──MCP(:23375)──▶  beeperbox  ──raw HTTP(:23373)──▶  Beeper Desktop ──▶ bridges
+  (policy: modes,           (verbs: cursor watch,            (your account)     WhatsApp
+   owner, routing)           echo-guard, send, normalize)                       Telegram
+                                                                                 Signal …
+
+  ── the :23375 line is the split: ABOVE = multis decides; BELOW = beeperbox does ──
+```
+
+**beeperbox runs three ways — the verbs are identical, so multis is the same in all three (only `mcp_url` changes):**
+
+| Shape | What runs | Best for |
+|---|---|---|
+| **Full container** | one Docker container = headless Beeper + beeperbox | an always-on box (Pi/VPS), or a laptop without Beeper installed |
+| **Lite** | `node mcp/server.js` pointed at your *existing* local Beeper Desktop (`BEEPER_API=http://localhost:23373`) — no Docker, no Electron | a laptop where Beeper is already running |
+| **Remote** | the container on a VPS; multis talks to it over the network | a light client (laptop/phone) with the server doing the work |
 
 **Requirements:**
-- Beeper Desktop must be open and logged in
-- Developer API must be enabled (Settings > Developers)
-- Your computer must be awake and connected
+- A reachable beeperbox MCP endpoint (default `localhost:23375`) — pick a shape above.
+- A Beeper account logged into whichever Beeper Desktop beeperbox fronts (the container's headless one, or your local app with Settings > Developers > API enabled).
+- For **remote**, set an MCP token and use a tunnel/VPN — never expose `:23375` to the open internet.
+
+**Honest limitations:**
+- **~25 recent chats.** Beeper's live-sync keeps only the most-recent chats hot, so very idle chats may not surface in the watch feed. This is a Beeper-API limit, not multis's.
+- **Attachments are paused over a remote link.** Receiving a file (PDF/doc) for indexing works when beeperbox's raw API is reachable locally; over a remote MCP-only connection it's pending a beeperbox attachment verb. Sending text and reading messages are unaffected.
+- **Echo-guard is reliable** — beeperbox tags the bot's own sends by exact message id, so multis never responds to itself (no fragile text-matching).
 
 **Commands:** Use the `/` prefix in your personal (Note to Self) chat. Commands are only accepted from messages you send yourself — not from contacts.
 
 **Business mode:** In chats set to business mode, incoming messages from contacts trigger automatic LLM responses. Your self-sent messages in those chats are treated as commands.
 
-**File uploads:** Send a document in Beeper. The bot asks for the scope (public/admin/skip) before indexing.
+**File uploads:** Send a document in Beeper; the bot asks for the scope (public/admin/skip) before indexing. (Available when beeperbox's asset path is reachable — see limitations.)
 
 ### Using Both Together
 
@@ -655,14 +674,14 @@ multis only responds when it's running. If your computer is off or asleep, the b
 
 | Device | Cost | Works? |
 |--------|------|--------|
-| **Raspberry Pi** | $35-60 one-time | Best option. Runs Beeper Desktop + multis. Silent, low power, always on. |
-| **Laptop / mini PC** | $0-80 | Works but must stay open and awake. |
-| **VPS** | $10-20/year | No — Beeper Desktop needs a display. No headless mode. |
-| **Android** | $0 | No — Beeper mobile doesn't expose the Desktop API (localhost:23373). |
+| **VPS** (RackNerd, Hetzner, Oracle) | $5-20/year | **Yes — now the easy option.** Run the beeperbox container (headless Beeper inside, ~600 MB RAM) + multis. Always on. |
+| **Raspberry Pi 4/5** | $35-60 one-time | Yes. beeperbox container (arm64 image) + multis. Silent, low power. |
+| **Laptop / mini PC** | $0-80 | Yes — beeperbox container, or lite mode against your local Beeper Desktop. Must stay awake. |
+| **Android** | $0 | Telegram only — no Docker / Beeper Desktop. |
 
-**Why can't Beeper run on a VPS?** Beeper Desktop is an Electron app (GUI). It needs a display to run. While you could hack around this with a virtual display (Xvfb), it's fragile and unsupported. Beeper's cloud connections sync your chats across their app — they don't expose an API for third-party bots.
+**Can Beeper run on a VPS now?** Yes — that's exactly what **beeperbox** is for: it containerizes a headless Beeper Desktop (virtual display + supervised Electron) and exposes the MCP verbs multis uses. The old "Beeper needs a GUI display, so no VPS" limitation is gone. Run beeperbox on the VPS and point multis at it (locally, or over a tunnel from a lighter client).
 
-**Bottom line:** For business mode with Beeper bridges, the Raspberry Pi is the cheapest and most reliable always-on option.
+**Bottom line:** For business mode with Beeper bridges, a small VPS or a Raspberry Pi running the beeperbox container is the cheapest, most reliable always-on option.
 
 ### Raspberry Pi Setup
 
@@ -698,32 +717,19 @@ node --version    # should show v20.x.x
 npm --version
 ```
 
-#### Step 3: Install Beeper Desktop
+#### Step 3: Run beeperbox (headless Beeper)
 
-Beeper provides an ARM64 AppImage for Linux:
-
-```bash
-# Download the ARM64 AppImage
-curl -L -o ~/Beeper.AppImage \
-  "https://api.beeper.com/desktop/download/linux/arm64/stable/com.automattic.beeper.desktop"
-
-# Make it executable
-chmod +x ~/Beeper.AppImage
-
-# Install FUSE (required for AppImages)
-sudo apt-get install -y fuse libfuse2
-```
-
-Launch Beeper:
+Instead of installing Beeper Desktop directly, run the **beeperbox** container — it bundles a headless Beeper Desktop and exposes the MCP verbs multis talks to. It ships an arm64 image for the Pi. Follow [beeperbox's quick start](https://github.com/hamr0/beeperbox):
 
 ```bash
-~/Beeper.AppImage
+# Needs Docker + the compose plugin (sudo apt-get install -y docker.io docker-compose-plugin)
+curl -LO https://raw.githubusercontent.com/hamr0/beeperbox/master/docker-compose.yml
+docker compose up -d
 ```
 
-1. Sign in to your Beeper account
-2. Connect your messaging accounts (WhatsApp, Signal, etc.) through the Beeper UI
-3. Go to **Settings > Developers** and enable the **Desktop API** toggle
-4. Keep Beeper running
+Then open `http://<pi-ip>:6080/vnc.html` once to sign into Beeper, connect your messaging accounts (WhatsApp, Signal, etc.), enable **Settings > Developers > API**, and save the token to beeperbox's `.env` (`echo "BEEPER_TOKEN=…" > .env && docker compose up -d`). beeperbox persists login across reboots and restarts cleanly.
+
+> No Docker? Use beeperbox **lite mode** instead — `node mcp/server.js` pointed at a local Beeper Desktop. See [beeperbox's docs](https://github.com/hamr0/beeperbox).
 
 #### Step 4: Install and configure multis
 
@@ -735,7 +741,7 @@ npm install -g multis
 multis init
 ```
 
-The wizard will detect Beeper on `localhost:23373` and walk you through connecting Telegram, choosing an LLM provider, and setting a PIN.
+The wizard asks for your beeperbox MCP URL (default `http://localhost:23375`) and an MCP token if you set one, then walks you through Telegram, an LLM provider, and a PIN.
 
 #### Step 5: Start multis and auto-start on boot
 
@@ -747,32 +753,15 @@ multis start
 multis status
 ```
 
-To auto-start multis and Beeper on boot, create a systemd user service:
+beeperbox already auto-restarts via its Docker `restart: unless-stopped` policy (and survives reboots if the Docker service is enabled: `sudo systemctl enable docker`). So you only need a systemd user service for multis:
 
 ```bash
 mkdir -p ~/.config/systemd/user
 
-# Beeper auto-start
-cat > ~/.config/systemd/user/beeper.service << 'EOF'
-[Unit]
-Description=Beeper Desktop
-After=graphical-session.target
-
-[Service]
-ExecStart=/home/pi/Beeper.AppImage
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=default.target
-EOF
-
-# multis auto-start (after Beeper)
 cat > ~/.config/systemd/user/multis.service << 'EOF'
 [Unit]
 Description=multis AI assistant
-After=beeper.service
-Wants=beeper.service
+After=network-online.target
 
 [Service]
 ExecStart=/usr/bin/node /usr/lib/node_modules/multis/src/index.js
@@ -784,9 +773,8 @@ Environment=HOME=/home/pi
 WantedBy=default.target
 EOF
 
-# Enable both
-systemctl --user enable beeper multis
-systemctl --user start beeper multis
+systemctl --user enable multis
+systemctl --user start multis
 
 # Allow user services to run without a login session
 sudo loginctl enable-linger pi
@@ -807,11 +795,11 @@ multis doctor
 tail -f ~/.multis/logs/daemon.log
 ```
 
-The Pi sits on your network, always on, running Beeper + multis. Customers message on WhatsApp, the bot responds automatically.
+The Pi sits on your network, always on, running the beeperbox container + multis. Customers message on WhatsApp, the bot responds automatically.
 
 ### VPS Setup
 
-For Telegram-only (personal use), a cheap VPS works perfectly.
+A cheap VPS works perfectly for Telegram-only — and now for **Beeper too**: run the beeperbox container on the same VPS (see [Step 3 above](#step-3-run-beeperbox-headless-beeper)) and point multis at `http://localhost:23375`. The steps below cover the Telegram-only base; add beeperbox if you want bridges.
 
 **Cheapest options:**
 - **Oracle Cloud Always Free** — 4 ARM cores, 24GB RAM, free forever (if you can get a slot)
@@ -830,7 +818,7 @@ apt-get install -y nodejs
 # Install multis
 npm install -g multis
 
-# Setup (choose Telegram only, no Beeper)
+# Setup (Telegram only here; add Beeper by running the beeperbox container first)
 multis init
 
 # Start as daemon
@@ -930,10 +918,10 @@ To make someone the owner, edit `~/.multis/config.json` and set `owner_id` to th
 
 ### Beeper not working
 
-1. Is Beeper Desktop open? It must be running.
-2. Is the Developer API enabled? Settings > Developers > toggle on
-3. Can you reach it? `curl http://localhost:23373/v1/spec` should return JSON
-4. Re-authorize: `multis init` and redo the Beeper step
+1. Is beeperbox running? (the Docker container, or `node mcp/server.js` in lite mode)
+2. Can multis reach the MCP endpoint? `curl -X POST http://localhost:23375 -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'` should return JSON.
+3. Does beeperbox see your account? The startup log shows `connected via beeperbox MCP … (N accounts)`. `0 accounts` means Beeper isn't logged in / bridges aren't linked inside beeperbox — fix that in beeperbox (its noVNC login or your local Beeper Desktop).
+4. Wrong endpoint/token? Check `platforms.beeper.mcp_url` / `mcp_token` in `~/.multis/config.json`, or re-run `multis init` and redo the Beeper step.
 
 ### LLM errors
 
