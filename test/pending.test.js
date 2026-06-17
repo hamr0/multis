@@ -49,6 +49,27 @@ describe('PendingRegistry', () => {
     assert.strictEqual(resolved, 'ok');
   });
 
+  describe('overwrite of a live entry', () => {
+    it('cancels a displaced parked waiter with null instead of orphaning it', () => {
+      // The footgun: two concurrent gate challenges for one conversation. One
+      // entry per key means the second set() displaces the first — which must
+      // resolve the first waiter (deny), not leave it hanging to its own timer.
+      const reg = new PendingRegistry();
+      let firstGot = 'NOT_CALLED';
+      reg.set('c', 'u', 'gate_reply', { resolve: (v) => { firstGot = v; } });
+      reg.set('c', 'u', 'gate_reply', { resolve: () => {} }); // displaces the first
+      assert.strictEqual(firstGot, null, 'displaced waiter was resolved null, not orphaned');
+    });
+
+    it('plainly replaces a non-waiter entry (no resolve fn) without error', () => {
+      const reg = new PendingRegistry();
+      reg.set('c', 'u', 'pin_command', { data: 1 });
+      reg.set('c', 'u', 'mode', { data: 2 });
+      assert.strictEqual(reg.get('c', 'u').kind, 'mode');
+      assert.strictEqual(reg.size, 1);
+    });
+  });
+
   describe('TTL expiry', () => {
     it('keeps an entry live up to its TTL', () => {
       const clk = fakeClock();

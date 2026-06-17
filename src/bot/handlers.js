@@ -378,14 +378,19 @@ function createMessageRouter(config, deps = {}) {
           case 'pin_command': {
             const result = pinManager.authenticate(msg.senderId, t);
             if (!result.success) {
-              await platform.send(msg.chatId, result.reason);
+              // Wrong PIN keeps the pending command so the owner can retry;
+              // only a lockout clears it.
               if (result.locked) pending.clear(msg.chatId, msg.senderId);
+              await platform.send(msg.chatId, result.reason);
               return;
             }
-            // PIN correct — execute the stored command.
-            await platform.send(msg.chatId, 'PIN accepted.');
-            pending.clear(msg.chatId, msg.senderId);
+            // PIN correct — claim the entry SYNCHRONOUSLY, before the first await,
+            // so a concurrent duplicate reply finds nothing and can't double-run
+            // the stored command (the get→clear window otherwise spans the
+            // platform.send below). authenticate() above is synchronous.
             const stored = entry.data; // { command, args, msg, platform }
+            pending.clear(msg.chatId, msg.senderId);
+            await platform.send(msg.chatId, 'PIN accepted.');
             await executeCommand(stored.command, stored.args, stored.msg, platform, config, indexer, provider, memoryManagers, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, gov });
             return;
           }

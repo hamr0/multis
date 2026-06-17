@@ -227,6 +227,68 @@ describe('PIN auth', () => {
     assert.match(platform.sent[0].text, /locked/i);
   });
 
+  it('two concurrent PIN replies execute the stored command exactly once (no double-run race)', async () => {
+    // The race: the get→clear window spans an `await platform.send('PIN accepted')`,
+    // so two near-simultaneous correct PINs could both reach executeCommand. The
+    // fix claims the entry synchronously before the first await.
+    const pinHash = hashPin('1234');
+    const env = createTestEnv({
+      allowed_users: ['user1'],
+      owner_id: 'user1',
+      governance: { commands: { allowlist: ['echo'], denylist: [] }, paths: { allowed: ['.*'], denied: [] } },
+      security: { pin_hash: pinHash, pin_timeout_hours: 24, checkpoint_tools: [] },
+    });
+    const platform = mockPlatform();
+    const pinManager = new PinManager(env.config);
+    pinManager.sessions = {};
+    const router = createMessageRouter(env.config, {
+      llm: mockLLM(),
+      indexer: stubIndexer(),
+      pinManager,
+      fileless: true,
+      governanceFile: { commands: { allowlist: ['echo'], denylist: [] }, paths: { allowed: ['.*'], denied: [] } },
+    });
+    router.registerPlatform('telegram', platform);
+
+    await router(msg('/exec echo hello'), platform);
+    assert.match(platform.sent[0].text, /Enter your PIN/);
+
+    // Fire the two replies WITHOUT awaiting the first — they interleave the way
+    // two inbound messages would. (On Telegram the loser becomes an implicit
+    // /ask once the PIN entry is gone; only the winner runs the exec.)
+    await Promise.all([router(msg('1234'), platform), router(msg('1234'), platform)]);
+
+    const ran = platform.sent.filter((s) => /hello/.test(s.text));
+    assert.strictEqual(ran.length, 1, 'the PIN-gated command executed exactly once');
+  });
+
+  it('a non-digit message while a PIN is pending does not consume or disturb the pending command', async () => {
+    const pinHash = hashPin('1234');
+    const env = createTestEnv({
+      allowed_users: ['user1'],
+      owner_id: 'user1',
+      security: { pin_hash: pinHash, pin_timeout_hours: 24, checkpoint_tools: [] },
+    });
+    const platform = mockPlatform();
+    const pinManager = new PinManager(env.config);
+    pinManager.sessions = {};
+    const pending = new PendingRegistry();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer(), pinManager, pending });
+
+    await router(msg('/exec ls'), platform);
+    assert.match(platform.sent[0].text, /Enter your PIN/);
+
+    // A non-digit reply must NOT be read as a PIN — no "Wrong PIN", no "accepted",
+    // and the pending command survives for the real PIN that follows.
+    await router(msg('hello there'), platform);
+    assert.ok(pending.peek('chat1', 'user1'), 'pending PIN command still parked after a non-digit');
+    assert.ok(!platform.sent.some((s) => /Wrong PIN|accepted/i.test(s.text)), 'non-digit was not treated as a PIN attempt');
+
+    // The real PIN still works afterwards.
+    await router(msg('1234'), platform);
+    assert.ok(platform.sent.some((s) => /accepted/i.test(s.text)), 'correct PIN still accepted after the non-digit');
+  });
+
   it('a PIN reply that arrives after the prompt EXPIRES is announced, not routed to /ask (orphaned-reply bug)', async () => {
     // The bug: once the PIN prompt's pending state lapses, the user's late PIN
     // digits fell through the dispatch and, in a natural/business chat, landed

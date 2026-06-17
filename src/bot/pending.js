@@ -57,8 +57,18 @@ class PendingRegistry {
    *                     instead of being swallowed.
    */
   set(chatId, senderId, kind, payload = {}) {
+    const key = PendingRegistry.key(chatId, senderId);
+    // If a parked waiter (a gate challenge holding a resolve fn) is being
+    // displaced — e.g. a second concurrent challenge for the same conversation —
+    // cancel it cleanly (resolve null = deny/timeout semantics) so it can't hang
+    // until its own timer fires. One entry per key means the displaced challenge
+    // would otherwise be silently orphaned.
+    const existing = this.entries.get(key);
+    if (existing && typeof existing.resolve === 'function') {
+      existing.resolve(null);
+    }
     const ttlMs = payload.ttlMs ?? DEFAULT_TTL_MS;
-    this.entries.set(PendingRegistry.key(chatId, senderId), {
+    this.entries.set(key, {
       ...payload,
       kind,
       ttlMs,
