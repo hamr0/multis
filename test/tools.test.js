@@ -80,6 +80,28 @@ describe('Tool definitions', () => {
       assert.ok(t.platforms.includes('android'), `${t.name} missing android`);
     }
   });
+
+  it('find_files matches by case-insensitive substring (finds name+extension)', async () => {
+    // Regression: a `name` without the extension used to miss (exact `-name`).
+    // "my-resume-doc" must now locate "My-Resume-Doc.txt".
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-find-'));
+    fs.writeFileSync(path.join(dir, 'My-Resume-Doc.txt'), 'x');
+    const findFiles = TOOLS.find(t => t.name === 'find_files');
+    const out = await findFiles.execute({ name: 'my-resume-doc', path: dir }, { senderId: 'u' });
+    assert.match(out, /My-Resume-Doc\.txt/, 'substring + case-insensitive match should find the file');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('find_files honors an explicit glob as-is', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-find-'));
+    fs.writeFileSync(path.join(dir, 'a.pdf'), 'x');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'x');
+    const findFiles = TOOLS.find(t => t.name === 'find_files');
+    const out = await findFiles.execute({ name: '*.pdf', path: dir }, { senderId: 'u' });
+    assert.match(out, /a\.pdf/);
+    assert.doesNotMatch(out, /b\.txt/);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 // ---------------------------------------------------------------------------

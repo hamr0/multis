@@ -94,19 +94,23 @@ const TOOLS = [
   },
   {
     name: 'find_files',
-    description: 'Find files by name pattern. Use when the user wants to locate a file on disk by its filename.',
+    description: 'Find files by name. Matching is case-insensitive and substring by default, so "amr-hassan-resume" finds "amr-hassan-resume.txt" — pass just the distinctive part of the name. An explicit glob (containing * ? or [ ]) is used as-is. Searches recursively; defaults to the home directory.',
     platforms: ['linux', 'macos', 'android'],
     input_schema: {
       type: 'object',
       properties: {
-        name: { type: 'string', description: 'Filename or glob pattern (e.g. "blueprint.md", "*.pdf")' },
+        name: { type: 'string', description: 'Filename, a distinctive substring of it, or a glob (e.g. "resume", "blueprint.md", "*.pdf")' },
         path: { type: 'string', description: 'Directory to search in (~ expands to home). Default: ~' }
       },
       required: ['name']
     },
     execute: async ({ name, path: searchPath }, ctx) => {
       const dir = (searchPath || '~').replace(/^~/, process.env.HOME || '');
-      const cmd = `find ${JSON.stringify(dir)} -maxdepth 5 -name ${JSON.stringify(name)} 2>/dev/null`;
+      // Case-insensitive substring by default (-iname '*name*') so a partial name
+      // matches the real file incl. its extension; honor an explicit glob as-is.
+      const hasGlob = /[*?[\]]/.test(name);
+      const pattern = hasGlob ? name : `*${name}*`;
+      const cmd = `find ${JSON.stringify(dir)} -maxdepth 6 -iname ${JSON.stringify(pattern)} 2>/dev/null`;
       const result = await execCommand(cmd, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.output || 'No files found.';
