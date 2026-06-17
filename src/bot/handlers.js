@@ -16,7 +16,7 @@ const { getPlatform } = require('../tools/platform');
 const { Loop, Retry, CircuitBreaker } = require('bare-agent');
 const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler');
 const { createGate } = require('../governance/gate');
-const { createHumanPrompt, createPinChallenge, handleHumanReply, hasPendingHumanReply } = require('../governance/human-channel');
+const { createHumanPrompt, createPinChallenge, createConfirmChallenge, handleHumanReply, hasPendingHumanReply } = require('../governance/human-channel');
 const PKG_VERSION = require('../../package.json').version;
 const { looksLikeCommand } = require('../platforms/message');
 const { mark, startClock } = require('../debug/instr'); // TEMP: timeout instrumentation
@@ -106,12 +106,18 @@ function createGovernanceCarrier(config, opts = {}) {
         const pinChallenge = opts.pinChallenge || createPinChallenge({
           platformRegistry,
           pinManager: opts.pinManager,
-          timeoutMs: (config?.security?.pin_prompt_timeout || 120) * 1000,
+          timeoutMs: (config?.security?.pin_prompt_timeout || 300) * 1000,
+        });
+        // Catastrophic-command confirm tier (typed CONFIRM after the PIN).
+        const confirmChallenge = opts.confirmChallenge || createConfirmChallenge({
+          platformRegistry,
+          timeoutMs: (config?.security?.pin_prompt_timeout || 300) * 1000,
         });
         const built = await createGate({
           config,
           humanPrompt,
           pinChallenge,
+          confirmChallenge,
           auditPath: opts.auditPath,
           budgetFile: opts.budgetFile,
           fileless: opts.fileless,

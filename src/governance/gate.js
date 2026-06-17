@@ -72,9 +72,55 @@ const INJECTION_ASK_PATTERNS = [
 // so an "always ask" declared on tool names lands on the type the gate evaluates.
 const TOOL_TYPE = { exec: 'bash', read_file: 'read', send_file: 'read', grep_files: 'read', find_files: 'read' };
 
-// Tools that require a fresh PIN session on the agent (natural-language) path,
-// mirroring the slash-command PIN gate. read_file/exec touch the host directly.
-const PIN_CLASS = new Set(['exec', 'read_file']);
+// Command governance tiers (2026-06-17, owner-authorized — see dispatch-rewrite-
+// decision). The owner has full machine access, so commands "follow bareguard by
+// default" (benign/allowlisted just run); only DESTRUCTIVE commands need a PIN,
+// and a tiny CATASTROPHIC set needs PIN **plus** a typed CONFIRM. Reads/finds are
+// benign (no PIN) now that the fs scope is open.
+//
+// Catastrophic = genuine machine-wreckers. Checked before "destructive"; this set
+// is deliberately small and explicit so ordinary deletes/moves only hit the PIN
+// tier. PIN + typed CONFIRM (never a hard block — the owner can still do it
+// deliberately).
+//
+// INTERIM, LINUX-ONLY — pending bareguard command-severity classification (PRD §7
+// ask, filed 2026-06-17). This is the CONSUMER half done right (the severity→
+// ceremony mapping is multis policy and stays here), but the cross-platform
+// CLASSIFICATION (macOS `diskutil eraseDisk`, Windows `format`/`diskpart`/
+// `Remove-Item -Recurse -Force`) belongs in the lib. When bareguard ships
+// `classifyCommand`, replace this block with the lib call — the tier→PIN/CONFIRM
+// mapping below is unchanged. Do NOT grow a parallel macOS/Windows list here.
+const CATASTROPHIC_RM = /\brm\b[^|;&\n]*?(?:-\w*r\w*\b[^|;&\n]*?-\w*f|\b-\w*f\w*\b[^|;&\n]*?-\w*r|-\w*(?:rf|fr)\w*)/i;
+const CATASTROPHIC_ROOT_TARGET = /(?:^|\s)(?:\/|\/\*|~\/?|\$HOME)(?:\s|$|\/|\*)/;
+const CATASTROPHIC_PATTERNS = [
+  /\bdd\b[^\n]*\bof=\/dev\//i,                 // dd writing to a raw device
+  /\bmkfs\S*/i,                                // make a filesystem
+  /\bwipefs\b/i,
+  />\s*\/dev\/(?:sd|nvme|vd|mmcblk|disk)/i,     // redirect over a block device
+  /:\s*\(\s*\)\s*\{/,                          // fork bomb  :(){ :|:& };:
+  /\b(?:shutdown|reboot|poweroff|halt)\b/i,     // power state
+  /\binit\s+[06]\b/i,
+];
+function isCatastrophic(cmd) {
+  const c = String(cmd || '');
+  if (CATASTROPHIC_RM.test(c) && CATASTROPHIC_ROOT_TARGET.test(c)) return true;
+  return CATASTROPHIC_PATTERNS.some((re) => re.test(c));
+}
+
+// First executable token of a command (skips leading `sudo`/`env` and a path).
+function commandHead(cmd) {
+  const toks = String(cmd || '').trim().split(/\s+/);
+  let i = 0;
+  while (i < toks.length && /^(?:sudo|env)$/i.test(toks[i])) i++;
+  const head = (toks[i] || '').split('/').pop();
+  return head.toLowerCase();
+}
+// Destructive = the governance denylist (rm/mv-class, chmod, kill, …) + `sudo`
+// itself. PIN-gated (runs after a correct PIN).
+function makeDestructiveCheck(denylist) {
+  const set = new Set((denylist || []).map((c) => String(c).toLowerCase()));
+  return (cmd) => set.has('sudo') && /^\s*sudo\b/i.test(cmd) ? true : set.has(commandHead(cmd));
+}
 
 /**
  * @param {object} args
@@ -86,9 +132,11 @@ function buildGateConfig({ governance, security, audit, budget, llm, safeAskPatt
   const cfg = {};
 
   if (governance?.commands) {
+    // The denylist is NO LONGER a hard deny — it is the DESTRUCTIVE tier, PIN-gated
+    // in policy() (the owner can run it after a PIN). Only the allowlist informs
+    // bareguard here. (Catastrophic ops add a typed CONFIRM on top — also policy().)
     cfg.bash = {
       allow: governance.commands.allowlist || [],
-      denyPatterns: (governance.commands.denylist || []).map(c => new RegExp(`^${escapeRegex(c)}(\\s|$)`, 'i')),
     };
   }
 
@@ -112,13 +160,13 @@ function buildGateConfig({ governance, security, audit, budget, llm, safeAskPatt
     askPatterns: [...safeAskPatterns, ...INJECTION_ASK_PATTERNS],
   };
 
-  // "Always ask" before a tool runs, routed through bareguard's flags primitive
-  // (fires at eval step 4b — before the allowlist — so an allowlisted tool still
-  // asks; the single humanChannel handles the prompt). Replaces the bare-agent
-  // Checkpoint bridge. `checkpoint_tools` are multis tool names; map to gate
-  // types. Default ['exec'] preserves confirm-before-every-exec. An explicit []
-  // opts out.
-  const askTools = security?.checkpoint_tools ?? ['exec'];
+  // Optional "always ask" before a tool runs, via bareguard's flags primitive
+  // (fires at eval step 4b — before the allowlist). `checkpoint_tools` are multis
+  // tool names mapped to gate types. **Default is now [] (opt-in):** under the
+  // obedient command-governance model, benign commands just run and friction is
+  // applied per-tier in policy() (destructive→PIN, catastrophic→PIN+CONFIRM), so
+  // a blanket yes/no on every exec is no longer the default. Set it to re-enable.
+  const askTools = security?.checkpoint_tools ?? [];
   if (askTools.length) {
     const types = {};
     for (const t of askTools) types[TOOL_TYPE[t] || t] = 'ask';
@@ -294,6 +342,14 @@ async function createGate(opts = {}) {
     actionTranslator: makeActionTranslator(defaultTranslator),
   });
 
+  const isDestructive = makeDestructiveCheck(governance?.commands?.denylist);
+  const recordDeny = async (toolName, args, ctx, phase, reason) => {
+    try {
+      const action = makeActionTranslator(defaultTranslator)(toolName, args, ctx);
+      await gate.record(action, { phase, reason });
+    } catch { /* audit write must not break the deny path */ }
+  };
+
   // Owner-bypass layered before wireGate.policy. wireGate.policy throws
   // HaltError on halt severity (caught by Loop) and returns deny strings
   // verbatim on action severity (LLM sees them).
@@ -302,26 +358,42 @@ async function createGate(opts = {}) {
   const policy = async (toolName, args, ctx) => {
     const ownerDeny = ownerCheck(toolName, ctx);
     if (ownerDeny) {
-      try {
-        const action = makeActionTranslator(defaultTranslator)(toolName, args, ctx);
-        await gate.record(action, { phase: 'denied-owner', reason: ownerDeny });
-      } catch { /* audit write must not break the deny path */ }
+      await recordDeny(toolName, args, ctx, 'denied-owner', ownerDeny);
       return ownerDeny;
     }
-    // PIN at the capability layer (#5): a privileged tool reached via the
-    // natural-language agent path must clear a fresh PIN, same as the slash
-    // command. pinChallenge no-ops when PIN is unset or the session is fresh
-    // (so the slash path, already authed by the router, never double-prompts).
-    if (opts.pinChallenge && ctx?.isOwner && PIN_CLASS.has(toolName)) {
-      const ok = await opts.pinChallenge(ctx);
-      if (!ok) {
-        try {
-          const action = makeActionTranslator(defaultTranslator)(toolName, args, ctx);
-          await gate.record(action, { phase: 'denied-pin', reason: 'PIN required' });
-        } catch { /* audit write must not break the deny path */ }
-        return 'PIN required — action cancelled.';
+
+    // Command-governance tiers (owner only; ownerCheck already denied non-owners
+    // any shell tool). Benign commands fall through to bareguard; destructive need
+    // a PIN; catastrophic need PIN + a typed CONFIRM. On success the command is
+    // ALLOWED (return null) — the owner deliberately cleared the gate, so we don't
+    // also run it past the allowlist (rm/sudo aren't allowlisted by design).
+    if (toolName === 'exec' && ctx?.isOwner) {
+      const command = String(args?.command || '');
+      if (isCatastrophic(command)) {
+        if (opts.pinChallenge && !(await opts.pinChallenge(ctx))) {
+          await recordDeny(toolName, args, ctx, 'denied-pin', 'PIN required (catastrophic)');
+          return 'PIN required — action cancelled.';
+        }
+        if (opts.confirmChallenge && !(await opts.confirmChallenge(ctx, command))) {
+          await recordDeny(toolName, args, ctx, 'denied-confirm', 'CONFIRM required (catastrophic)');
+          return 'Confirmation required — action cancelled.';
+        }
+        await gate.record(makeActionTranslator(defaultTranslator)(toolName, args, ctx),
+          { phase: 'allow-catastrophic', reason: 'owner PIN+CONFIRM cleared' }).catch(() => {});
+        return null;
       }
+      if (isDestructive(command)) {
+        if (opts.pinChallenge && !(await opts.pinChallenge(ctx))) {
+          await recordDeny(toolName, args, ctx, 'denied-pin', 'PIN required (destructive)');
+          return 'PIN required — action cancelled.';
+        }
+        await gate.record(makeActionTranslator(defaultTranslator)(toolName, args, ctx),
+          { phase: 'allow-destructive', reason: 'owner PIN cleared' }).catch(() => {});
+        return null;
+      }
+      // benign exec → bareguard (allowlist) governs.
     }
+
     return wired.policy(toolName, args, ctx);
   };
 
@@ -342,4 +414,7 @@ module.exports = {
   ownerCheck,
   loadGovernance,
   makeActionTranslator,
+  isCatastrophic,
+  commandHead,
+  makeDestructiveCheck,
 };

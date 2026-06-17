@@ -14,7 +14,22 @@ Live dogfooding ("find me X on my laptop") kept failing. Temporary timestamped i
 - **Unknown commands reply** (`Unknown command: /x — try /help`) instead of silently no-opping.
 - **Halt prompt clarity.** A tool-round-cap halt now renders as a plain *"⚠️ Stopped — I took too many tool steps … try rephrasing"* and **terminates immediately** instead of waiting 60 s on a meaningless "yes to terminate / no to deny" (the old shape also caused a needless `humanChannel` 60 s timeout on every cap halt).
 
-**Still in flight (next passes):** destructive commands → PIN challenge (currently still hard-denied via the denylist); the router pending-state-machine de-tangle; `find_files` substring/glob matching (it missed `amr-hassan-resume.txt` on a `amr-hassan-resume` query). Persona/constitution/facts return with the litectx memory module.
+**Still in flight (next passes):** the router pending-state-machine de-tangle. Persona/constitution/facts return with the litectx memory module.
+
+### Changed — command governance (3-tier: benign / destructive→PIN / catastrophic→PIN+CONFIRM)
+
+Live dogfooding ("find my music folder and list the subdirs") demanded a PIN for a benign `ls`, then the prompt expired (120 s) and the reply got treated as a new question. The old model PIN-gated **every** `exec`/`read_file` and **hard-denied** the whole denylist. Replaced with an obedient, tiered model (owner-authorized; single-owner — customers still never get host tools, gated at `ownerCheck`):
+
+- **Benign** (allowlisted commands, all reads/finds) → **just run**, no PIN, no prompt. `ls ~/Music` works.
+- **Destructive** (the denylist: `rm`, `mv`, `chmod`, `chown`, `kill`, `sudo`, `dd`, …) → **PIN**, then runs. No longer hard-denied — the owner can do it with a PIN.
+- **Catastrophic** (a tiny explicit set: `rm -rf` of `/` `~` `/*`, `dd` to a device, `mkfs`/`wipefs`, redirect to a block device, fork bomb, `shutdown`/`reboot`) → **PIN + a typed `CONFIRM`**, then runs. A deliberate speed bump against a fat-fingered disaster; never a hard wall.
+- The blanket always-ask on `exec` (`checkpoint_tools`) is now **opt-in** (default `[]`); the PIN prompt **timeout is 5 minutes** (was 2); reads are no longer PIN-gated now that the owner's fs scope is open.
+
+New `createConfirmChallenge` (typed-CONFIRM tier) in `human-channel.js`; tier detection (`isCatastrophic`/`makeDestructiveCheck`) in `gate.js`, unit-tested per pattern. 500/500 green.
+
+### Fixed — `find_files` missed name+extension
+
+`find_files` ran `find -name <exact>`, so "amr-hassan-resume" never matched `amr-hassan-resume.txt`. Now case-insensitive substring by default (`-iname "*<name>*"`), explicit globs honored as-is, depth 5→6. Proven red→green against the real file.
 
 ### Changed — `multis init` wizard
 

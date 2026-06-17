@@ -195,15 +195,16 @@ describe('M0 e2e — governance via slash-command path', () => {
   });
 });
 
-describe('M0 e2e — always-ask before exec (flags, F2 cutover)', () => {
-  // Confirm-before-every-exec now rides bareguard's flags primitive through the
-  // shared gate (default checkpoint_tools ['exec']), so /exec — previously the
-  // un-checkpointed slash path — also asks. Replaces the bare-agent Checkpoint.
+describe('M0 e2e — opt-in always-ask before exec (flags)', () => {
+  // Confirm-before-every-exec rides bareguard's flags primitive. It is now OPT-IN
+  // (checkpoint_tools:['exec']); when enabled, /exec asks through the single
+  // humanChannel — uniform with the LLM tool path. (Default is no blanket ask;
+  // friction is per-tier in policy — destructive→PIN.)
   let env;
   afterEach(() => env?.cleanup());
 
   function buildRouter(humanPrompt) {
-    env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1', llm: { provider: 'mock', apiKey: 'x' } });
+    env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1', security: { checkpoint_tools: ['exec'] }, llm: { provider: 'mock', apiKey: 'x' } });
     const platform = mockPlatform();
     return realGov(env.config, GOVERNANCE, humanPrompt).then(({ carrier }) => ({
       platform,
