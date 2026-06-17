@@ -16,7 +16,7 @@ const { getPlatform } = require('../tools/platform');
 const { Loop, Retry, CircuitBreaker } = require('bare-agent');
 const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler');
 const { createGate } = require('../governance/gate');
-const { createHumanPrompt, createPinChallenge, createConfirmChallenge, handleHumanReply, hasPendingHumanReply } = require('../governance/human-channel');
+const { createHumanPrompt, createPinChallenge, createConfirmChallenge } = require('../governance/human-channel');
 const { PendingRegistry } = require('./pending');
 const PKG_VERSION = require('../../package.json').version;
 const { looksLikeCommand } = require('../platforms/message');
@@ -100,6 +100,7 @@ function createGovernanceCarrier(config, opts = {}) {
           platformRegistry,
           pinManager: opts.pinManager,
           config,
+          pending: opts.pending,
           timeoutMs: (config?.security?.checkpoint_timeout || 60) * 1000,
         });
         // Capability-layer PIN (#5): privileged tools on the agent path prompt
@@ -107,11 +108,13 @@ function createGovernanceCarrier(config, opts = {}) {
         const pinChallenge = opts.pinChallenge || createPinChallenge({
           platformRegistry,
           pinManager: opts.pinManager,
+          pending: opts.pending,
           timeoutMs: (config?.security?.pin_prompt_timeout || 300) * 1000,
         });
         // Catastrophic-command confirm tier (typed CONFIRM after the PIN).
         const confirmChallenge = opts.confirmChallenge || createConfirmChallenge({
           platformRegistry,
+          pending: opts.pending,
           timeoutMs: (config?.security?.pin_prompt_timeout || 300) * 1000,
         });
         const built = await createGate({
@@ -273,6 +276,7 @@ function createMessageRouter(config, deps = {}) {
     fileless: deps.fileless,
     governance: deps.governanceFile,
     pinManager,
+    pending,
   });
   // Helper: getMemoryManager with baseDir (follows getMultisDir for test isolation)
   const getMem = (chatId, opts = {}) =>
@@ -344,16 +348,11 @@ function createMessageRouter(config, deps = {}) {
     // so they aren't swallowed by natural/silent/business routing
     const text = msg.text || '';
 
-    // Check for bareguard humanChannel reply (ask/halt prompts, incl. always-ask
-    // confirms now routed through the gate's flags primitive)
-    if (hasPendingHumanReply(msg.senderId) && handleHumanReply(msg.senderId, text)) {
-      return;
-    }
-
-    // Pending interaction (PIN entry, pin-change, …). One registry lookup holds
-    // every "next message is special" state for this conversation. entry.match
-    // decides whether THIS reply belongs to the prompt; a non-matching message
-    // (a /command, an unrelated query) falls through to normal routing below.
+    // Pending interaction — the single store for every "next message is special"
+    // state for this conversation: a parked gate challenge (approval/PIN/CONFIRM),
+    // a PIN command entry, the pin-change flow, … One lookup, one TTL. entry.match
+    // decides whether THIS reply belongs to the prompt; a non-matching message (a
+    // /command, an unrelated query) falls through to normal routing below.
     {
       const entry = pending.get(msg.chatId, msg.senderId);
       if (entry && (typeof entry.match !== 'function' || entry.match(text))) {
@@ -367,6 +366,12 @@ function createMessageRouter(config, deps = {}) {
         }
         const t = text.trim();
         switch (entry.kind) {
+          case 'gate_reply':
+            // A parked bareguard challenge (approval/PIN/CONFIRM) is awaiting this
+            // reply. Hand it the RAW text — the challenge interprets yes/no/PIN/
+            // CONFIRM itself — and it self-clears via the resolver.
+            entry.resolve(text);
+            return;
           case 'pin_change':
             await handlePinChangeStep(msg, platform, config, pinManager, pending, t, entry);
             return;

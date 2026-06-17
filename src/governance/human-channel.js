@@ -4,16 +4,14 @@
  * humanChannel for bareguard Gate. The single approval path for every gate
  * ask/halt — including always-ask confirms (flags) that previously went through
  * a separate bare-agent Checkpoint. Routes events back to the originating chat
- * via event.action._ctx, prompts the user, waits for a reply via the
- * pendingHumanResponses Map, and resolves to bareguard's {decision, reason,
- * newCap} shape.
+ * via event.action._ctx, prompts the user, waits for a reply parked on the
+ * shared PendingRegistry (delivered by the router's gate_reply dispatch), and
+ * resolves to bareguard's {decision, reason, newCap} shape.
  *
  * Test code can pass an `autoResponder(event)` that returns the decision
  * directly without touching the platform — used by integration tests so they
  * don't need to mock pendingApprovals.
  */
-
-const pendingHumanResponses = new Map(); // senderId → { resolve }
 
 /**
  * Resolve the owner's approval channel (#7). Prefers Telegram, where owner_id is
@@ -33,7 +31,7 @@ function resolveOwnerRoute(config, platformRegistry) {
  * Build a humanPrompt closure. Pass the platformRegistry so the prompt is
  * routed to the right transport. PIN verification is layered inside.
  */
-function createHumanPrompt({ platformRegistry, pinManager, config, autoResponder, timeoutMs = 60_000 } = {}) {
+function createHumanPrompt({ platformRegistry, pinManager, config, autoResponder, pending, timeoutMs = 60_000 } = {}) {
   return async function humanPrompt(event) {
     if (autoResponder) {
       return autoResponder(event);
@@ -75,7 +73,7 @@ function createHumanPrompt({ platformRegistry, pinManager, config, autoResponder
     }
 
     // Wait for the reply.
-    const reply = await waitForReply(senderId, timeoutMs);
+    const reply = await waitForReply(pending, chatId, senderId, { timeoutMs });
     if (reply == null) {
       return { decision: 'deny', reason: `humanChannel: timeout after ${timeoutMs}ms` };
     }
@@ -103,15 +101,15 @@ function createHumanPrompt({ platformRegistry, pinManager, config, autoResponder
  * Build a PIN challenge for the gate policy (#5). When a PIN-class tool (exec,
  * read_file) is invoked on the agent/natural-language path and the owner's PIN
  * session is stale, the gate calls this: it prompts in the owner's chat, waits
- * for the reply via the SAME pendingHumanResponses path the approval flow uses
- * (so the router's reply handler delivers it), verifies, and resolves true/false
+ * for the reply via the SAME PendingRegistry path the approval flow uses
+ * (so the router's gate_reply dispatch delivers it), verifies, and resolves true/false
  * so the same tool call resumes or is cancelled. No second LLM round.
  *
  * Returns a function (ctx) => Promise<boolean>. true = allow (PIN fresh, not
  * configured, or just verified); false = deny (timeout, wrong PIN, lockout, or
  * no channel to prompt on — fails closed).
  */
-function createPinChallenge({ platformRegistry, pinManager, timeoutMs = 300_000 } = {}) {
+function createPinChallenge({ platformRegistry, pinManager, pending, timeoutMs = 300_000 } = {}) {
   return async function pinChallenge(ctx) {
     if (!pinManager || !pinManager.isEnabled()) return true; // no PIN configured
     const auth = pinManager.needsAuth(ctx?.senderId);
@@ -131,7 +129,7 @@ function createPinChallenge({ platformRegistry, pinManager, timeoutMs = 300_000 
       return false;
     }
 
-    const reply = await waitForReply(ctx.senderId, timeoutMs);
+    const reply = await waitForReply(pending, ctx.chatId, ctx.senderId, { timeoutMs });
     if (reply == null) {
       try { await platform.send(ctx.chatId, 'PIN timed out — action cancelled.'); } catch { /* ignore */ }
       return false;
@@ -152,11 +150,11 @@ function createPinChallenge({ platformRegistry, pinManager, timeoutMs = 300_000 
  * of machine-wreckers (rm -rf /, dd to a device, mkfs, fork bomb, shutdown…):
  * it shows the exact command and requires the owner to reply the literal word
  * CONFIRM — a deliberate speed bump a stray message can't satisfy. Routes and
- * waits via the same pendingHumanResponses path as the PIN/approval flow.
+ * waits via the same PendingRegistry path as the PIN/approval flow.
  *
  * Returns (ctx, command) => Promise<boolean>. true only on an exact "CONFIRM".
  */
-function createConfirmChallenge({ platformRegistry, timeoutMs = 300_000 } = {}) {
+function createConfirmChallenge({ platformRegistry, pending, timeoutMs = 300_000 } = {}) {
   return async function confirmChallenge(ctx, command) {
     const platform = platformRegistry?.get(ctx?.platform);
     if (!platform || typeof platform.send !== 'function') return false; // can't prompt → deny
@@ -167,7 +165,7 @@ function createConfirmChallenge({ platformRegistry, timeoutMs = 300_000 } = {}) 
     } catch {
       return false;
     }
-    const reply = await waitForReply(ctx.senderId, timeoutMs);
+    const reply = await waitForReply(pending, ctx.chatId, ctx.senderId, { timeoutMs });
     if (reply == null) {
       try { await platform.send(ctx.chatId, 'Confirmation timed out — action cancelled.'); } catch { /* ignore */ }
       return false;
@@ -216,47 +214,36 @@ function summarizedArgs(action) {
   return out;
 }
 
-function waitForReply(senderId, timeoutMs) {
+/**
+ * Park a gate challenge (approval / PIN / CONFIRM) on the shared PendingRegistry
+ * and await the owner's reply. The challenge registers a 'gate_reply' entry whose
+ * payload is a `resolve` fn; the router's single pending dispatch calls it when a
+ * message arrives for this conversation. One entry per (chat, sender) → a reply
+ * can never satisfy the wrong challenge (the old shared-Map footgun).
+ *
+ * The setTimeout is authoritative for cancellation; the registry TTL is a loose
+ * backstop set well past it, so the router never announces a "prompt expired" for
+ * a gate reply (the challenge prints its own "timed out" copy).
+ *
+ * @returns {Promise<string|null>} the raw reply text, or null on timeout.
+ */
+function waitForReply(pending, chatId, senderId, { timeoutMs } = {}) {
   return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      if (pendingHumanResponses.has(senderId)) {
-        pendingHumanResponses.delete(senderId);
-        resolve(null);
-      }
-    }, timeoutMs);
+    const done = (text) => {
+      clearTimeout(timer);
+      pending.clear(chatId, senderId);
+      resolve(text);
+    };
+    const timer = setTimeout(() => done(null), timeoutMs);
     if (typeof timer.unref === 'function') timer.unref();
-    pendingHumanResponses.set(senderId, {
-      resolve: (text) => {
-        clearTimeout(timer);
-        pendingHumanResponses.delete(senderId);
-        resolve(text);
-      },
-    });
+    // No `match` → any next message from this conversation is the reply (the
+    // challenge interprets yes/no/PIN/CONFIRM itself), preserving prior behavior.
+    pending.set(chatId, senderId, 'gate_reply', { resolve: done, ttlMs: timeoutMs + 60_000 });
   });
-}
-
-/** Called from the message router when a paired user replies. Returns true if consumed. */
-function handleHumanReply(senderId, text) {
-  const pending = pendingHumanResponses.get(senderId);
-  if (!pending) return false;
-  pending.resolve(text);
-  return true;
-}
-
-function hasPendingHumanReply(senderId) {
-  return pendingHumanResponses.has(senderId);
-}
-
-function _clearAllPending() {
-  for (const [, p] of pendingHumanResponses) p.resolve(null);
-  pendingHumanResponses.clear();
 }
 
 module.exports = {
   createHumanPrompt,
   createPinChallenge,
   createConfirmChallenge,
-  handleHumanReply,
-  hasPendingHumanReply,
-  _clearAllPending,
 };
