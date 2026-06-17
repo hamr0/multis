@@ -17,6 +17,7 @@ const { Loop, Retry, CircuitBreaker } = require('bare-agent');
 const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler');
 const { createGate } = require('../governance/gate');
 const { createHumanPrompt, createPinChallenge, createConfirmChallenge, handleHumanReply, hasPendingHumanReply } = require('../governance/human-channel');
+const { PendingRegistry } = require('./pending');
 const PKG_VERSION = require('../../package.json').version;
 const { looksLikeCommand } = require('../platforms/message');
 const { mark, startClock } = require('../debug/instr'); // TEMP: timeout instrumentation
@@ -250,6 +251,10 @@ function createMessageRouter(config, deps = {}) {
   const memoryManagers = deps.memoryManagers || new Map();
   const _memBaseDir = deps.memoryBaseDir || PATHS.memory();
   const pinManager = deps.pinManager || new PinManager(config);
+  // Single store for every "next message is special" state (PIN entry,
+  // pin-change, and — as later phases migrate — gate challenges and pickers).
+  // Keyed by chatId:senderId, TTL-expiring, announce-on-expiry.
+  const pending = deps.pending || new PendingRegistry();
   // Business-mode inbound limiter (per-sender). Disabled only if explicitly off.
   const rlCfg = config.security?.rate_limit || {};
   const rateLimiter = deps.rateLimiter
@@ -345,35 +350,42 @@ function createMessageRouter(config, deps = {}) {
       return;
     }
 
-    // Check for PIN input (4-6 digit text from user with pending command)
-    if (pinManager.hasPending(msg.senderId) && /^\d{4,6}$/.test(text.trim())) {
-      const pending = pinManager.getPending(msg.senderId);
-      if (!pending) {
-        await platform.send(msg.chatId, 'PIN entry expired. Please re-send the command.');
-        return;
+    // Pending interaction (PIN entry, pin-change, …). One registry lookup holds
+    // every "next message is special" state for this conversation. entry.match
+    // decides whether THIS reply belongs to the prompt; a non-matching message
+    // (a /command, an unrelated query) falls through to normal routing below.
+    {
+      const entry = pending.get(msg.chatId, msg.senderId);
+      if (entry && (typeof entry.match !== 'function' || entry.match(text))) {
+        if (entry.expired) {
+          // Announce expiry rather than letting a late reply (PIN digits, a
+          // confirm word) fall through to the RAG pipeline as a search query —
+          // the orphaned-reply bug this de-tangle exists to kill.
+          await platform.send(msg.chatId, entry.expireMsg
+            || 'That prompt expired — please re-send the command.');
+          return;
+        }
+        const t = text.trim();
+        switch (entry.kind) {
+          case 'pin_change':
+            await handlePinChangeStep(msg, platform, config, pinManager, pending, t, entry);
+            return;
+          case 'pin_command': {
+            const result = pinManager.authenticate(msg.senderId, t);
+            if (!result.success) {
+              await platform.send(msg.chatId, result.reason);
+              if (result.locked) pending.clear(msg.chatId, msg.senderId);
+              return;
+            }
+            // PIN correct — execute the stored command.
+            await platform.send(msg.chatId, 'PIN accepted.');
+            pending.clear(msg.chatId, msg.senderId);
+            const stored = entry.data; // { command, args, msg, platform }
+            await executeCommand(stored.command, stored.args, stored.msg, platform, config, indexer, provider, memoryManagers, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, gov });
+            return;
+          }
+        }
       }
-
-      // Handle PIN change flow
-      if (pending.action === 'pin_change') {
-        await handlePinChangeStep(msg, platform, config, pinManager, text.trim(), pending);
-        return;
-      }
-
-      const result = pinManager.authenticate(msg.senderId, text.trim());
-      if (!result.success) {
-        await platform.send(msg.chatId, result.reason);
-        if (result.locked) pinManager.clearPending(msg.senderId);
-        return;
-      }
-
-      // PIN correct — execute the stored command
-      await platform.send(msg.chatId, 'PIN accepted.');
-      const stored = pending;
-      pinManager.clearPending(msg.senderId);
-      // Re-route the stored command
-      msg = stored.msg;
-      await executeCommand(stored.command, stored.args, msg, platform, config, indexer, provider, memoryManagers, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, gov });
-      return;
     }
 
     // Handle pending /admin designation flow (pick → confirm → PIN). Keyed by
@@ -610,13 +622,17 @@ function createMessageRouter(config, deps = {}) {
         return;
       }
       if (authNeeded === true) {
-        pinManager.setPending(msg.senderId, { command, args, msg, platform });
+        pending.set(msg.chatId, msg.senderId, 'pin_command', {
+          data: { command, args, msg, platform },
+          match: (t) => /^\d{4,6}$/.test(t.trim()),
+          expireMsg: 'PIN entry expired — please re-send the command.',
+        });
         await platform.send(msg.chatId, 'Enter your PIN:');
         return;
       }
     }
 
-    await executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, gov });
+    await executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, gov, pending });
   };
 
   router.registerPlatform = (name, instance) => {
@@ -688,7 +704,7 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
         await routeAgents(msg, platform, agentRegistry);
         break;
       case 'pin':
-        await routePinChange(msg, platform, config, pinManager);
+        await routePinChange(msg, platform, config, pinManager, toolDeps.pending);
         break;
       case 'remind':
         await routeRemind(msg, platform, config, provider, toolDeps);
@@ -721,7 +737,17 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
     }
 }
 
-async function routePinChange(msg, platform, config, pinManager) {
+// pin_change entries match digit replies and share the registry's announce-on-
+// expiry. The step ('verify' → 'new') lives on the entry itself.
+function setPinChangePending(pending, msg, step) {
+  pending.set(msg.chatId, msg.senderId, 'pin_change', {
+    step,
+    match: (t) => /^\d{4,6}$/.test(t.trim()),
+    expireMsg: 'PIN change timed out — send /pin to start over.',
+  });
+}
+
+async function routePinChange(msg, platform, config, pinManager, pending) {
   if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only command.');
     return;
@@ -729,34 +755,34 @@ async function routePinChange(msg, platform, config, pinManager) {
 
   if (!pinManager.isEnabled()) {
     // No PIN set — go straight to setting new PIN
-    pinManager.setPending(msg.senderId, { action: 'pin_change', step: 'new' });
+    setPinChangePending(pending, msg, 'new');
     await platform.send(msg.chatId, 'No PIN set. Enter a new PIN (4-6 digits):');
     return;
   }
 
   // PIN is set — verify current first
-  pinManager.setPending(msg.senderId, { action: 'pin_change', step: 'verify' });
+  setPinChangePending(pending, msg, 'verify');
   await platform.send(msg.chatId, 'Enter your current PIN:');
 }
 
-async function handlePinChangeStep(msg, platform, config, pinManager, pin, pending) {
-  if (pending.step === 'verify') {
+async function handlePinChangeStep(msg, platform, config, pinManager, pending, pin, entry) {
+  if (entry.step === 'verify') {
     const result = pinManager.authenticate(msg.senderId, pin);
     if (!result.success) {
       await platform.send(msg.chatId, result.reason);
-      if (result.locked) pinManager.clearPending(msg.senderId);
+      if (result.locked) pending.clear(msg.chatId, msg.senderId);
       return;
     }
-    pinManager.setPending(msg.senderId, { action: 'pin_change', step: 'new' });
+    setPinChangePending(pending, msg, 'new');
     await platform.send(msg.chatId, 'Enter your new PIN (4-6 digits):');
-  } else if (pending.step === 'new') {
+  } else if (entry.step === 'new') {
     if (!/^\d{4,6}$/.test(pin)) {
       await platform.send(msg.chatId, 'PIN must be 4-6 digits. Try again:');
       return;
     }
     config.security.pin_hash = hashPin(pin);
     saveConfig(config);
-    pinManager.clearPending(msg.senderId);
+    pending.clear(msg.chatId, msg.senderId);
     await platform.send(msg.chatId, 'PIN updated successfully.');
     logAudit({ action: 'pin_change', user_id: msg.senderId });
   }

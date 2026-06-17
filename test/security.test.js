@@ -176,33 +176,8 @@ describe('PinManager', () => {
     });
   });
 
-  describe('pending commands', () => {
-    it('stores and retrieves pending command', () => {
-      const pm = new PinManager({ security: {} });
-      pm.setPending('user1', { command: 'exec', args: 'ls' });
-      assert.strictEqual(pm.hasPending('user1'), true);
-      const p = pm.getPending('user1');
-      assert.strictEqual(p.command, 'exec');
-      assert.strictEqual(p.args, 'ls');
-    });
-
-    it('clears pending command', () => {
-      const pm = new PinManager({ security: {} });
-      pm.setPending('user1', { command: 'exec', args: 'ls' });
-      pm.clearPending('user1');
-      assert.strictEqual(pm.hasPending('user1'), false);
-    });
-
-    it('expires pending command after 5 minutes', () => {
-      const pm = new PinManager({ security: {} });
-      pm.pendingCommands.set('user1', {
-        command: 'exec',
-        args: 'ls',
-        timestamp: Date.now() - 6 * 60 * 1000 // 6 minutes ago
-      });
-      assert.strictEqual(pm.getPending('user1'), null);
-    });
-  });
+  // PIN command-entry pending state moved from PinManager to the unified
+  // PendingRegistry — see test/pending.test.js (store / clear / TTL-expiry).
 });
 
 // --- Prompt injection detection ---

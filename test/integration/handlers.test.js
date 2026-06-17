@@ -4,6 +4,7 @@ const assert = require('node:assert');
 const { createMessageRouter, buildAgentRegistry, resolveAgent, clearAdminPauses } = require('../../src/bot/handlers');
 const { updateChatMeta, backupConfig } = require('../../src/config');
 const { PinManager, hashPin } = require('../../src/security/pin');
+const { PendingRegistry } = require('../../src/bot/pending');
 const { createTestEnv, mockPlatform, mockLLM, msg } = require('../helpers/setup');
 
 // ---------------------------------------------------------------------------
@@ -224,6 +225,50 @@ describe('PIN auth', () => {
 
     await router(msg('/exec ls'), platform);
     assert.match(platform.sent[0].text, /locked/i);
+  });
+
+  it('a PIN reply that arrives after the prompt EXPIRES is announced, not routed to /ask (orphaned-reply bug)', async () => {
+    // The bug: once the PIN prompt's pending state lapses, the user's late PIN
+    // digits fell through the dispatch and, in a natural/business chat, landed
+    // in the RAG pipeline as a search query (or were silently dropped). The
+    // registry's announce-on-expiry must intercept it instead.
+    const pinHash = hashPin('1234');
+    const env = createTestEnv({
+      allowed_users: ['user1'],
+      owner_id: 'user1',
+      security: { pin_hash: pinHash, pin_timeout_hours: 24 },
+    });
+    const platform = mockPlatform();
+    const pinManager = new PinManager(env.config);
+    pinManager.sessions = {};
+
+    // Injected clock so we can age the pending entry past its TTL deterministically.
+    let clock = 1_000_000;
+    const pending = new PendingRegistry({ now: () => clock });
+
+    const llm = mockLLM('RAG answer — should never be produced for a PIN reply');
+    const router = createMessageRouter(env.config, {
+      llm,
+      indexer: stubIndexer(),
+      pinManager,
+      pending,
+    });
+
+    // Owner issues a protected command → PIN prompt; entry stamped at t0.
+    await router(msg('/exec ls'), platform);
+    assert.match(platform.sent[0].text, /Enter your PIN/);
+
+    // Time passes beyond the 5-minute TTL, then the owner finally types the PIN
+    // in a natural-routed chat (the exact path the old code sent to routeAsk).
+    clock += 6 * 60 * 1000;
+    await router(msg('1234', { routeAs: 'natural' }), platform);
+
+    // It is intercepted as an expiry announcement…
+    assert.match(platform.sent[1].text, /expired/i);
+    // …NOT handed to the LLM/RAG pipeline as a query…
+    assert.strictEqual(llm.calls.length, 0, 'late PIN digits must not reach the LLM');
+    // …and the stale entry is gone (announce-once).
+    assert.strictEqual(pending.get('chat1', 'user1'), null);
   });
 });
 
