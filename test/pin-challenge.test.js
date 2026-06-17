@@ -88,6 +88,20 @@ describe('createPinChallenge (#5)', () => {
     assert.strictEqual(await challenge({ senderId: 'u', chatId: 'c', platform: 'telegram' }), false);
   });
 
+  it('parks with a registry TTL looser than its timeout (timer governs, not announce-on-expiry)', async () => {
+    const plat = mockPlatform();
+    const challenge = createPinChallenge({ pending, platformRegistry: new Map([['telegram', plat]]), pinManager: stubPin(), timeoutMs: 1000 });
+    const p = challenge({ senderId: 'u', chatId: 'c', platform: 'telegram' });
+    await new Promise((r) => setTimeout(r, 10)); // let the waiter park
+
+    const e = pending.peek('c', 'u');
+    assert.strictEqual(e.kind, 'gate_reply');
+    assert.ok(e.ttlMs > 1000, 'registry TTL is a loose backstop past the timer, so a gate reply is never announced-as-expired');
+
+    e.resolve('1234'); // clean up the parked waiter
+    await p;
+  });
+
   it('denies on lockout without waiting for input', async () => {
     const plat = mockPlatform();
     const challenge = createPinChallenge({ pending, platformRegistry: new Map([['telegram', plat]]), pinManager: stubPin({ auth: 'locked' }) });
