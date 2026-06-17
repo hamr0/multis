@@ -4,6 +4,16 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+### Changed — router pending-state de-tangle (unified PendingRegistry)
+
+The router's "the next message is special" handling had grown into **three parallel, drifting subsystems** — `pinManager.pendingCommands` (PIN entry), human-channel's `pendingHumanResponses` (gate approval/PIN/CONFIRM), and five `config._pending*` objects (admin/index/mode/business-menu/wizard) — each with a different key (a mix of `senderId` and `chatId`), a different TTL (or none), and its own dispatch check at the top of the router. Two real bugs fell out: a PIN reply arriving **after the prompt lapsed** fell through to the RAG pipeline as a *search query* (or was silently dropped), and a reply could be consumed by the wrong pending challenge. Replaced with one store — `src/bot/pending.js` `PendingRegistry`: keyed by the `chatId:senderId` tuple, uniform TTL, **announce-on-expiry**, payload-agnostic so both stored-continuations and parked-promise challenges share it. Migrated so far (phases 1–2 of 4):
+
+- **PIN command-entry + pin-change** onto the registry; the dead `PinManager` pending methods removed. A late PIN reply now gets *"PIN entry expired — please re-send the command."* instead of becoming a query. The `chatId:senderId` key also removes the cross-chat / Beeper senderId-drift collisions of the old `senderId`-only mix.
+- **The three gate challenges** (approval / PIN / CONFIRM) onto the registry; `pendingHumanResponses` + `handleHumanReply`/`hasPendingHumanReply` + the separate dispatch path deleted. The router top is now a single `pending.get()` + `switch(entry.kind)`.
+- **Two concurrency hazards fixed** while here (both pre-existed in the old code): a displaced parked challenge was silently *orphaned* (hung to its own timer) — `set()` now resolves it `null` on overwrite; and two near-simultaneous correct PINs could *double-run* the command (the get→clear window spanned an `await`) — the entry is now claimed synchronously before the first await, with wrong-PIN retry preserved.
+
+Behavior-neutral for the live flows; the orphaned-reply, double-execute, and displaced-waiter fixes are each red→green mutation-proven. **Still in flight:** the five `config._pending*` pickers (phase 3) and deleting the scaffolding (phase 4). 513/513 green.
+
 ### Changed — dispatch/agent rewrite (obedient-bot-first)
 
 Live dogfooding ("find me X on my laptop") kept failing. Temporary timestamped instrumentation (`src/debug/instr.js`, an event-loop-lag monitor + phase marks, on by default, `MULTIS_INSTR=0` to silence) **pinned the cause** — and it was *not* the intermittent beeperbox 15 s timeout (that never reproduced across the dogfood; the earlier `execSync`→async-`exec` fix appears to have cleared the common case, and the instrumentation stays armed for the rest). The real cause was the prompt/governance wiring. Fixes, all behind 493/493 green:
@@ -14,7 +24,7 @@ Live dogfooding ("find me X on my laptop") kept failing. Temporary timestamped i
 - **Unknown commands reply** (`Unknown command: /x — try /help`) instead of silently no-opping.
 - **Halt prompt clarity.** A tool-round-cap halt now renders as a plain *"⚠️ Stopped — I took too many tool steps … try rephrasing"* and **terminates immediately** instead of waiting 60 s on a meaningless "yes to terminate / no to deny" (the old shape also caused a needless `humanChannel` 60 s timeout on every cap halt).
 
-**Still in flight (next passes):** the router pending-state-machine de-tangle. Persona/constitution/facts return with the litectx memory module.
+**Still in flight (next passes):** the router pending-state-machine de-tangle — phases 1–2 now shipped (see the *unified PendingRegistry* entry above); the `config._pending*` pickers remain. Persona/constitution/facts return with the litectx memory module.
 
 ### Changed — command governance (3-tier: benign / destructive→PIN / catastrophic→PIN+CONFIRM)
 
