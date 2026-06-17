@@ -1,6 +1,9 @@
-const { execSync } = require('child_process');
+const { exec } = require('child_process');
+const { promisify } = require('util');
 const fs = require('fs');
 const path = require('path');
+
+const execAsync = promisify(exec);
 const { logAudit } = require('../governance/audit');
 const { SECRET_ENV_KEYS } = require('../config');
 
@@ -20,13 +23,16 @@ function scrubbedEnv() {
 /**
  * Execute a shell command. Governance (command allowlist/denylist) is handled
  * by the bareguard Gate (wired via bare-agent's wireGate), not here.
+ * Async (non-blocking) so a long-running command never stalls the single event
+ * loop — a blocking `execSync` here would starve the beeperbox MCP poller/sender
+ * and trip its request timeout.
  * @param {string} command - Full command string
  * @param {number} userId - User ID for audit
- * @returns {Object} - { success, output }
+ * @returns {Promise<Object>} - { success, output }
  */
-function execCommand(command, userId) {
+async function execCommand(command, userId) {
   try {
-    const output = execSync(command, {
+    const { stdout } = await execAsync(command, {
       encoding: 'utf8',
       timeout: 10000,
       maxBuffer: 1024 * 1024,
@@ -34,9 +40,9 @@ function execCommand(command, userId) {
       env: scrubbedEnv()
     });
 
-    const trimmed = output.length > MAX_OUTPUT
-      ? output.slice(0, MAX_OUTPUT) + '\n... (truncated)'
-      : output;
+    const trimmed = stdout.length > MAX_OUTPUT
+      ? stdout.slice(0, MAX_OUTPUT) + '\n... (truncated)'
+      : stdout;
 
     logAudit({ action: 'exec', user_id: userId, command, status: 'success' });
     return { success: true, output: trimmed || '(no output)' };

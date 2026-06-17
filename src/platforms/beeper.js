@@ -1,7 +1,8 @@
 const fs = require('fs');
 const { Platform } = require('./base');
-const { Message } = require('./message');
+const { Message, looksLikeCommand } = require('./message');
 const { BeeperboxMcpClient } = require('./beeperbox-mcp');
+const { mark, startClock } = require('../debug/instr'); // TEMP: timeout instrumentation
 
 const DEFAULT_MCP_URL = 'http://localhost:23375';  // beeperbox MCP transport (watch/send)
 const DEFAULT_POLL_INTERVAL = 3000;
@@ -100,7 +101,10 @@ class BeeperPlatform extends Platform {
     // Unique client_tag → beeperbox tags the read-back source:"api" by exact id,
     // so our own send is skipped on the next poll. No [multis] text prefix.
     const client_tag = `multis-${process.pid}-${++this._sendSeq}`;
+    const _c = startClock();
+    mark(`send -> sendMessage (chat ${chatId}, ${text.length} chars)`);
     await this.mcp.sendMessage({ chat_id: chatId, text, client_tag });
+    mark('send <- sendMessage ok', _c);
   }
 
   async _poll() {
@@ -112,11 +116,13 @@ class BeeperPlatform extends Platform {
       // the cursor only past what it returned, so has_more means "more is
       // immediately fetchable" — keep going (bounded) before sleeping.
       for (let page = 0; page < MAX_PAGES_PER_TICK; page++) {
+        const _pc = startClock();
         const res = await this.mcp.pollMessages({ cursor: this._cursor });
         this._cursor = res.cursor;
         this._saveCursor();
 
         const messages = res.messages || [];
+        if (messages.length) mark(`poll p${page} <- ${messages.length} msg(s)`, _pc);
         for (const msg of messages) {
           await this._handleMessage(msg);
         }
@@ -181,14 +187,19 @@ class BeeperPlatform extends Platform {
     let routeAs = null;
     let shouldProcess = false;
 
-    if (isSelf && isPersonalChat && text.startsWith(this.commandPrefix)) {
+    // A command must have command SHAPE (`/help`, `/ask x`) — a pasted path like
+    // `/home/hamr/resumes/` is NOT a command and routes as natural language, so
+    // it reaches the agent loop instead of being parsed as an unknown command
+    // and silently dropped.
+    const isCmd = looksLikeCommand(text);
+    if (isSelf && isPersonalChat && isCmd) {
       // Explicit command from personal/note-to-self chat only
       shouldProcess = true;
-    } else if (isSelf && isPersonalChat && !text.startsWith(this.commandPrefix)) {
+    } else if (isSelf && isPersonalChat && !isCmd) {
       // Self-message in personal chat → natural language ask / interactive reply
       routeAs = 'natural';
       shouldProcess = true;
-    } else if (isAdminChat && text.startsWith(this.commandPrefix)) {
+    } else if (isAdminChat && isCmd) {
       // Command from a designated limited-admin chat
       shouldProcess = true;
     } else if (isAdminChat) {
@@ -242,11 +253,14 @@ class BeeperPlatform extends Platform {
       }));
     }
 
+    const _hc = startClock();
+    mark(`handler -> ${routeAs || 'command'} "${text.slice(0, 40)}"`);
     try {
       await this._messageCallback(normalized, this);
     } catch (err) {
       console.error(`Beeper: handler error — ${err.message}`);
     }
+    mark('handler <- done', _hc);
   }
 
   /**

@@ -914,13 +914,17 @@ describe('Agent routing in /ask', () => {
     const router = createMessageRouter(env.config, { llm, indexer: stubIndexer() });
 
     await router(msg('/ask @coder how do I parse JSON?'), platform);
-    // Should have [coder] prefix since multiple agents
+    // @mention still routes (name prefix shown since multiple agents exist) and
+    // the @mention is stripped from the question.
     assert.match(platform.lastTo('chat1').text, /\[coder\] code answer/);
-    // System prompt should use coder persona (bareagent prepends system message)
+    // Persona is DEFERRED (obedient-bot-first; see dispatch-rewrite-decision):
+    // a configured persona must NOT replace the base prompt, or the model loses
+    // "use your tools" and deflects. Owner path always runs the obedient base.
     const call = llm.calls[0];
     const systemMsg = call.messages.find(m => m.role === 'system');
     assert.ok(systemMsg, 'should have system message');
-    assert.match(systemMsg.content, /senior developer/i);
+    assert.doesNotMatch(systemMsg.content, /senior developer/i, 'persona must not replace base prompt');
+    assert.match(systemMsg.content, /USE YOUR TOOLS/i, 'obedient base prompt is used');
   });
 
   it('single agent does not prefix response', async () => {
@@ -944,6 +948,26 @@ describe('Agent routing in /ask', () => {
 
     await router(msg('/ask hello'), platform);
     assert.strictEqual(platform.lastTo('chat1').text, 'classic answer');
+  });
+
+  it('unknown command replies instead of silently dropping (#4)', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM('x'), indexer: stubIndexer() });
+
+    await router(msg('/frobnicate the widget'), platform);
+    assert.match(platform.lastTo('chat1').text, /unknown command: \/frobnicate/i);
+  });
+
+  it('a pasted path routes to the agent loop, not an unknown-command drop (#4)', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const llm = mockLLM('searching for that');
+    const router = createMessageRouter(env.config, { llm, indexer: stubIndexer() });
+
+    await router(msg('/home/hamr/Documents/resumes/'), platform);
+    // Reaches the agent loop (mock answer) rather than "unknown command".
+    assert.strictEqual(platform.lastTo('chat1').text, 'searching for that');
   });
 });
 

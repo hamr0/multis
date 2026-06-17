@@ -1,4 +1,15 @@
 /**
+ * Does the text have the SHAPE of a slash command (a single token like `/help`
+ * or `/ask foo`) rather than a pasted path (`/home/user/file`)? A command is a
+ * `/` followed by a letter then word chars, terminated by whitespace, end, or a
+ * Telegram `@bot` suffix. `/home/hamr/...` fails (a `/` interrupts the token),
+ * so it routes as natural language instead of a silently-dropped unknown command.
+ */
+function looksLikeCommand(text) {
+  return /^\/[a-zA-Z][\w-]*(?:@\S+)?(?:\s|$)/.test(text || '');
+}
+
+/**
  * Normalized message across all platforms.
  * Telegram bot messages are always commands.
  * Beeper messages are commands only when prefixed with / from personal chats.
@@ -34,7 +45,7 @@ class Message {
    */
   isCommand() {
     if (this.platform === 'telegram') return true;
-    if (this.platform === 'beeper') return (this.isSelf || this.isAdminChat) && this.text.startsWith('/');
+    if (this.platform === 'beeper') return (this.isSelf || this.isAdminChat) && looksLikeCommand(this.text);
     return false;
   }
 
@@ -67,4 +78,4 @@ class Message {
   }
 }
 
-module.exports = { Message };
+module.exports = { Message, looksLikeCommand };

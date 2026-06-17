@@ -352,8 +352,8 @@ describe('audit secret redaction + exec env scrub', () => {
     assert.match(last.command, /\*\*\*/);
   });
 
-  it('exec child env does not expose the bot secret', () => {
-    const res = execCommand('printf %s "$ANTHROPIC_API_KEY"', 'u1');
+  it('exec child env does not expose the bot secret', async () => {
+    const res = await execCommand('printf %s "$ANTHROPIC_API_KEY"', 'u1');
     assert.strictEqual(res.success, true);
     assert.ok(!String(res.output).includes(SECRET), 'scrubbed key must not reach the exec child');
   });

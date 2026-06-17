@@ -4,6 +4,18 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+### Changed — dispatch/agent rewrite (obedient-bot-first)
+
+Live dogfooding ("find me X on my laptop") kept failing. Temporary timestamped instrumentation (`src/debug/instr.js`, an event-loop-lag monitor + phase marks, on by default, `MULTIS_INSTR=0` to silence) **pinned the cause** — and it was *not* the intermittent beeperbox 15 s timeout (that never reproduced across the dogfood; the earlier `execSync`→async-`exec` fix appears to have cleared the common case, and the instrumentation stays armed for the rest). The real cause was the prompt/governance wiring. Fixes, all behind 493/493 green:
+
+- **Persona no longer shadows the tool-use prompt.** `buildMemorySystemPrompt` composed the system prompt as `persona || SYSTEM_PROMPT`, so a configured agent persona (e.g. *"You are a helpful personal assistant."*) **replaced** the base prompt that tells the model it has tools — the model then deflected ("I don't have access to a database") and guessed out-of-scope paths that the gate denied, surfaced to the user as a false "I don't have permission". The owner/natural path now always runs the obedient base prompt; persona/constitution is **deferred** to the memory/litectx module (business mode keeps its customer-facing persona). The base prompt is rewritten to be an *obedient* bot: the owner's messages are orders, USE the tools immediately, never claim a lack of access before trying, search instead of guessing a path, and report the real tool error.
+- **Owner has full machine access.** `governance.paths` is now `allowed:["/"]`, `denied:[]` — the owner can read/find/grep anywhere (single-owner model: customers never get host tools, gated at `ownerCheck`). Previously a narrow `~/Documents,~/Downloads,…` read scope denied `~/Music`, `/stuff`, etc., which is what broke "find my music".
+- **Pasted paths are no longer mis-parsed as commands.** A new `looksLikeCommand` (`/help`, `/ask x`) distinguishes a command from a pasted path (`/home/hamr/resumes/`); a path now routes to the agent as natural language instead of parsing as an unknown command and being silently dropped.
+- **Unknown commands reply** (`Unknown command: /x — try /help`) instead of silently no-opping.
+- **Halt prompt clarity.** A tool-round-cap halt now renders as a plain *"⚠️ Stopped — I took too many tool steps … try rephrasing"* and **terminates immediately** instead of waiting 60 s on a meaningless "yes to terminate / no to deny" (the old shape also caused a needless `humanChannel` 60 s timeout on every cap halt).
+
+**Still in flight (next passes):** destructive commands → PIN challenge (currently still hard-denied via the denylist); the router pending-state-machine de-tangle; `find_files` substring/glob matching (it missed `amr-hassan-resume.txt` on a `amr-hassan-resume` query). Persona/constitution/facts return with the litectx memory module.
+
 ### Changed — `multis init` wizard
 
 - **Branched setup flow.** Step 1 now asks the two real questions separately instead of a flat 3-item list: first **what** (Personal assistant / Business chatbot), then **how to run it**, branched by that choice. Personal → *Your personal bot* (Telegram only) or *Personal bot + messenger assistant* (Telegram + Beeper, all messengers). Business → runs through Beeper (a Telegram bot can't see your real contacts), with an opt-in "also add Telegram as a backup admin channel?".

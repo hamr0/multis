@@ -310,7 +310,9 @@ Set this up with `multis init` option 3 (Business chatbot).
 | `/skills` | List available skills |
 | `/unpair` | Remove your pairing (you'll need the code to pair again) |
 | `/help` | Show available commands |
-| *(plain text)* | Treated as `/ask <your text>` |
+| *(plain text)* | Drives the full tool-using agent (`/ask`): searches your documents and, on your machine, will find/read files and run things directly rather than telling you to do it yourself |
+
+> A message that starts with `/` but isn't a known command (e.g. a pasted path like `/home/you/file.txt`) is treated as plain text, not a command. A genuinely unknown command (e.g. `/frobnicate`) replies with *"Unknown command — try /help"* rather than being silently ignored.
 
 ### Owner / Admin Commands
 
@@ -545,6 +547,8 @@ This means the bot remembers key facts from past conversations without you manua
 ---
 
 ## 13. Agents
+
+> **Personas are currently deferred (as of 2026-06-17).** The owner/personal path now always runs an *obedient* base prompt — the assistant follows your orders and uses its tools directly — and a configured `persona` is **not** applied there (it used to *replace* the base prompt, which made the model deflect file/command requests). Agent **routing** (`@mention`, per-chat assignment, the `[name]` prefix) and **business-mode** personas still work; the personal-persona/constitution layer returns with the upcoming memory module. The config below is still read for routing and business mode.
 
 Agents are named personas with different system prompts. You can configure multiple agents and route chats to specific ones.
 

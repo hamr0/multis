@@ -712,6 +712,24 @@ describe('Message (beeper)', () => {
     assert.strictEqual(m.isCommand(), false);
   });
 
+  it('isCommand returns false for a pasted path (slashes are not a command)', () => {
+    // Regression: `/home/hamr/resumes/` used to parse as command "home/hamr/..."
+    // and silently no-op. It must route as natural language instead.
+    const m = new Message({ platform: 'beeper', text: '/home/hamr/Documents/resumes/', isSelf: true });
+    assert.strictEqual(m.isCommand(), false);
+  });
+
+  it('looksLikeCommand distinguishes commands from paths', () => {
+    const { looksLikeCommand } = require('../src/platforms/message');
+    assert.strictEqual(looksLikeCommand('/help'), true);
+    assert.strictEqual(looksLikeCommand('/ask what time is it'), true);
+    assert.strictEqual(looksLikeCommand('/status@multis0bot'), true);
+    assert.strictEqual(looksLikeCommand('/home/hamr/file.txt'), false);
+    assert.strictEqual(looksLikeCommand('/usr/bin/node'), false);
+    assert.strictEqual(looksLikeCommand('hello there'), false);
+    assert.strictEqual(looksLikeCommand('/'), false);
+  });
+
   it('commandText strips / prefix and trims', () => {
     const m = new Message({ platform: 'beeper', text: '/exec ls', isSelf: true });
     assert.strictEqual(m.commandText(), 'exec ls');

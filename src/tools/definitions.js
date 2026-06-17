@@ -29,7 +29,7 @@ const TOOLS = [
       required: ['command']
     },
     execute: async ({ command }, ctx) => {
-      const result = execCommand(command, ctx.senderId);
+      const result = await execCommand(command, ctx.senderId);
       return result.output;
     }
   },
@@ -87,7 +87,7 @@ const TOOLS = [
       const dir = (searchPath || '~').replace(/^~/, process.env.HOME || '');
       const opts = flags || '-rn';
       const cmd = `grep ${opts} ${JSON.stringify(pattern)} ${JSON.stringify(dir)}`;
-      const result = execCommand(cmd, ctx.senderId);
+      const result = await execCommand(cmd, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.output || 'No matches found.';
     }
@@ -107,7 +107,7 @@ const TOOLS = [
     execute: async ({ name, path: searchPath }, ctx) => {
       const dir = (searchPath || '~').replace(/^~/, process.env.HOME || '');
       const cmd = `find ${JSON.stringify(dir)} -maxdepth 5 -name ${JSON.stringify(name)} 2>/dev/null`;
-      const result = execCommand(cmd, ctx.senderId);
+      const result = await execCommand(cmd, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.output || 'No files found.';
     }
@@ -249,7 +249,7 @@ const TOOLS = [
       const cmds = { linux: 'xdg-open', macos: 'open', android: 'termux-open-url' };
       const cmd = cmds[ctx.runtimePlatform];
       if (!cmd) return `Unsupported platform: ${ctx.runtimePlatform}`;
-      const result = execCommand(`${cmd} ${JSON.stringify(url)}`, ctx.senderId);
+      const result = await execCommand(`${cmd} ${JSON.stringify(url)}`, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? `Opened: ${url}` : result.output;
     }
@@ -271,7 +271,7 @@ const TOOLS = [
         const cmd = ctx.runtimePlatform === 'linux'
           ? `pactl set-sink-volume @DEFAULT_SINK@ ${Math.round(volume)}%`
           : `osascript -e 'set volume output volume ${Math.round(volume)}'`;
-        const result = execCommand(cmd, ctx.senderId);
+        const result = await execCommand(cmd, ctx.senderId);
         if (result.denied) return `Denied: ${result.reason}`;
         return result.success ? `Volume set to ${Math.round(volume)}%` : result.output;
       }
@@ -279,7 +279,7 @@ const TOOLS = [
       const cmd = ctx.runtimePlatform === 'linux'
         ? `playerctl ${action}`
         : `osascript -e 'tell application "Music" to ${action === 'play-pause' ? 'playpause' : action}'`;
-      const result = execCommand(cmd, ctx.senderId);
+      const result = await execCommand(cmd, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? `Media: ${action}` : result.output;
     }
@@ -305,7 +305,7 @@ const TOOLS = [
       };
       const cmd = cmds[ctx.runtimePlatform];
       if (!cmd) return `Unsupported platform: ${ctx.runtimePlatform}`;
-      const result = execCommand(cmd, ctx.senderId);
+      const result = await execCommand(cmd, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? 'Notification sent.' : result.output;
     }
@@ -331,7 +331,7 @@ const TOOLS = [
           android: `termux-clipboard-set ${JSON.stringify(text)}`
         };
         const cmd = cmds[ctx.runtimePlatform];
-        const result = execCommand(cmd, ctx.senderId);
+        const result = await execCommand(cmd, ctx.senderId);
         if (result.denied) return `Denied: ${result.reason}`;
         return result.success ? 'Copied to clipboard.' : result.output;
       }
@@ -341,7 +341,7 @@ const TOOLS = [
         android: 'termux-clipboard-get'
       };
       const cmd = cmds[ctx.runtimePlatform];
-      const result = execCommand(cmd, ctx.senderId);
+      const result = await execCommand(cmd, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.output;
     }
@@ -362,7 +362,7 @@ const TOOLS = [
       const cmd = ctx.runtimePlatform === 'linux'
         ? `gnome-screenshot -f ${JSON.stringify(file)} 2>/dev/null || grim ${JSON.stringify(file)}`
         : `screencapture ${JSON.stringify(file)}`;
-      const result = execCommand(cmd, ctx.senderId);
+      const result = await execCommand(cmd, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? `Screenshot saved to ${file}` : result.output;
     }
@@ -384,7 +384,7 @@ const TOOLS = [
       };
       const cmd = cmds[ctx.runtimePlatform];
       if (!cmd) return `Unsupported platform: ${ctx.runtimePlatform}`;
-      const result = execCommand(cmd, ctx.senderId);
+      const result = await execCommand(cmd, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.output;
     }
@@ -407,7 +407,7 @@ const TOOLS = [
         const cmd = ctx.runtimePlatform === 'linux'
           ? 'nmcli device wifi list'
           : "networksetup -listpreferredwirelessnetworks en0";
-        const result = execCommand(cmd, ctx.senderId);
+        const result = await execCommand(cmd, ctx.senderId);
         if (result.denied) return `Denied: ${result.reason}`;
         return result.output;
       }
@@ -415,7 +415,7 @@ const TOOLS = [
       const cmd = ctx.runtimePlatform === 'linux'
         ? `nmcli device wifi connect ${JSON.stringify(ssid)}${password ? ` password ${JSON.stringify(password)}` : ''}`
         : `networksetup -setairportnetwork en0 ${JSON.stringify(ssid)}${password ? ` ${JSON.stringify(password)}` : ''}`;
-      const result = execCommand(cmd, ctx.senderId);
+      const result = await execCommand(cmd, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? `Connected to ${ssid}` : result.output;
     }
@@ -436,7 +436,7 @@ const TOOLS = [
       const cmd = ctx.runtimePlatform === 'linux'
         ? `brightnessctl set ${pct}%`
         : `brightness ${pct / 100}`;
-      const result = execCommand(cmd, ctx.senderId);
+      const result = await execCommand(cmd, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? `Brightness set to ${pct}%` : result.output;
     }
@@ -457,7 +457,7 @@ const TOOLS = [
       required: ['number']
     },
     execute: async ({ number }, ctx) => {
-      const result = execCommand(`termux-telephony-call ${JSON.stringify(number)}`, ctx.senderId);
+      const result = await execCommand(`termux-telephony-call ${JSON.stringify(number)}`, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? `Calling ${number}...` : result.output;
     }
@@ -475,7 +475,7 @@ const TOOLS = [
       required: ['number', 'message']
     },
     execute: async ({ number, message }, ctx) => {
-      const result = execCommand(`termux-sms-send -n ${JSON.stringify(number)} ${JSON.stringify(message)}`, ctx.senderId);
+      const result = await execCommand(`termux-sms-send -n ${JSON.stringify(number)} ${JSON.stringify(message)}`, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? `SMS sent to ${number}` : result.output;
     }
@@ -493,7 +493,7 @@ const TOOLS = [
     },
     execute: async ({ limit }, ctx) => {
       const n = limit || 10;
-      const result = execCommand(`termux-sms-list -l ${n}`, ctx.senderId);
+      const result = await execCommand(`termux-sms-list -l ${n}`, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.output;
     }
@@ -508,7 +508,7 @@ const TOOLS = [
       required: []
     },
     execute: async (_input, ctx) => {
-      const result = execCommand('termux-contact-list', ctx.senderId);
+      const result = await execCommand('termux-contact-list', ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.output;
     }
@@ -523,7 +523,7 @@ const TOOLS = [
       required: []
     },
     execute: async (_input, ctx) => {
-      const result = execCommand('termux-location -p network', ctx.senderId);
+      const result = await execCommand('termux-location -p network', ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.output;
     }
@@ -542,7 +542,7 @@ const TOOLS = [
     execute: async ({ camera }, ctx) => {
       const cam = camera || 0;
       const file = `/data/data/com.termux/files/home/photo_${Date.now()}.jpg`;
-      const result = execCommand(`termux-camera-photo -c ${cam} ${file}`, ctx.senderId);
+      const result = await execCommand(`termux-camera-photo -c ${cam} ${file}`, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? `Photo saved: ${file}` : result.output;
     }
@@ -559,7 +559,7 @@ const TOOLS = [
       required: ['text']
     },
     execute: async ({ text }, ctx) => {
-      const result = execCommand(`termux-tts-speak ${JSON.stringify(text)}`, ctx.senderId);
+      const result = await execCommand(`termux-tts-speak ${JSON.stringify(text)}`, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? 'Speaking...' : result.output;
     }
@@ -576,7 +576,7 @@ const TOOLS = [
       required: ['enabled']
     },
     execute: async ({ enabled }, ctx) => {
-      const result = execCommand(`termux-torch ${enabled ? 'on' : 'off'}`, ctx.senderId);
+      const result = await execCommand(`termux-torch ${enabled ? 'on' : 'off'}`, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? `Flashlight ${enabled ? 'on' : 'off'}` : result.output;
     }
@@ -594,7 +594,7 @@ const TOOLS = [
     },
     execute: async ({ duration }, ctx) => {
       const ms = duration || 1000;
-      const result = execCommand(`termux-vibrate -d ${ms}`, ctx.senderId);
+      const result = await execCommand(`termux-vibrate -d ${ms}`, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? 'Vibrated.' : result.output;
     }
@@ -612,7 +612,7 @@ const TOOLS = [
       required: ['stream', 'level']
     },
     execute: async ({ stream, level }, ctx) => {
-      const result = execCommand(`termux-volume ${stream} ${level}`, ctx.senderId);
+      const result = await execCommand(`termux-volume ${stream} ${level}`, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? `${stream} volume set to ${level}` : result.output;
     }
@@ -627,7 +627,7 @@ const TOOLS = [
       required: []
     },
     execute: async (_input, ctx) => {
-      const result = execCommand('termux-battery-status', ctx.senderId);
+      const result = await execCommand('termux-battery-status', ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.output;
     }

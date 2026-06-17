@@ -18,6 +18,8 @@ const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler
 const { createGate } = require('../governance/gate');
 const { createHumanPrompt, createPinChallenge, handleHumanReply, hasPendingHumanReply } = require('../governance/human-channel');
 const PKG_VERSION = require('../../package.json').version;
+const { looksLikeCommand } = require('../platforms/message');
+const { mark, startClock } = require('../debug/instr'); // TEMP: timeout instrumentation
 
 // ---------------------------------------------------------------------------
 // Admin presence pause — when owner messages in a business chat, bot pauses
@@ -701,9 +703,13 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
         await routeHelp(msg, platform, config);
         break;
       default:
-        // Telegram plain text (no recognized command) → implicit ask
-        if (msg.platform === 'telegram' && !msg.text.startsWith('/')) {
+        if (!looksLikeCommand(msg.text)) {
+          // Plain text OR a pasted path (e.g. /home/user/file) — not a command.
+          // Route to the agent loop as an implicit ask instead of dropping it.
           await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, agentRegistry, toolDeps);
+        } else {
+          // Command-shaped but unrecognized — reply, never silently no-op (#4).
+          await platform.send(msg.chatId, `Unknown command: /${command} — try /help`);
         }
         break;
     }
@@ -852,7 +858,7 @@ async function routeExec(msg, platform, config, command, toolDeps = {}) {
     return;
   }
 
-  const result = execCommand(command, msg.senderId);
+  const result = await execCommand(command, msg.senderId);
   await platform.send(msg.chatId, result.output);
 }
 
@@ -1002,7 +1008,9 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   const adapted = adaptTools(tools, ctx);
 
   // Resolve governance lazily on first call (ESM bareguard requires await import)
+  const _gc = startClock();
   const { policy, onLlmResult, onToolResult } = gov ? await gov.resolve() : {};
+  mark('runAgentLoop: gov.resolve done', _gc);
 
   // Build retry + circuit breaker from config
   const retryCfg = config?.llm?.retry || {};
@@ -1030,6 +1038,8 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   });
 
   // Pass _ctx through so humanChannel can route prompts back via platformRegistry.
+  const _rc = startClock();
+  mark('runAgentLoop: loop.run start');
   const result = await loop.run(messages, adapted, {
     ctx: {
       senderId: ctx.senderId,
@@ -1038,6 +1048,7 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
       platform: ctx.platform?.name || ctx.platform?.platform || ctx.platformName,
     },
   });
+  mark(`runAgentLoop: loop.run done (rounds=${result.toolRounds ?? '?'}, err=${result.error ? 'yes' : 'no'})`, _rc);
   if (result.error) {
     // Halt errors come back as `error: 'halt:<rule>'` strings — surface as a normal Error
     throw result.error instanceof Error ? result.error : new Error(String(result.error));
@@ -1094,16 +1105,24 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     // admin — NOT customer (user:*) scopes — so customer-planted content can't
     // surface in the owner's tool-enabled agent loop as trusted instructions (#6).
     const roles = admin ? ['public', 'admin'] : ['public', `user:${msg.chatId}`];
+    const _sc = startClock();
+    mark('routeAsk -> indexer.search');
     const chunks = indexer.search(question, 5, { roles });
+    mark(`routeAsk <- indexer.search (${chunks.length} chunks)`, _sc);
 
-    // Resolve agent (handles @mention, per-chat, mode default, fallback)
+    // Resolve agent for @mention stripping + per-chat provider only. The persona
+    // layer is DEFERRED (obedient-bot-first; constitution/persona returns with the
+    // memory module — see dispatch-rewrite-decision). A configured persona must
+    // NOT replace the obedient base prompt, or the model loses "use your tools"
+    // and deflects. So owner/natural chats run the base prompt with NO persona.
     const resolved = agentRegistry && agentRegistry.size > 0
       ? resolveAgent(question, msg.chatId, config, agentRegistry)
-      : { agent: { provider, persona: null }, name: 'default', text: question };
+      : { agent: { provider }, name: 'default', text: question };
     const agentProvider = resolved.agent.provider || resolved.agent.llm || provider;
-    let agentPersona = resolved.agent.persona;
 
-    // Business mode: use structured business prompt when configured
+    // Only business mode injects a customer-facing persona (no host tools there).
+    // Everything else (owner, natural) → base prompt, persona ignored.
+    let agentPersona = null;
     if (msg.routeAs === 'business' && !admin && config.business?.name) {
       agentPersona = buildBusinessPrompt(config);
     }
@@ -1136,19 +1155,25 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     const userTools = getToolsForUser(allTools, admin, tCfg);
     const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, platformName: msg.platform, config, platformRegistry };
 
+    const _lc = startClock();
+    mark(`routeAsk -> agent loop (${userTools.length} tools, model ${config?.llm?.model || '?'})`);
     const answer = await runAgentLoop(agentProvider, messages, userTools, {
       system,
       ctx,
       config,
       gov,
     });
+    mark('routeAsk <- agent loop', _lc);
 
     // Prefix with agent name only when multiple agents exist
     const prefixed = agentRegistry && agentRegistry.size > 1
       ? `[${resolved.name}] ${answer}`
       : answer;
 
+    const _pc = startClock();
+    mark('routeAsk -> platform.send');
     await platform.send(msg.chatId, prefixed);
+    mark('routeAsk <- platform.send', _pc);
 
     // Record assistant response (without prefix for clean memory)
     if (mem) {
@@ -2381,13 +2406,13 @@ function handleUnpair(config) {
 }
 
 function handleExec(config) {
-  return (ctx) => {
+  return async (ctx) => {
     if (!isPaired(ctx, config)) return;
     if (!isOwner(ctx.from.id, config)) { ctx.reply('Owner only command.'); return; }
     const text = ctx.message.text || '';
     const command = text.replace(/^\/exec\s*/, '').trim();
     if (!command) { ctx.reply('Usage: /exec <command>'); return; }
-    const result = execCommand(command, ctx.from.id);
+    const result = await execCommand(command, ctx.from.id);
     ctx.reply(result.output);
   };
 }

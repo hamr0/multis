@@ -57,6 +57,17 @@ function createHumanPrompt({ platformRegistry, pinManager, config, autoResponder
     }
 
     const summary = summarizeEvent(event);
+
+    // A halt means the run already hit a hard limit (e.g. the tool-round cap).
+    // multis has no top-up/continue UX, so there's no real yes/no choice — the
+    // run ends either way. Inform the owner and terminate WITHOUT blocking on a
+    // reply (waiting was both confusing — "deny" was meaningless — and the cause
+    // of a needless 60s humanChannel timeout on every cap halt). (#3)
+    if (event.kind === 'halt') {
+      try { await platform.send(chatId, summary); } catch { /* best-effort */ }
+      return { decision: 'terminate', reason: 'halt acknowledged (no top-up UX)' };
+    }
+
     try {
       await platform.send(chatId, summary);
     } catch (err) {
@@ -137,15 +148,19 @@ function createPinChallenge({ platformRegistry, pinManager, timeoutMs = 120_000 
 
 function summarizeEvent(event) {
   if (event.kind === 'halt') {
+    // Tool-round cap: the model kept calling tools without finishing. Plain
+    // language, no misleading yes/no (the run has already stopped). (#3)
+    if (event.rule === 'limits.maxToolRounds') {
+      const cap = (event.reason && event.reason.match(/max\s+(\d+)/)?.[1]) || '';
+      const limit = cap ? ` (limit ${cap} steps)` : '';
+      return `⚠️ Stopped — I took too many tool steps${limit} without finishing that. Try rephrasing it or breaking it into smaller asks.`;
+    }
+    // Budget / other hard limits.
     const spent = event.context?.spent || {};
     const cap = event.context?.cap || {};
     const spendStr = spent.costUsd != null ? `$${spent.costUsd.toFixed(4)}` : '?';
     const capStr = cap.costUsd != null ? `$${cap.costUsd}` : '?';
-    return [
-      `[HALT] ${event.rule}: ${event.reason || ''}`,
-      `Spent: ${spendStr} of ${capStr}`,
-      `Reply "yes" to terminate, "no" to deny.`,
-    ].join('\n');
+    return `⚠️ Stopped — ${event.rule}: ${event.reason || ''} (spent ${spendStr} of ${capStr}).`;
   }
   // ask
   const action = event.action ? JSON.stringify({ type: event.action.type, ...summarizedArgs(event.action) }).slice(0, 300) : '(no action)';

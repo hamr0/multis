@@ -5,12 +5,16 @@ const { TelegramPlatform } = require('./platforms/telegram');
 const { BeeperPlatform } = require('./platforms/beeper');
 const { cleanupLogs, pruneMemoryChunks } = require('./maintenance/cleanup');
 const { DocumentStore } = require('./indexer/store');
+const { startLagMonitor, ENABLED: INSTR_ON } = require('./debug/instr');
 const fs = require('fs');
 const path = require('path');
 
 async function main() {
   ensureMultisDir();
   const config = loadConfig();
+
+  startLagMonitor(); // TEMP: pin the 15s timeout. Disable with MULTIS_INSTR=0.
+  if (INSTR_ON) console.log('[INSTR] instrumentation ON (event-loop lag + phase marks)');
 
   console.log(`multis v${require('../package.json').version}`);
   console.log(`Pairing code: ${config.pairing_code}`);

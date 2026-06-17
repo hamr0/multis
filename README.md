@@ -75,7 +75,7 @@ The map, not the manual — every command and its full options live in the **[Co
 
 | You say… | multis… |
 |----------|---------|
-| *plain text*, or `/ask` | Searches your indexed documents, hands the relevant passages to the LLM, and answers **with citations** |
+| *plain text*, or `/ask` | Drives the full tool-using agent — searches your indexed documents (answering **with citations**), and when you ask it to *find a file, read something, or run a command* it uses its tools and does it rather than telling you to do it yourself |
 | `/index <path> public\|admin` | Ingests a PDF / DOCX / Markdown file with section-aware chunking, scoped so customers and admins see different knowledge |
 | `/exec`, `/read` | Runs a shell command or reads a file **on your machine** — gated, PIN-protected, owner-only |
 | `/mode business` on a chat | Turns that chat into an auto-responder that answers from your KB and **escalates to you** when a human is needed |
