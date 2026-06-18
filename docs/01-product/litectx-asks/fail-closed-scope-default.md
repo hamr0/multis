@@ -5,9 +5,16 @@
 **Date:** 2026-06-18.
 **Severity:** HIGH — a tenant-isolation footgun. Not a bug in litectx's *single-tenant* contract, but the
 default it inherited from that contract is unsafe for the multi-tenant doc store R2 was added to serve.
-**Status:** FILED — multis closed the hole at its own wrapper boundary (fail-closed translator + a
-scope-bound handle, below). This records the upstream design gap rather than treating the wrapper
-patch as the whole fix.
+**Status:** **DELIVERED in litectx 0.18.0 + VALIDATED — consumption in progress.**
+litectx 0.18.0 shipped all three pieces exactly as refined: `strictScope` (read *and* write throw on a
+missing scope), `GLOBAL` (an exported `Symbol`, sentinel-not-stored → `doc_scope.scope IS NULL`, no
+migration), `ctx.scoped(scope)` (auto-fenced view, throws on a bad bind); doc/blob axis only —
+`fact`/`episode`/`code` untouched; default off → back-compat preserved. **Validated against the
+installed 0.18.0** by a failability-proven throwaway POC (16/16): a *set* scope returns `scope ∪
+GLOBAL` and never another tenant; a missing scope throws on `recall`/`get`/`ingest`/`scoped()`; `GLOBAL`
+recall returns the KB only; `scoped()` auto-fences read+write — and a **non-strict control instance
+still leaks** on a missing scope, proving the strict assertions can fail. multis now retires its
+wrapper-side `toRecallScope` stopgap in favour of native `strictScope` + `scoped()`.
 
 ---
 
