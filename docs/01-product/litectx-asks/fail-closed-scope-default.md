@@ -71,47 +71,86 @@ that belongs in the lib — every future litectx multi-tenant consumer would hav
 
 ## The ask
 
-Make a multi-tenant litectx store **fail closed by default**, and stop overloading `null`. Any of these
-shapes (not exclusive — (a)+(c) is the ideal) works for multis:
+Make a multi-tenant litectx store **fail closed by default**, and stop overloading `null`. This is
+**not a menu** — (a) and (c) do *different* jobs and multis needs both; (b) is the sentinel (a)
+requires:
+
+- **(a) `strictScope` flag — closes the literal hole on the BASE path.** Load-bearing for the
+  *security property*: with it on, the bare `recall`/`get`/`ingest`/`remember` throw on a missing
+  scope. The view (c) alone is only safe-*by-convention* — the base `recall()` still fails open right
+  beside it, one forgetful call away. The flag is what makes the base path itself safe.
+- **(c) `scoped(scope)` view — makes forgetting a NON-EXISTENT code path.** Load-bearing for
+  *ergonomics*: a handle with no per-call scope param can't be called wrong. This is the keystone for
+  a consumer like multis, but it must not *stand in for* (a) — ship both.
+- **(b) `GLOBAL` sentinel — the opt-in (a) needs.** Once `null`/omitted means *deny* (not *all*),
+  there must be an explicit way to say "the shared tier" for both reading and writing the KB.
 
 ```js
-// (a) strict mode: an explicit opt-in that flips the unsafe default.
-//     recall/get with a missing scope THROW (not "return all"); single-tenant
-//     callers are untouched because the flag defaults off (back-compat preserved).
-new LiteCtx({ root, dbPath, scope: 'strict' })   // or { multiTenant: true }
+// (a) strict mode — DISTINCT config key (do NOT reuse `scope`, which is a tenant-id
+//     string everywhere else; overloading it is the same disease this ask cures).
+//     Defaults off → single-tenant callers untouched (back-compat preserved).
+new LiteCtx({ root, dbPath, strictScope: true })  // or { multiTenant: true }
 
-// (b) a distinct sentinel for "the shared/global tier" so it is never spelled
-//     the same as "unspecified". null no longer means "all" on the read axis.
+// under strictScope, a missing scope THROWS on BOTH axes — read AND write:
+ctx.recall(q, { kind: 'doc' })                    // throws (was: every tenant)
+ctx.get(id)                                       // throws (was: scope-bypass)
+ctx.ingest(bytes, { filename })                   // throws (was: silent write to global KB)
+
+// (b) GLOBAL is how you explicitly opt into the shared tier, on read OR write:
 ctx.recall(q, { kind: 'doc', scope: GLOBAL })     // only the shared KB
-ctx.recall(q, { kind: 'doc' })                    // strict mode → throws (was: every tenant)
+ctx.ingest(bytes, { filename, scope: GLOBAL })    // deliberately publish to the KB
 
-// (c) a scope-bound view that fences the DOC axis the way the instance owner
-//     already fences the MEMORY axis — no per-call scope param to forget.
-const view = ctx.scoped('user:42')                // or 'admin'
+// (c) scope-bound view — fences the DOC axis the way the instance owner already
+//     fences the MEMORY axis; no per-call scope param to forget, on read or write.
+const view = ctx.scoped('user:42')                // or 'admin', or GLOBAL
 await view.recall(q, { kind: 'doc' })             // auto-fenced: scope ∪ global, always
 await view.ingest(bytes, { filename })            // writes bound to the same scope
 ```
 
+### The write side throws too (not just read)
+
+The original framing only fenced recall/get. That's incomplete in the same way the R2 `get`-fence was:
+an omitted scope at **`ingest`/`remember`** on a multi-tenant store silently writes to the **global
+tier** — a *persistent* cross-tenant disclosure, arguably worse than a read leak because it outlives
+the call. Under `strictScope`, the write path must throw on a missing scope too: **you must say
+`GLOBAL` to write the KB.** The `scoped()` handle (c) covers this for view users; the flag (a) must
+cover it for the base path. Finishing the requirement is correct, not scope creep.
+
 Constraints that matter to multis:
 
-- **Back-compat:** single-tenant callers (litectx's core audience) keep today's behaviour when the
-  strict flag is off. The change is an opt-in safety upgrade, not a breaking default flip — unless you
-  decide the default *should* flip, which multis would welcome.
+- **Back-compat:** single-tenant callers (litectx's core audience) keep today's behaviour when
+  `strictScope` is off. Opt-in safety upgrade, not a breaking default flip — unless you decide the
+  default *should* flip, which multis would welcome.
 - **`scope ∪ null-global` semantics unchanged** for a *set* scope (own + shared KB; never another
-  tenant) — only the *missing/`null`* case changes from "all" to "deny / explicit-global".
-- **Same fence on `get()`** — the R2 handle fence (`get(id, {scope})`) should share the strict-mode
-  rule (missing scope on a scoped store → deny, not bypass).
-- **Symmetry across axes:** ideally the doc axis gains an instance/view binding (c) so it stops being
-  the odd one out vs `fact`/`episode`.
+  tenant) — only the *missing/`null`* case changes from "all" to "deny / explicit-`GLOBAL`".
+- **Same fence on `get()`** — the R2 handle fence (`get(id, {scope})`) shares the strict rule (missing
+  scope on a strict store → deny, not bypass).
+- **Symmetry across axes:** the doc axis gains an instance/view binding (c) so it stops being the odd
+  one out vs `fact`/`episode`.
+
+### Implementation guards (litectx's lane — pinned to avoid re-litigation)
+
+- **`GLOBAL` is a read/write SENTINEL, never a stored value.** It maps to `WHERE ds.scope IS NULL` on
+  read and to "write no `doc_scope` row" (i.e. `scope IS NULL`) on write — keeping global rows exactly
+  as they are today. This is additive, needs **no migration**, and leaves the existing `scope ∪ NULL`
+  union logic untouched. Implementing `GLOBAL` as a stored marker (e.g. `'*'`) would buy a migration
+  and break the union — don't.
+- **Distinct config key, not `scope:'strict'`.** `scope` is a tenant-id string on every other API;
+  making it *sometimes* a mode string reintroduces the exact overload this ask exists to cure. Use
+  `strictScope: true` (or `multiTenant: true`).
 
 ## Out of scope / non-asks
 
 - The R2 fence itself is correct and delivered — a *set* scope returns `scope ∪ null-global` with no
   cross-tenant leak (validated green in `test/integration/context.test.js` against 0.17.1). This ask is
-  only about the **default when scope is absent**, and the `null`-means-two-things overload.
+  only about the **default when scope is absent**, and the `null`-means-many-things overload.
+- **Do NOT make the MEMORY axis fail-closed under `strictScope`.** `owner: null` should still see all
+  owners — multis doesn't use the memory axis for tenancy, and the symmetry point (c) is about giving
+  the *doc* axis a binding, not flipping memory's default. Leave the `fact`/`episode` behaviour exactly
+  as it is; `strictScope` governs the doc/blob axis only.
 - Not asking litectx to know multis's scope vocabulary (`admin`/`user:<chatId>`/`kb`) — that mapping
-  stays in multis's wrapper. The ask is purely the fail-closed default + an unambiguous global sentinel
-  (+ optional scoped view).
+  stays in multis's wrapper. The ask is purely the fail-closed default + the `GLOBAL` sentinel (+ the
+  scoped view).
 - **Not blocking M3.** multis is already fail-closed at its wrapper, so the security gate is met today;
   this is the upstream durability fix so the next multi-tenant consumer inherits safety instead of a
   footgun. Natural to land alongside the M4 memory-policy work.
