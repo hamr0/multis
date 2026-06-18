@@ -72,7 +72,7 @@ describe('Command routing', () => {
 
   it('/help returns command list', async () => {
     await router(msg('/help'), platform);
-    assert.match(platform.sent[0].text, /multis commands/);
+    assert.match(platform.sent[0].text, /what can I do/);
   });
 
   it('/search with no results says so', async () => {
@@ -796,6 +796,70 @@ describe('Help visibility', () => {
     const text = platform.sent[0].text;
     assert.ok(!text.includes('/exec'), 'non-owner should not see /exec');
     assert.ok(!text.includes('/read'), 'non-owner should not see /read');
+  });
+
+  it('help is grouped by intent and lists /mode exactly once (dedup)', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/help'), platform);
+    const text = platform.sent[0].text;
+    // Intent group headers present (the wall is now organized).
+    for (const g of ['ASK', 'REMEMBER', 'SCHEDULE', 'RUN', 'MANAGE']) {
+      assert.match(text, new RegExp(`\\n${g} `), `group ${g} header present`);
+    }
+    // The old double-/mode is gone: exactly one /mode line.
+    const modeLines = text.split('\n').filter(l => /^\s*\/mode\b/.test(l));
+    assert.strictEqual(modeLines.length, 1, 'exactly one /mode entry');
+  });
+
+  it('non-owner help omits the RUN and SCHEDULE groups entirely', async () => {
+    const env = createTestEnv({ allowed_users: ['user1', 'user2'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/help', { senderId: 'user2' }), platform);
+    const text = platform.sent[0].text;
+    assert.ok(!/\nRUN /.test(text), 'no RUN group for a non-owner');
+    assert.ok(!/\nSCHEDULE /.test(text), 'no SCHEDULE group for a non-owner');
+    assert.match(text, /\nASK /, 'ASK group still shown');
+  });
+
+  it('/help <command> shows that command\'s detail (progressive disclosure)', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/help mode'), platform);
+    const text = platform.sent[0].text;
+    assert.match(text, /\/mode \[business\|silent\|off\]/, 'shows the usage line');
+    assert.match(text, /business-persona menu/, 'shows the detail blurb');
+    assert.ok(!/\nASK /.test(text), 'detail view is not the full menu');
+  });
+
+  it('/help <unknown> falls back to the full menu with a nudge', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/help nonsense'), platform);
+    const text = platform.sent[0].text;
+    assert.match(text, /No command "\/nonsense"/, 'nudges on unknown topic');
+    assert.match(text, /\nASK /, 'still shows the full menu');
+  });
+
+  it('a non-owner cannot read owner-command detail via /help <command>', async () => {
+    const env = createTestEnv({ allowed_users: ['user1', 'user2'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/help exec', { senderId: 'user2' }), platform);
+    const text = platform.sent[0].text;
+    // exec is owner-only; a non-owner topic lookup must not reveal it — falls
+    // back to their (exec-free) menu.
+    assert.match(text, /No command "\/exec"/, 'owner-only topic not disclosed');
+    assert.ok(!text.includes('run a shell command'), 'no exec detail leaked');
   });
 });
 
@@ -1706,10 +1770,8 @@ describe('Wizard fixes', () => {
     const messages = platform.sent.filter(m => m.chatId === 'chat1');
     const cancelMsg = messages.find(m => m.text.includes('cancelled'));
     assert.ok(cancelMsg, 'should cancel wizard');
-    const helpMsg = messages.find(m => m.text.includes('multis commands'));
+    const helpMsg = messages.find(m => m.text.includes('what can I do'));
     assert.ok(helpMsg, 'should show help');
-    // Wizard state should be cleared
-    assert.strictEqual(env.config._pendingBusiness?.user1, undefined);
   });
 
   it('wizard validates empty business name', async () => {

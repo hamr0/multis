@@ -309,7 +309,7 @@ Set this up with `multis init` option 3 (Business chatbot).
 | `/forget` | Clear all memory for this chat |
 | `/skills` | List available skills |
 | `/unpair` | Remove your pairing (you'll need the code to pair again) |
-| `/help` | Show available commands |
+| `/help` | Show available commands — grouped by intent (Ask / Remember / Schedule / Run / Manage) and filtered to your role; send `/help <command>` (e.g. `/help mode`) for one command's details |
 | *(plain text)* | Drives the full tool-using agent (`/ask`): searches your documents and, on your machine, will find/read files and run things directly rather than telling you to do it yourself |
 
 > A message that starts with `/` but isn't a known command (e.g. a pasted path like `/home/you/file.txt`) is treated as plain text, not a command. A genuinely unknown command (e.g. `/frobnicate`) replies with *"Unknown command — try /help"* rather than being silently ignored.

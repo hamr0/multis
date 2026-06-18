@@ -17,7 +17,7 @@ Commands are sent via chat with a `/` prefix on every platform (Telegram and Bee
 | `/forget` | Clear conversation memory |
 | `/skills` | List available skills |
 | `/unpair` | Remove pairing |
-| `/help` | Show command list |
+| `/help` | Show commands, grouped by intent (Ask / Remember / Schedule / Run / Manage) and filtered to your role; `/help <command>` for one command's details |
 
 Plain text messages are treated as implicit `/ask`.
 

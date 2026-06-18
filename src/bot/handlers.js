@@ -734,7 +734,7 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
         await routePlan(msg, platform, config, provider, args, toolDeps);
         break;
       case 'help':
-        await routeHelp(msg, platform, config);
+        await routeHelp(msg, platform, config, args);
         break;
       default:
         if (!looksLikeCommand(msg.text)) {
@@ -2240,49 +2240,91 @@ function formatBusinessSummary(data) {
   return lines.join('\n');
 }
 
-async function routeHelp(msg, platform, config) {
-  const cmds = [
-    'multis commands:',
-    '/ask <question> - Ask about indexed documents',
-    '/status - Bot info',
-    '/search <query> - Search indexed documents',
-    '/docs - Show indexing stats',
-    '/memory - Show conversation memory',
-    '/remember <note> - Save a note to memory',
-    '/forget - Clear conversation memory',
-    '/skills - List available skills',
-    '/unpair - Remove pairing',
-    '/help - This message',
-    '',
-    'Plain text messages are treated as questions.'
-  ];
-  if (isOwner(msg.senderId, config, msg)) {
-    cmds.splice(1, 0,
-      '/exec <cmd> - Run a shell command (owner)',
-      '/read <path> - Read a file or directory (owner)',
-      '/index <path> <public|admin> - Index a document (admin)',
-      '/pin - Change PIN (owner)',
-      '/admin - Designate/list/remove limited admins (owner)',
-      '/mode - List chat modes / /mode <business|silent|off> [target] (admin)',
-      '/agent [name] - Show/set agent for this chat (owner)',
-      '/agents - List all agents (owner)',
-      '/remind <duration> <action> [--agent] - Set a reminder (owner)',
-      '/cron <expression> <action> [--agent] - Recurring scheduled task (owner)',
-      '/jobs - List active scheduled jobs (owner)',
-      '/cancel <id> - Cancel a scheduled job (owner)',
-      '/plan <goal> - Break a goal into steps and execute (owner)',
-      '/mode business - Business persona menu (owner)',
-      'Send a file to index it (owner, Telegram/Beeper)',
-      'Use @agentname to invoke a specific agent per-message'
-    );
-  } else if (isAdmin(msg.senderId, config, msg)) {
-    // Limited admin: staff commands, no host shell.
-    cmds.splice(1, 0,
-      '/index <path> <public|admin> - Index a document (admin)',
-      '/mode - List chat modes / /mode <business|silent|off> [target] (admin)'
-    );
+// Command catalogue — the single source for /help. Grouped by INTENT (not an
+// alphabetical wall), role-filtered, deduped (/mode is one entry; its business
+// menu is reached via `/mode business`). `role` gates visibility: 'all' (anyone
+// who can run commands), 'admin' (owner + limited admins), 'owner' (owner only).
+const HELP_GROUPS = [
+  { key: 'ASK',      tagline: 'find answers' },
+  { key: 'REMEMBER', tagline: 'build memory & knowledge' },
+  { key: 'SCHEDULE', tagline: 'do things later' },
+  { key: 'RUN',      tagline: 'act on this machine' },
+  { key: 'MANAGE',   tagline: 'configure the bot' },
+];
+
+const HELP_COMMANDS = [
+  // ASK
+  { name: 'ask',      group: 'ASK',      role: 'all',   usage: '/ask <question>',                 summary: 'ask about your documents & chats (or just type)' },
+  { name: 'search',   group: 'ASK',      role: 'all',   usage: '/search <query>',                 summary: 'keyword-search the index' },
+  { name: 'docs',     group: 'ASK',      role: 'all',   usage: '/docs',                           summary: 'show what is indexed' },
+  { name: 'skills',   group: 'ASK',      role: 'all',   usage: '/skills',                         summary: 'list available skills' },
+  // REMEMBER
+  { name: 'remember', group: 'REMEMBER', role: 'all',   usage: '/remember <note>',                summary: 'save a note to memory' },
+  { name: 'memory',   group: 'REMEMBER', role: 'all',   usage: '/memory',                         summary: 'show what I remember here' },
+  { name: 'forget',   group: 'REMEMBER', role: 'all',   usage: '/forget',                         summary: "clear this chat's memory" },
+  { name: 'index',    group: 'REMEMBER', role: 'admin', usage: '/index <path> <public|admin>',    summary: 'add a document to the knowledge base',
+    detail: 'Adds a file to the searchable KB. Scope: public (everyone) or admin (owner-only knowledge — owner only). On Telegram/Beeper you can also just send a file to index it.' },
+  // SCHEDULE
+  { name: 'remind',   group: 'SCHEDULE', role: 'owner', usage: '/remind <when> <action> [--agent]', summary: 'set a one-off reminder' },
+  { name: 'cron',     group: 'SCHEDULE', role: 'owner', usage: '/cron <expr> <action> [--agent]', summary: 'recurring scheduled task' },
+  { name: 'jobs',     group: 'SCHEDULE', role: 'owner', usage: '/jobs',                           summary: 'list active scheduled jobs' },
+  { name: 'cancel',   group: 'SCHEDULE', role: 'owner', usage: '/cancel <id>',                    summary: 'cancel a scheduled job' },
+  // RUN
+  { name: 'exec',     group: 'RUN',      role: 'owner', usage: '/exec <command>',                 summary: 'run a shell command (may need PIN)' },
+  { name: 'read',     group: 'RUN',      role: 'owner', usage: '/read <path>',                    summary: 'read a file or directory (may need PIN)' },
+  { name: 'plan',     group: 'RUN',      role: 'owner', usage: '/plan <goal>',                    summary: 'break a goal into steps & run them' },
+  // MANAGE
+  { name: 'mode',     group: 'MANAGE',   role: 'admin', usage: '/mode [business|silent|off] [chat]', summary: 'how I respond in a chat',
+    detail: 'No target → this chat (or, with no Beeper, the global default). With a chat name → that Beeper chat (interactive picker on multiple matches). `/mode business` opens the business-persona menu. silent = archive only; off = ignore.' },
+  { name: 'agent',    group: 'MANAGE',   role: 'owner', usage: '/agent [name]',                   summary: "show or set this chat's agent" },
+  { name: 'agents',   group: 'MANAGE',   role: 'owner', usage: '/agents',                         summary: 'list all agents' },
+  { name: 'admin',    group: 'MANAGE',   role: 'owner', usage: '/admin [list|remove <n>]',        summary: 'designate / list / remove limited admins' },
+  { name: 'pin',      group: 'MANAGE',   role: 'owner', usage: '/pin',                            summary: 'set or change your PIN' },
+  { name: 'status',   group: 'MANAGE',   role: 'all',   usage: '/status',                         summary: 'bot info & status' },
+  { name: 'unpair',   group: 'MANAGE',   role: 'all',   usage: '/unpair',                         summary: 'remove pairing' },
+  { name: 'help',     group: 'MANAGE',   role: 'all',   usage: '/help [command]',                 summary: 'this menu — add a command for details' },
+];
+
+const ROLE_RANK = { all: 0, admin: 1, owner: 2 };
+
+/** The viewer's tier, highest first: owner > admin > all. */
+function helpViewerRank(msg, config) {
+  if (isOwner(msg.senderId, config, msg)) return ROLE_RANK.owner;
+  if (isAdmin(msg.senderId, config, msg)) return ROLE_RANK.admin;
+  return ROLE_RANK.all;
+}
+
+async function routeHelp(msg, platform, config, args) {
+  const rank = helpViewerRank(msg, config);
+  const visible = HELP_COMMANDS.filter(c => rank >= ROLE_RANK[c.role]);
+
+  // Progressive disclosure: `/help <command>` → that command's detail.
+  const topic = (args || '').trim().replace(/^\//, '').toLowerCase();
+  if (topic) {
+    const c = visible.find(x => x.name === topic);
+    if (c) {
+      const lines = [c.usage, '', c.summary];
+      if (c.detail) lines.push('', c.detail);
+      await platform.send(msg.chatId, lines.join('\n'));
+      return;
+    }
+    // Unknown/!visible topic falls through to the full menu (with a nudge).
   }
-  await platform.send(msg.chatId, cmds.join('\n'));
+
+  const out = ['multis — what can I do?'];
+  for (const g of HELP_GROUPS) {
+    const cmds = visible.filter(c => c.group === g.key);
+    if (cmds.length === 0) continue;
+    out.push('', `${g.key} · ${g.tagline}`);
+    for (const c of cmds) out.push(`  ${c.usage} — ${c.summary}`);
+    // Owner-only inline hint: dropping a file is the no-typing path to /index.
+    if (g.key === 'REMEMBER' && rank >= ROLE_RANK.admin) {
+      out.push('  (or send a file to index it)');
+    }
+  }
+  out.push('', 'Tip: just type to ask · @agent for a specific agent · /help <command> for details');
+  if (topic) out.unshift(`No command "/${topic}". Showing everything:`, '');
+  await platform.send(msg.chatId, out.join('\n'));
 }
 
 async function handleBeeperFileIndex(msg, platform, config, indexer, pending) {
