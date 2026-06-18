@@ -5,19 +5,16 @@
  * litectx (ESM) owns ALL storage: ingest, format-convert, chunk, blob-store,
  * scope-filter, recall, retention. multis keeps NO homegrown index/memory store
  * (M3: src/indexer/* deleted). This module only shapes POLICY onto litectx's
- * primitives — which scope a chat maps to, and retention TTLs. litectx is
- * ESM, dynamic-imported from CJS (same pattern as bareguard).
+ * primitives. litectx is ESM, dynamic-imported from CJS (like bareguard).
  *
- * Scope model — litectx R2 per-call `scope` IS multis's tenant isolation:
- *   kb    → scope = null      (global; visible from every chat)
- *   admin → scope = 'admin'   (owner-private)
- *   chat  → scope = 'chat:<id>'(customer)
- * recall({scope}) returns `scope ∪ null-global`, so the security model falls
- * straight out of the primitive: owner(admin) recall = admin ∪ kb; customer
- * recall = own ∪ kb — never another customer, never admin.
- *
- * One LiteCtx per process (like the bareguard Gate). Isolation is per-CALL
- * scope, never the instance `owner` (one process serves every chat).
+ * Scope vocabulary is multis-native (unchanged from the legacy store):
+ *   'public' | 'kb' → litectx null  (global KB; visible from every chat)
+ *   'admin'         → litectx 'admin' (owner-private)
+ *   'user:<chatId>' → litectx 'user:<chatId>' (customer)
+ * litectx R2 `recall({scope})` returns `scope ∪ null-global`, so the security
+ * model falls straight out: owner(admin) recall = admin ∪ kb; customer recall =
+ * own ∪ kb — never another customer, never admin. One LiteCtx per process;
+ * isolation is the per-CALL scope, never the instance owner.
  */
 const path = require('path');
 const fs = require('fs');
@@ -25,17 +22,17 @@ const { PATHS } = require('../config');
 
 let _ctx = null;
 let _initP = null;
+let _bounds = {};
 
-const KB_SCOPE = null;
-const ADMIN_SCOPE = 'admin';
-/** Customer chat scope key. */
-function chatScope(chatId) { return `chat:${chatId}`; }
-/** Map the legacy /index role ('public' | 'admin') to a litectx scope. */
-function roleToScope(role) { return role === 'admin' ? ADMIN_SCOPE : KB_SCOPE; }
+/** Translate multis-native scope → litectx scope. 'public'/'kb' is the global (null) KB. */
+function toLcxScope(scope) {
+  if (scope == null || scope === 'public' || scope === 'kb') return null;
+  return scope; // 'admin' / 'user:<chatId>' are litectx scope strings verbatim
+}
 
 /**
  * Construct (once) the process-wide LiteCtx. Idempotent and concurrency-safe.
- * @param {{ writeGate?: object, writeAudit?: object }} [opts]
+ * @param {{ documents?: object, writeGate?: object, writeAudit?: object }} [opts]
  */
 async function init(opts = {}) {
   if (_ctx) return _ctx;
@@ -62,29 +59,38 @@ function ctx() {
   return _ctx;
 }
 
-const toU8 = (b) => (b instanceof Uint8Array ? b : new Uint8Array(b));
-
-/** Ingest an uploaded document buffer (pdf/docx→md→chunk; md→chunk; else byte-exact blob). */
-async function indexBuffer(buffer, filename, scope, { expiresAt = null } = {}) {
-  return ctx().ingest(toU8(buffer), { filename, scope, expiresAt });
+/** Set the untrusted-input bounds applied to every ingest (from config.documents). */
+function setBounds(documents = {}) {
+  _bounds = {};
+  if (documents.maxSize != null) _bounds.maxSize = documents.maxSize;
+  if (documents.maxPdfPages != null) _bounds.maxPages = documents.maxPdfPages;
+  if (documents.parseTimeoutMs != null) _bounds.parseTimeoutMs = documents.parseTimeoutMs;
 }
 
-/** Ingest a document from a filesystem path (the /index <path> flow). */
-async function indexFile(filePath, scope, { expiresAt = null } = {}) {
-  return indexBuffer(fs.readFileSync(filePath), path.basename(filePath), scope, { expiresAt });
+const toU8 = (b) => (b instanceof Uint8Array ? b : new Uint8Array(b));
+
+/** Ingest an uploaded document buffer. @returns {Promise<number>} chunks produced (0 for a stored blob). */
+async function indexBuffer(buffer, filename, scope, { expiresAt = null } = {}) {
+  const r = await ctx().ingest(toU8(buffer), { filename, scope: toLcxScope(scope), expiresAt, ..._bounds });
+  return r.chunks;
+}
+
+/** Ingest a document from a filesystem path (the /index <path> flow). @returns {Promise<number>} chunks. */
+async function indexFile(filePath, scope, opts = {}) {
+  return indexBuffer(fs.readFileSync(filePath), path.basename(filePath), scope, opts);
 }
 
 let _memSeq = 0;
 /**
- * Persist a memory summary as a scope-tagged doc row (litectx scopes facts by
- * INSTANCE owner, not per-call — so per-chat memory rides the doc/blob scope
- * axis). Tagged `meta.type='memory'` to tell memory rows from real uploads.
+ * Persist a memory summary as a scope-tagged doc row. litectx scopes facts by
+ * INSTANCE owner (not per-call), so per-chat memory rides the doc scope axis.
+ * Tagged meta.type='memory' to distinguish memory rows from real uploads.
  */
 async function rememberMemory(scope, text, { expiresAt = null, meta = {} } = {}) {
   const id = `mem-${Date.now()}-${_memSeq++}`;
   return ctx().ingest(toU8(Buffer.from(String(text))), {
     filename: `${id}.md`,
-    scope,
+    scope: toLcxScope(scope),
     expiresAt,
     meta: { ...meta, type: 'memory' },
   });
@@ -93,9 +99,11 @@ async function rememberMemory(scope, text, { expiresAt = null, meta = {} } = {})
 /**
  * Unified recall (docs + memory, both kind=doc), mapped to the chunk shape
  * buildRAGPrompt/buildMemorySystemPrompt consume ({ name, content }).
+ * @param {string} query
+ * @param {{ scope?: string|null, n?: number }} [opts]
  */
 async function search(query, { scope = null, n = 5 } = {}) {
-  const hits = await ctx().recall(query, { kind: 'doc', scope, n, body: true });
+  const hits = await ctx().recall(query, { kind: 'doc', scope: toLcxScope(scope), n, body: true });
   return hits.map((h) => ({
     name: h.path,
     content: h.body || '',
@@ -107,7 +115,7 @@ async function search(query, { scope = null, n = 5 } = {}) {
 
 /** Fetch one row by id, scope-fenced (R2 handle fence). Pass the requesting scope on customer paths. */
 async function get(id, scope) {
-  return ctx().get(id, scope !== undefined ? { scope } : {});
+  return ctx().get(id, scope !== undefined ? { scope: toLcxScope(scope) } : {});
 }
 
 /** Reclaim storage for rows past their expiresAt (R5). The retention sweep calls this. */
@@ -115,11 +123,15 @@ async function purge() {
   return ctx().purge();
 }
 
-/** Escape hatch to the raw LiteCtx for verbs not yet wrapped. */
+/** Coarse index stats for /docs. litectx exposes a total item count (docs + memory). */
+function stats() {
+  return { total: ctx().store.count() };
+}
+
+/** Escape hatch to the raw LiteCtx. */
 function raw() { return ctx(); }
 
 module.exports = {
-  init, raw,
-  indexFile, indexBuffer, rememberMemory, search, get, purge,
-  KB_SCOPE, ADMIN_SCOPE, chatScope, roleToScope,
+  init, setBounds, raw,
+  indexFile, indexBuffer, rememberMemory, search, get, purge, stats,
 };
