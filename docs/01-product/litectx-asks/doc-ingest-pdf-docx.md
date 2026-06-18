@@ -1,90 +1,51 @@
-# litectx ask — document ingest: PDF/DOCX → markdown, chunked + indexed
+# litectx ask — document store: any-file ingest, name-indexing, scope
 
 **From:** multis (first baresuite customer), migration module **M3** (replace `src/indexer/*` with litectx).
-**Against:** litectx **0.16.2** (installed npm artifact; findings proven, not asserted).
-**Date:** 2026-06-18.
-**Status:** FILED — M3 is blocked on this (Principle 4: the wait is the validation).
-**Decision behind it:** litectx owns the PDF/DOCX→md parser and the ingest. multis does **not** keep a parallel parser path (§D). This is the §D-ideal placement, chosen by the multis owner after a POC + design discussion.
+**Against:** litectx **0.16.2** (installed npm artifact; validate, don't assert).
+**Date:** 2026-06-18 (supersedes the original PDF/DOCX-parse-only framing of this file).
+**Status:** FILED — M3 blocked on R1–R3 (Principle 4: the wait is the validation).
 
 ---
 
-## 1. The use case (what multis needs to do)
+## The whole ask, as one ingest rule
 
-A user (the owner, or a customer in business mode) **drops a PDF or DOCX into a chat**. multis receives that document as an **in-memory `Buffer`** (via beeperbox's `download_asset` verb) together with the original filename. multis must hand the bytes to litectx and have them **ingested as recallable `doc`-kind content**, so that a later `recall(query, { kind: 'doc' })` surfaces the document's text. This is the headline "query your documents" capability of the product; PDF is the dominant real-world format (statements, manuals, papers, scanned letters), DOCX secondary.
-
-The source is a **transient uploaded buffer**, not a file living in a git/disk repo root.
-
-## 2. What litectx does today (0.16.2, verified)
-
-- `index({ paths, force })` sweeps a **disk/git root**, filtered by extension (default `ts/js/py/md`), reading each file as **`utf8`**.
-- A PDF placed in that root indexes as **binary garbage** — verified: a real `sample.pdf` came back with `body` = `"%PDF-1.7 %äüöß 2 0 obj <</Length 3 0 R/Filter/FlateDecode>>…"`.
-- `remember(id, text, { kind: 'doc' })` stores text **verbatim as a single unit** — no chunking; not the document-ingest path.
-- There is **no buffer/content ingest entry point** and **no PDF/DOCX parser**.
-
-This matches litectx's own roadmap: `litectx-memory-prd.md` records *"PDF/DOCX deferred"* and reserves `pdf`/`docx` as a **`format` field under `kind=doc`** ("never a new top-level kind"). This ask is to **build that reserved capability**.
-
-## 3. The ask — two coupled capabilities
-
-### 3.1 PDF/DOCX → markdown, then reuse the existing md chunker
-
-Convert the document to **markdown**, then chunk it with litectx's **existing markdown chunker**. **Do not build a format-native (PDF-native) chunker** — convert to md and reuse the clean path. This is the architectural crux of the whole ask and it matches the reserved "format field under `kind=doc`" design: a PDF/DOCX is just a *lossy source of markdown*, not a new kind.
-
-- **DOCX → md is clean and structured.** `mammoth.convertToMarkdown` extracts headings/lists/emphasis faithfully (multis already depends on mammoth; it currently calls `convertToHtml`, but `convertToMarkdown` is purpose-built for this).
-- **PDF → md is lossy by nature.** PDF is a *presentation* format; realistic output is **flat text wrapped as markdown** — reading order is best-effort, columns/tables degrade, and scanned PDFs would need OCR (explicitly out of scope). Set the quality bar honestly at **"good-enough searchable text,"** not structural fidelity. (multis uses `pdfjs-dist` `getTextContent()` for this.)
-- Resulting rows: `kind = "doc"`, `format = "pdf" | "docx"` (the reserved format field). Recall ranks them alongside `md` docs with no schema migration.
-
-### 3.2 A single-document content-ingest entry point (buffer or path)
-
-Because the source is an uploaded `Buffer` + filename (not a repo-root file), litectx needs an ingest entry **distinct from both `index()` (sweeps a root) and `remember()` (stores verbatim, unchunked)**: take the document's bytes (or a path to one file) + a format/filename hint, **convert → chunk → store** it, and make it recallable.
-
-Proposed shape (**litectx's call** — this is the need, not a mandated API):
-
-```js
-// preferred: bytes-in, for the chat-upload flow
-await ctx.ingestDocument(buffer, {
-  filename: "acme-manual.pdf",   // drives format detection
-  format:   "pdf",               // optional explicit override
-  id:       "doc:acme-manual",   // optional stable id (else derived)
-  meta:     { /* opaque passthrough, e.g. source chat */ },
-});
-// → { id, kind:'doc', format:'pdf', chunks: <n>, … }
+```
+ingest(bytes, filename, scope = null, meta = {}, expiresAt = null):
+  ext = extension(filename)
+  if ext is md / code           → chunk + index body          (exists today)
+  elif converter wired (pdf,docx) → convert→md, chunk + index   (R0 — litectx claims shipped)
+  else (csv, xlsx, xml, binary…) → store blob, index FILENAME only (no body chunk)   (R3)
+  every row carries `scope`; unset = null = global/unscoped     (R2)
+  every row may carry `expiresAt`; unset = null = keep forever  (R5)
 ```
 
-The **buffer path is strongly preferred** over "materialize the upload into litectx's git root and call `index()`": chat uploads are transient, and maintaining a tracked on-disk tree of customer files imposes its own retention/cleanup/privacy burden on the integrator. If litectx prefers a path-based API, multis can write to a temp file — but a bytes entry is the clean fit.
+litectx ships this **mechanism**; multis owns the **policy** (what the scopes mean). Same line as beeperbox.
 
-(If litectx instead chooses to teach `index()` to convert `.pdf`/`.docx` files it encounters in the root, that also satisfies 3.1, but **3.2's buffer entry is the part that unblocks multis's chat-upload flow** and should not be dropped.)
+## The five requirements
 
-## 4. Bounds — make these acceptance criteria (multis learned them the hard way)
+- **R0 — PDF/DOCX → md → chunk.** Convert to md, reuse the md chunker; rows are `kind=doc`, `format=pdf|docx`. **litectx claims this is shipped — pending validation against the installed package** (not a working tree). If confirmed, R0 is done.
 
-Documents are **untrusted input**. The parser must bound it:
+- **R1 — Buffer/content ingest entry.** Accept an uploaded file's **bytes + filename** (chat uploads are transient buffers, not repo-root files). Distinct from `index()` (sweeps a root) and `remember()` (verbatim, unchunked). This is what unblocks the chat-upload flow.
 
-- **Size cap, page cap, parse wall-clock timeout** — configurable. A malicious/oversized PDF is a decompression-bomb / OOM vector. (multis enforces `maxSize` 10 MB, `maxPdfPages` 2000, `parseTimeoutMs` 30 s today; litectx should own equivalents.)
-- **Graceful failure** — a corrupt/encrypted/unparseable document returns a **clear error**, never crashes the ingest pass and never pollutes the index with garbage.
-- **Test fixtures** — hand-crafted minimal PDFs are *rejected* by some parsers (multis hit exactly this: `pdf-parse` refused them). Use **LibreOffice / real-tool-generated** fixtures in litectx's tests.
+- **R2 — `scope` on every row + a `recall` scope filter.** Scope is set **per-upload (at ingest time)** — a chat id — not per-instance (one multis process serves all chats, so `new LiteCtx({owner})` per chat is not viable). `recall({scope})` filters by it. Default **null = unscoped/global**. **A scoped recall returns `scope ∪ null-global`, never any other scope** — global kb stays visible from a customer chat; one customer never sees another's docs. (Implementation — new column vs. extending `owner` — is litectx's call; the requirement is per-upload tagging + scope∪global recall.)
 
-## 5. Dependency note (the weight litectx deferred)
+- **R3 — Store any file, byte-exact.** Non-chunkable types (csv/xlsx/xml/binary) are **stored byte-exact in litectx** (a BLOB, not text), retrievable via `get(id)` as the **original bytes**, findable in `recall` by **filename** (not body, not metadata), body **not parsed/chunked**. litectx is the single durable store — multis keeps no parallel file store (the M3 goal). Bounded by a **size cap**; converting to md for body-search stays the consumer's **opt-in**. *Whether the blob tier is opt-in/lazy (like litectx's embeddings peer dep) is litectx's call — the requirement is byte-exact store + retrieve, capped, never parsed.*
 
-This implies a PDF extractor (`pdfjs-dist`) + a DOCX converter (`mammoth`, which ships `convertToMarkdown`). These are the deps litectx deferred to stay light, and this ask explicitly requests taking them on. **Suggestion:** make the document-parser tier **optional/lazy**, mirroring litectx's existing embeddings tier (`@huggingface/transformers` as an opt-in peer dep) — consumers who never ingest PDF/DOCX shouldn't pay the install/load weight.
+- **R4 — Bounds (acceptance criteria).** Size / page / parse-timeout caps + graceful failure on corrupt/encrypted input. Documents are untrusted.
 
-## 6. Boundary / framing (§D, §E)
+- **R5 — Per-record expiry (retention).** Optional `expiresAt` set at ingest; **null = keep forever**. Expired rows are excluded from `recall`/`get`, and a purge reclaims their storage (including the R3 blob bytes — single store means no orphaned files). **multis owns the policy** — computes the TTL per scope/file from `config.json` (`user:<chat>` 90d, raw blobs shorter, sensitive shorter, `kb`/`admin` = null) and stamps `expiresAt`. **litectx owns the mechanism** — honor `expiresAt` + reclaim. (Lazy-on-recall vs. background purge vs. an explicit `purge()` verb is litectx's call.) The retention *sweep/schedule* itself is multis-lane build work (already on the POC6 to-do: "cron, retention cleanup").
 
-- **litectx owns the whole document pipeline:** format detection → conversion to md → chunking (reuse the md chunker) → storage → ranking → recall.
-- **multis owns only:** receiving the upload (transport, via beeperbox) and calling litectx's ingest with `(bytes, filename, scope, meta)`. **No parsing, no chunking, no parallel store** — `src/indexer/parsers.js` + chunker + store get deleted (the M3 goal).
-- This is the §D-ideal: *"litectx ingests + chunks; multis keeps no parallel parser path."*
+## Acceptance criteria
 
-## 7. Acceptance criteria
+1. A **PDF buffer** ingested via R1 → `recall(query, {kind:'doc', body:true})` returns readable text, not `%PDF` bytes. (validates R0+R1)
+2. A **csv/xlsx buffer** → stored byte-exact; `get(id)` returns the **original bytes** (round-trip identical); `recall("<its filename>")` surfaces it; body **not** parsed/chunked. (validates R3)
+3. Docs under **two scopes** + one **global (null)** doc → a recall scoped to X returns **X's docs + the global doc, and nothing from the other scope**; an unscoped recall sees all. (validates R2 — global kb always visible; cross-customer fenced)
+4. Oversized / over-page / slow / corrupt inputs → bounded, clear error, index left intact. (validates R4)
+5. A row ingested with a **past `expiresAt`** → excluded from `recall`/`get`, and its blob bytes reclaimed on purge; a `null`-expiry row persists. (validates R5)
+6. multis can delete `src/indexer/{parsers,chunker,chunk,store}.js` and route `/index` + chat-uploads entirely through litectx.
 
-1. A real **PDF** buffer ingested via the content entry → `recall(query, { kind: 'doc', body: true })` returns chunk(s) of **readable extracted text** (not `%PDF` bytes).
-2. A real **DOCX** → same, with heading structure preserved in the md.
-3. Resulting hits carry `format: "pdf" | "docx"` under `kind: "doc"`; no schema migration.
-4. Oversized / over-page / slow / corrupt inputs are **bounded and fail gracefully** (clear error, index left intact).
-5. multis can **delete `src/indexer/{parsers,chunker,chunk,store}.js`** and route both `/index` and chat-uploads entirely through litectx.
+## Boundary
 
-## 8. Out of scope for THIS ask — flagged, tracked separately
-
-**Per-chat document isolation (§A).** multis's scope model wants `user:<chatId>` documents **fenced from other customers**. litectx's current invariant is *"code/doc are never scoped"* (global knowledge) — verified: with a shared DB, an `owner`-scoped `fact` isolates correctly, but a `doc` is visible to every owner. Convert-to-md does **not** change this. This is a **separate open question**, not part of this ask:
-
-- multis will raise it as its own ask **if** per-customer private uploads prove to be a real requirement; or
-- multis accepts **docs-as-global (kb only)** and models any per-customer private knowledge as `fact`/`episode` (which *are* owner-scoped) under M4.
-
-Noted here only so the document-ingest design stays aware of the possibility (e.g., whether `owner`-scoping could ever extend to `doc`), not as a blocker on §3–§7.
+- **litectx owns:** ingest, format conversion (pdf/docx→md), chunking, storage, name-indexing, scope filtering, ranking, recall.
+- **multis owns:** receiving the upload (via beeperbox) and calling ingest with `(bytes, filename, scope, meta)`. No parser, no chunker, no parallel store — those get deleted (the M3 goal).
+- **Dropped from the earlier framing:** "open `kind`" — multis's kb-vs-misc is a *scope* axis (R2), not a new kind. litectx's closed-kind / open-`format` design stands.
