@@ -129,15 +129,15 @@ const TOOLS = [
     },
     execute: async ({ query }, ctx) => {
       if (!ctx.indexer) return 'Document indexer not available.';
-      // Owner is scoped to public + admin (not customer user:* scopes) so a
-      // customer-planted chunk can't enter the owner's agent context (#6).
-      const roles = ctx.isOwner ? ['public', 'admin'] : ['public', `user:${ctx.chatId}`];
-      const results = ctx.indexer.search(query, 5, { roles });
+      // Owner recalls admin ∪ global-KB; a customer recalls own ∪ global-KB. litectx
+      // recall(scope) returns scope ∪ null-global, so a customer-planted chunk can't
+      // enter the owner's (or another customer's) agent context (#6).
+      const scope = ctx.isOwner ? 'admin' : `user:${ctx.chatId}`;
+      const results = await ctx.indexer.search(query, { scope, n: 5 });
       if (results.length === 0) return 'No matching documents found.';
       return results.map((r, i) => {
-        const path = r.sectionPath?.join(' > ') || r.name;
         const preview = r.content.slice(0, 300).replace(/\n/g, ' ');
-        return `[${i + 1}] ${path}: ${preview}`;
+        return `[${i + 1}] ${r.name}: ${preview}`;
       }).join('\n\n');
     }
   },
@@ -154,15 +154,11 @@ const TOOLS = [
     },
     execute: async ({ query }, ctx) => {
       if (!ctx.indexer) return 'Memory search not available.';
-      // Owner conversation memory is captured under role 'admin'; scope owner
-      // recall to it and exclude customer (user:*) memory (#6).
-      const roles = ctx.isOwner ? ['admin'] : [`user:${ctx.chatId}`];
-      const searchOpts = { roles, types: ['conv'] };
-      // Try FTS search first; if empty (e.g. all stopwords), fall back to recent
-      let results = ctx.indexer.store.search(query, 5, searchOpts);
-      if (results.length === 0) {
-        results = ctx.indexer.store.recentByType(5, searchOpts);
-      }
+      // Owner conversation memory is captured under scope 'admin'; a customer's
+      // under 'user:<chatId>'. searchMemory fences to scope ∪ global and filters to
+      // memory rows (never uploaded docs), so a customer can't read owner memory (#6).
+      const scope = ctx.isOwner ? 'admin' : `user:${ctx.chatId}`;
+      const results = await ctx.indexer.searchMemory(query, { scope, n: 5 });
       if (results.length === 0) return 'No matching memories found.';
       const fmt = (r, i) => {
         const date = r.createdAt?.slice(0, 10) || 'unknown date';

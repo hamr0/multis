@@ -40,31 +40,8 @@ function cleanupLogs(maxDays = 30) {
   return { deleted, errors };
 }
 
-/**
- * Delete old conversation memory chunks from the store.
- * Admin-scoped chunks get longer retention (default 365 days).
- * @param {import('../indexer/store').DocumentStore} store
- * @param {number} maxDays - retention for non-admin chunks (default 90)
- * @param {number} [adminMaxDays] - retention for admin chunks (default 365)
- * @returns {number} - Number of chunks deleted
- */
-function pruneMemoryChunks(store, maxDays = 90, adminMaxDays = 365) {
-  const userCutoff = new Date();
-  userCutoff.setDate(userCutoff.getDate() - maxDays);
-  const adminCutoff = new Date();
-  adminCutoff.setDate(adminCutoff.getDate() - adminMaxDays);
+// Memory-row retention moved to litectx: capture.js stamps each memory row with an
+// expiresAt (admin rows live longer), and context.purge() reclaims expired rows.
+// This module now owns only daily-log file pruning.
 
-  // Delete non-admin conversation chunks older than maxDays
-  const userResult = store.db.prepare(
-    "DELETE FROM chunks WHERE type = 'conv' AND role != 'admin' AND created_at < ?"
-  ).run(userCutoff.toISOString());
-
-  // Delete admin conversation chunks older than adminMaxDays
-  const adminResult = store.db.prepare(
-    "DELETE FROM chunks WHERE type = 'conv' AND role = 'admin' AND created_at < ?"
-  ).run(adminCutoff.toISOString());
-
-  return userResult.changes + adminResult.changes;
-}
-
-module.exports = { cleanupLogs, pruneMemoryChunks };
+module.exports = { cleanupLogs };

@@ -92,7 +92,10 @@ async function rememberMemory(scope, text, { expiresAt = null, meta = {} } = {})
     filename: `${id}.md`,
     scope: toLcxScope(scope),
     expiresAt,
-    meta: { ...meta, type: 'memory' },
+    // createdAt rides meta so recall_memory can date a hit (litectx's occurredAt is
+    // fact/episode-only; our memory rides the doc axis). type='memory' is forced last
+    // so a memory row is always distinguishable from an uploaded document on recall.
+    meta: { createdAt: new Date().toISOString(), ...meta, type: 'memory' },
   });
 }
 
@@ -111,6 +114,29 @@ async function search(query, { scope = null, n = 5 } = {}) {
     format: h.format,
     score: h.score,
   }));
+}
+
+/**
+ * Memory-only recall for the recall_memory tool: same scope fence as search(), but
+ * filtered to rows written by rememberMemory (meta.type==='memory'), so the memory
+ * tool never returns an uploaded document. Over-fetches then slices, since recall
+ * mixes docs + memory in one kind:'doc' ranking.
+ *
+ * NOTE (M3 behaviour change, flagged): the legacy store had a recency fallback
+ * (recentByType) so an all-stopword query still surfaced recent memory. litectx
+ * exposes no recent-by-scope query for memory rows (recentActivity logs witnessed
+ * EDITS, not ingests), so the fallback is dropped here — filed as a litectx ask
+ * (litectx-asks/recent-memory-by-scope.md). FTS recall still works for any query
+ * carrying a non-stopword term.
+ * @param {string} query
+ * @param {{ scope?: string|null, n?: number }} [opts]
+ */
+async function searchMemory(query, { scope = null, n = 5 } = {}) {
+  const hits = await ctx().recall(query, { kind: 'doc', scope: toLcxScope(scope), n: n * 4, body: true });
+  return hits
+    .filter((h) => h.meta && h.meta.type === 'memory')
+    .slice(0, n)
+    .map((h) => ({ name: h.path, content: h.body || '', createdAt: h.meta?.createdAt || null, score: h.score }));
 }
 
 /** Fetch one row by id, scope-fenced (R2 handle fence). Pass the requesting scope on customer paths. */
@@ -133,5 +159,5 @@ function raw() { return ctx(); }
 
 module.exports = {
   init, setBounds, raw,
-  indexFile, indexBuffer, rememberMemory, search, get, purge, stats,
+  indexFile, indexBuffer, rememberMemory, search, searchMemory, get, purge, stats,
 };

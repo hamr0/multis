@@ -85,7 +85,7 @@ npm test             # node --test test/**/*.test.js
 | src/governance/human-channel.js | Single `humanPrompt` for every ask/halt event — routes back to chat via `event.action._ctx.{platform, chatId, senderId}` |
 | src/governance/audit.js | Append-only app-event log (50+ call sites; distinct from bareguard's `gate.jsonl`) |
 | src/skills/executor.js | Shell exec, file read (no governance here — gating happens at bareguard Gate via wireGate's policy) |
-| src/indexer/ | Doc parsing, chunking, SQLite FTS5 store |
+| src/context/ | Thin litectx policy wrapper — doc + memory ingest, scoped recall, retention (litectx owns parse/chunk/store/rank) |
 | src/llm/ | LLM providers + RAG prompt builder |
 | ~/.multis/ | Runtime data: config.json, data/ (db, memory), auth/, logs/, run/ |
 

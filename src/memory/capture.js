@@ -18,9 +18,17 @@ Rules:
  * @param {string} chatId - Chat identifier
  * @param {import('./manager').ChatMemoryManager} mem - Memory manager instance
  * @param {Object} llm - LLM provider with generate() method
- * @param {import('../indexer/index').DocumentIndexer} indexer - Document indexer
+ * @param {import('../context')} indexer - litectx context wrapper
  * @param {Object} options - { keepLast: 5 }
  */
+/** Days→expiresAt(epoch ms) by scope: admin memory lives longer than customer memory. */
+function memoryExpiresAt(role, options) {
+  const days = role === 'admin'
+    ? (options.adminRetentionDays || 365)
+    : (options.retentionDays || 90);
+  return Date.now() + days * 86400 * 1000;
+}
+
 async function runCapture(chatId, mem, llm, indexer, options = {}) {
   const keepLast = options.keepLast || 5;
   const role = options.role || options.scope || 'public';
@@ -50,25 +58,12 @@ async function runCapture(chatId, mem, llm, indexer, options = {}) {
     if (summary && !summary.toLowerCase().includes('no notable information')) {
       mem.appendMemory(summary);
 
-      // Index summary as a single searchable chunk
-      const now = new Date().toISOString();
+      // Persist summary as a scope-tagged, expiring memory row in litectx.
+      // expiresAt enforces retention (litectx purge() reclaims past-expiry rows).
       try {
-        indexer.store.saveChunk({
-          chunkId: `mem-${chatId}-${Date.now()}`,
-          filePath: `memory/chats/${chatId}`,
-          pageStart: 0,
-          pageEnd: 0,
-          element: 'chat',
-          name: `Memory capture ${now}`,
-          content: summary,
-          parentChunkId: null,
-          sectionPath: [chatId],
-          sectionLevel: 0,
-          type: 'conv',
-          metadata: { chatId },
-          role,
-          createdAt: now,
-          updatedAt: now
+        await indexer.rememberMemory(role, summary, {
+          expiresAt: memoryExpiresAt(role, options),
+          meta: { chatId },
         });
       } catch {
         // Store error — not critical
@@ -103,7 +98,7 @@ Rules:
  * @param {string} chatId
  * @param {import('./manager').ChatMemoryManager} mem
  * @param {Object} llm - LLM provider with generate() method
- * @param {import('../indexer/index').DocumentIndexer} indexer
+ * @param {import('../context')} indexer - litectx context wrapper
  * @param {Object} options - { sectionCap: 5, keepRecent: 3, role: 'public' }
  */
 async function runCondenseMemory(chatId, mem, llm, indexer, options = {}) {
@@ -134,25 +129,11 @@ async function runCondenseMemory(chatId, mem, llm, indexer, options = {}) {
     );
 
     if (summary && !summary.toLowerCase().includes('no notable information')) {
-      // Store condensed summary as a DB chunk
-      const now = new Date().toISOString();
+      // Store condensed summary as a scope-tagged, expiring memory row in litectx.
       try {
-        indexer.store.saveChunk({
-          chunkId: `condense-${chatId}-${Date.now()}`,
-          filePath: `memory/chats/${chatId}`,
-          pageStart: 0,
-          pageEnd: 0,
-          element: 'chat',
-          name: `Memory condensation ${now}`,
-          content: summary,
-          parentChunkId: null,
-          sectionPath: [chatId],
-          sectionLevel: 0,
-          type: 'conv',
-          metadata: { chatId, condensed: true },
-          role,
-          createdAt: now,
-          updatedAt: now
+        await indexer.rememberMemory(role, summary, {
+          expiresAt: memoryExpiresAt(role, options),
+          meta: { chatId, condensed: true },
         });
       } catch {
         // Store error — not critical

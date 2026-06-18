@@ -133,9 +133,9 @@ describe('RAG pipeline', () => {
 
     await router(msg('/ask test question', { senderId: 'user2', chatId: 'chat2' }), platform);
 
-    // Verify search was called with roles
+    // Verify search was called with the customer's scope (own ∪ global-KB via litectx).
     const call = indexer.searchCalls[0];
-    assert.deepStrictEqual(call.opts.roles, ['public', 'user:chat2']);
+    assert.strictEqual(call.opts.scope, 'user:chat2');
   });
 
   it('admin search is scoped to public + admin (not customer scopes)', async () => {
@@ -147,10 +147,10 @@ describe('RAG pipeline', () => {
 
     await router(msg('/ask admin question'), platform);
 
-    // #6: the owner is NOT pulled into customer (user:*) scopes by default —
-    // prevents customer-planted content from entering the tool-enabled loop.
+    // #6: the owner recalls 'admin' (∪ global-KB via litectx), NOT customer (user:*)
+    // scopes — prevents customer-planted content from entering the tool-enabled loop.
     const call = indexer.searchCalls[0];
-    assert.deepStrictEqual(call.opts.roles, ['public', 'admin']);
+    assert.strictEqual(call.opts.scope, 'admin');
   });
 });
 
@@ -666,14 +666,14 @@ describe('Search with results', () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();
     const chunks = [
-      { chunkId: 1, content: 'Relevant content about widgets', name: 'manual.pdf', documentType: 'pdf', sectionPath: ['Chapter 1', 'Widgets'], score: 1.0 }
+      { name: 'manual.pdf', content: 'Relevant content about widgets', score: 1.0 }
     ];
     const indexer = stubIndexer(chunks);
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
     await router(msg('/search widgets'), platform);
     const reply = platform.sent[0].text;
-    assert.match(reply, /Chapter 1 > Widgets/);
+    assert.match(reply, /manual\.pdf/);
     assert.match(reply, /Relevant content about widgets/);
   });
 
@@ -685,7 +685,7 @@ describe('Search with results', () => {
 
     await router(msg('/search test', { senderId: 'user2', chatId: 'chat2' }), platform);
     const call = indexer.searchCalls[0];
-    assert.deepStrictEqual(call.opts.roles, ['public', 'user:chat2']);
+    assert.strictEqual(call.opts.scope, 'user:chat2');
   });
 });
 
@@ -698,13 +698,11 @@ describe('Info commands', () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();
     const indexer = stubIndexer();
-    indexer.getStats = () => ({ indexedFiles: 3, totalChunks: 42, byType: { pdf: 30, docx: 12 } });
+    indexer.stats = () => ({ total: 42 });
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
     await router(msg('/docs'), platform);
-    assert.match(platform.sent[0].text, /Indexed documents: 3/);
-    assert.match(platform.sent[0].text, /Total chunks: 42/);
-    assert.match(platform.sent[0].text, /pdf: 30/);
+    assert.match(platform.sent[0].text, /Indexed items: 42/);
   });
 
   it('/skills lists available skills', async () => {
@@ -1825,14 +1823,19 @@ describe('Config backup', () => {
 function stubIndexer(chunks = [], stats = {}) {
   const searchCalls = [];
   return {
-    search: (query, limit, opts = {}) => {
-      searchCalls.push({ query, limit, opts });
+    search: async (query, opts = {}) => {
+      searchCalls.push({ query, opts });
+      return chunks;
+    },
+    searchMemory: async (query, opts = {}) => {
+      searchCalls.push({ query, opts, memory: true });
       return chunks;
     },
     searchCalls,
     indexFile: async () => 0,
     indexBuffer: async () => 0,
-    getStats: () => ({ indexedFiles: 0, totalChunks: 0, byType: {}, ...stats }),
-    store: { recordSearchAccess: () => {}, saveChunk: () => {} }
+    rememberMemory: async () => ({ chunks: 1 }),
+    purge: async () => 0,
+    stats: () => ({ total: stats.total ?? stats.totalChunks ?? 0 }),
   };
 }

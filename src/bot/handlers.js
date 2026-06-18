@@ -2,7 +2,7 @@ const path = require('path');
 const { logAudit } = require('../governance/audit');
 const { addAllowedUser, isOwner, isAdmin, addAdmin, removeAdmin, saveConfig, backupConfig, updateChatMeta, getMultisDir, PATHS } = require('../config');
 const { execCommand, readFile, listSkills } = require('../skills/executor');
-const { DocumentIndexer } = require('../indexer/index');
+const context = require('../context');
 const { createProvider, simpleGenerate } = require('../llm/provider-adapter');
 const { buildRAGPrompt, buildMemorySystemPrompt, buildBusinessPrompt } = require('../llm/prompts');
 const { getMemoryManager } = require('../memory/manager');
@@ -252,11 +252,8 @@ function isPaired(msgOrCtx, config) {
  * Takes a normalized Message and routes to the appropriate handler.
  */
 function createMessageRouter(config, deps = {}) {
-  const indexer = deps.indexer || new DocumentIndexer(null, {
-    maxSize: config.documents?.maxSize,
-    maxPdfPages: config.documents?.maxPdfPages,
-    parseTimeoutMs: config.documents?.parseTimeoutMs,
-  });
+  // litectx wrapper (process-wide singleton, init()-ed at startup). Tests inject deps.indexer.
+  const indexer = deps.indexer || context;
   const memoryManagers = deps.memoryManagers || new Map();
   const _memBaseDir = deps.memoryBaseDir || PATHS.memory();
   const pinManager = deps.pinManager || new PinManager(config);
@@ -532,13 +529,17 @@ function createMessageRouter(config, deps = {}) {
           runCapture(msg.chatId, mem, simpleGenerate(provider), indexer, {
             keepLast: 5,
             role: captureRole,
+            retentionDays: memCfg.retention_days,
+            adminRetentionDays: memCfg.admin_retention_days,
             maxSections: memCfg.memory_max_sections
           }).then(() => {
             // Stage 2: condense if memory.md sections >= cap
             const sectionCap = memCfg.memory_section_cap || 5;
             if (mem.countMemorySections() >= sectionCap) {
               return runCondenseMemory(msg.chatId, mem, simpleGenerate(provider), indexer, {
-                sectionCap, keepRecent: 3, role: captureRole
+                sectionCap, keepRecent: 3, role: captureRole,
+                retentionDays: memCfg.retention_days,
+                adminRetentionDays: memCfg.admin_retention_days
               });
             }
           }).catch(err => {
@@ -987,10 +988,11 @@ async function routeSearch(msg, platform, config, indexer, query) {
   }
 
   const admin = isOwner(msg.senderId, config, msg);
-  // Owner /search is scoped to public + admin; customer (user:*) scopes are not
-  // pulled by default (#6 — cross-customer data is an opt-in, not the default).
-  const roles = admin ? ['public', 'admin'] : ['public', `user:${msg.chatId}`];
-  const results = indexer.search(query, 5, { roles });
+  // Owner /search recalls admin ∪ global-KB; a customer recalls own ∪ global-KB.
+  // litectx recall(scope) returns scope ∪ null-global, so a customer (user:*) chunk
+  // can never enter another customer's or the owner's results (#6).
+  const scope = admin ? 'admin' : `user:${msg.chatId}`;
+  const results = await indexer.search(query, { scope, n: 5 });
 
   if (results.length === 0) {
     await platform.send(msg.chatId, 'No results found.');
@@ -998,32 +1000,19 @@ async function routeSearch(msg, platform, config, indexer, query) {
   }
 
   const formatted = results.map((r, i) => {
-    const path = r.sectionPath.join(' > ') || r.name;
     const preview = r.content.slice(0, 200).replace(/\n/g, ' ');
-    return `${i + 1}. [${r.element}] ${path}\n${preview}...`;
+    return `${i + 1}. ${r.name}\n${preview}...`;
   });
 
   await platform.send(msg.chatId, formatted.join('\n\n'));
   logAudit({ action: 'search', user_id: msg.senderId, query, results: results.length });
-
-  // Record access for ACT-R activation tracking
-  if (results.length > 0) {
-    try {
-      indexer.store.recordSearchAccess(results.map(c => c.chunkId), query);
-    } catch { /* non-critical */ }
-  }
+  // litectx self-tracks recall demand-signal; no manual access recording needed.
 }
 
 async function routeDocs(msg, platform, config, indexer) {
-  const stats = indexer.getStats();
-  const lines = [
-    `Indexed documents: ${stats.indexedFiles}`,
-    `Total chunks: ${stats.totalChunks}`
-  ];
-  for (const [type, count] of Object.entries(stats.byType)) {
-    lines.push(`  ${type}: ${count} chunks`);
-  }
-  await platform.send(msg.chatId, lines.join('\n') || 'No documents indexed yet.');
+  const stats = indexer.stats();
+  const line = `Indexed items: ${stats.total}`;
+  await platform.send(msg.chatId, stats.total ? line : 'No documents indexed yet.');
 }
 
 // Shared circuit breaker (one per process, resets on provider recovery)
@@ -1145,13 +1134,14 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
       }
     }
 
-    // Search for relevant documents (scoped). The owner is scoped to public +
-    // admin — NOT customer (user:*) scopes — so customer-planted content can't
-    // surface in the owner's tool-enabled agent loop as trusted instructions (#6).
-    const roles = admin ? ['public', 'admin'] : ['public', `user:${msg.chatId}`];
+    // Search for relevant documents (scoped). Owner recalls admin ∪ global-KB; a
+    // customer recalls own ∪ global-KB. litectx recall(scope) returns scope ∪
+    // null-global, so customer-planted content can't surface in another customer's
+    // or the owner's tool-enabled agent loop as trusted instructions (#6).
+    const scope = admin ? 'admin' : `user:${msg.chatId}`;
     const _sc = startClock();
     mark('routeAsk -> indexer.search');
-    const chunks = indexer.search(question, 5, { roles });
+    const chunks = await indexer.search(question, { scope, n: 5 });
     mark(`routeAsk <- indexer.search (${chunks.length} chunks)`, _sc);
 
     // Resolve agent for @mention stripping + per-chat provider only. The persona
@@ -1226,13 +1216,7 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     }
 
     logAudit({ action: 'ask', user_id: msg.senderId, question, chunks: chunks.length, routeAs: msg.routeAs, agent: resolved.name });
-
-    // Record access for ACT-R activation tracking
-    if (chunks.length > 0) {
-      try {
-        indexer.store.recordSearchAccess(chunks.map(c => c.chunkId), question);
-      } catch { /* non-critical */ }
-    }
+    // litectx self-tracks recall demand-signal; no manual access recording needed.
 
     // Fire-and-forget two-stage capture if threshold reached
     if (mem && memCfg && mem.shouldCapture(memCfg.capture_threshold)) {
@@ -1240,13 +1224,17 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
       runCapture(msg.chatId, mem, simpleGenerate(provider), indexer, {
         keepLast: 5,
         role: captureRole,
+        retentionDays: memCfg.retention_days,
+        adminRetentionDays: memCfg.admin_retention_days,
         maxSections: memCfg.memory_max_sections
       }).then(() => {
         // Stage 2: condense if memory.md sections >= cap
         const sectionCap = memCfg.memory_section_cap || 5;
         if (mem.countMemorySections() >= sectionCap) {
           return runCondenseMemory(msg.chatId, mem, simpleGenerate(provider), indexer, {
-            sectionCap, keepRecent: 3, role: captureRole
+            sectionCap, keepRecent: 3, role: captureRole,
+            retentionDays: memCfg.retention_days,
+            adminRetentionDays: memCfg.admin_retention_days
           });
         }
       }).catch(err => {
@@ -1795,8 +1783,8 @@ function createSchedulerTick({ platformRegistry, config, provider, indexer, getM
       const userTools = getToolsForUser(allTools || [], admin, toolsConfig);
       const mem = getMem ? getMem(job.chatId, { isAdmin: admin }) : null;
       const memoryMd = mem ? mem.loadMemory() : '';
-      const roles = undefined; // admin sees all scopes
-      const chunks = indexer ? indexer.search(job.action, 5, { roles }) : [];
+      // Agentic jobs run as owner — unscoped recall sees every scope (admin ∪ all).
+      const chunks = indexer ? await indexer.search(job.action, { n: 5 }) : [];
       const system = buildMemorySystemPrompt(memoryMd, chunks);
 
       const answer = await runAgentLoop(provider, [{ role: 'user', content: job.action }], userTools, {
@@ -2623,17 +2611,16 @@ function handleDocument(config, indexer) {
 }
 
 function handleSearch(config, indexer) {
-  return (ctx) => {
+  return async (ctx) => {
     if (!isPaired(ctx, config)) return;
     const text = ctx.message.text || '';
     const query = text.replace(/^\/search\s*/, '').trim();
     if (!query) { ctx.reply('Usage: /search <query>'); return; }
-    const results = indexer.search(query, 5);
+    const results = await indexer.search(query, { n: 5 });
     if (results.length === 0) { ctx.reply('No results found.'); return; }
     const formatted = results.map((r, i) => {
-      const p = r.sectionPath.join(' > ') || r.name;
       const preview = r.content.slice(0, 200).replace(/\n/g, ' ');
-      return `${i + 1}. [${r.element}] ${p}\n${preview}...`;
+      return `${i + 1}. ${r.name}\n${preview}...`;
     });
     ctx.reply(formatted.join('\n\n'));
     logAudit({ action: 'search', user_id: ctx.from.id, query, results: results.length });
@@ -2643,12 +2630,8 @@ function handleSearch(config, indexer) {
 function handleDocs(config, indexer) {
   return (ctx) => {
     if (!isPaired(ctx, config)) return;
-    const stats = indexer.getStats();
-    const lines = [`Indexed documents: ${stats.indexedFiles}`, `Total chunks: ${stats.totalChunks}`];
-    for (const [type, count] of Object.entries(stats.byType)) {
-      lines.push(`  ${type}: ${count} chunks`);
-    }
-    ctx.reply(lines.join('\n') || 'No documents indexed yet.');
+    const stats = indexer.stats();
+    ctx.reply(stats.total ? `Indexed items: ${stats.total}` : 'No documents indexed yet.');
   };
 }
 

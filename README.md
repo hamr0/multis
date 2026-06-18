@@ -76,7 +76,7 @@ The map, not the manual — every command and its full options live in the **[Co
 | You say… | multis… |
 |----------|---------|
 | *plain text*, or `/ask` | Drives the full tool-using agent — searches your indexed documents (answering **with citations**), and when you ask it to *find a file, read something, or run a command* it uses its tools and does it rather than telling you to do it yourself |
-| `/index <path> public\|admin` | Ingests a PDF / DOCX / Markdown file with section-aware chunking, scoped so customers and admins see different knowledge |
+| `/index <path> public\|admin` | Ingests a PDF / DOCX / Markdown file (parsed + chunked via litectx), scoped so customers and admins see different knowledge |
 | `/exec`, `/read` | Runs a shell command or reads a file **on your machine** — gated, PIN-protected, owner-only |
 | `/mode business` on a chat | Turns that chat into an auto-responder that answers from your KB and **escalates to you** when a human is needed |
 | `/remember`, `/memory` | Keeps durable notes per chat; recent context stays hot and old context fades, so it remembers what matters |
@@ -99,21 +99,21 @@ multis is mostly *wiring* — the hard parts are vendored from a family of small
 
 These are siblings multis can grow toward — same design DNA, drop-in when the need arrives:
 
-- **[litectx](https://npmjs.com/package/litectx)** — ranked, graph-aware memory with activation decay (the memory model multis already mirrors, on track to adopt natively).
+- **[litectx](https://npmjs.com/package/litectx)** — ranked, graph-aware memory with activation decay. **Now adopted** as multis's document index + memory store (M3); the native memory model (promotion ladder) lands in M4.
 - **[barebrowse](https://npmjs.com/package/barebrowse)** — a real browser for the agent, so it can read and act on the live web.
 - **[baremobile](https://npmjs.com/package/baremobile)** — Android + iOS device control.
 
 > The bare philosophy: small libraries that each do one thing, run locally, and compose — no 200MB framework, no vendor lock-in. multis is one of the first products built from them.
 
-> **Under the hood** — message router, skills, LLM layer, indexer, and the bareguard Gate over a SQLite (FTS5 + activation-decay) store. The full architecture diagram and source map live in **[system-state.md](docs/00-context/system-state.md)**.
+> **Under the hood** — message router, skills, LLM layer, and the bareguard Gate, with documents + memory stored and recalled through **litectx** (a thin policy wrapper in `src/context`). The full architecture diagram and source map live in **[system-state.md](docs/00-context/system-state.md)**.
 
 ## Why not openclaw
 
 multis borrows the good ideas — daemon architecture, the pairing flow, the `skill.md` pattern — and drops the weight:
 
 - **One config, every chat.** openclaw wires up a separate integration per network (WhatsApp Baileys, a Discord bot, Signal…). multis points at beeperbox once and reaches them all.
-- **Memory with priorities, not a transcript.** Recent context stays hot, old conversations fade — an activation-decay model (from Aurora), not an ever-growing log.
-- **Documents it actually understands.** Section-aware chunking for PDF and DOCX means an answer can cite the chapter and section it came from.
+- **Memory with priorities, not a transcript.** Recent context stays hot, old conversations fade — an activation-decay model (via litectx's ranked recall), not an ever-growing log.
+- **Documents it actually understands.** PDF and DOCX are parsed and chunked (via litectx) so an answer can cite the document it came from.
 - **A flat router, not a gateway.** No plugin system, no gateway layer — a new command is a handler in one file.
 
 ## No Beeper? Self-host Matrix
@@ -122,11 +122,11 @@ If you'd rather not route through Beeper at all, you can start from scratch: run
 
 ## Status
 
-multis is **work in progress**. Built and tested today: Telegram + pairing, shell/file skills behind a single gate, PDF/DOCX/MD indexing → FTS5, LLM RAG with chat modes and business escalation, activation-decay memory, the daemon + CLI + PIN auth, the baresuite migration (bare-agent + bareguard), Beeper via beeperbox, and the limited-admin (`/admin`) security batch.
+multis is **work in progress**. Built and tested today: Telegram + pairing, shell/file skills behind a single gate, PDF/DOCX/MD indexing and conversation memory on **litectx**, LLM RAG with chat modes and business escalation, the daemon + CLI + PIN auth, the baresuite migration (bare-agent + bareguard + litectx), Beeper via beeperbox, and the limited-admin (`/admin`) security batch.
 
-**Before the first tagged release:** a live end-to-end verification pass, then merge to `main`. **Then:** native litectx memory and `npm install -g` packaging. Full roadmap and per-POC status: **[PRD](docs/01-product/baresuite-migration-prd.md)**.
+**Before the first tagged release:** a live end-to-end verification pass, then merge to `main`. **Then:** the native litectx memory model (M4 promotion ladder) and `npm install -g` packaging. Full roadmap and per-POC status: **[PRD](docs/01-product/baresuite-migration-prd.md)**.
 
-Stack: Node.js (vanilla, minimal deps) · Telegraf · better-sqlite3 (FTS5) · pdfjs-dist · mammoth · bare-agent · bareguard. Architecture and source map: **[system-state.md](docs/00-context/system-state.md)** · all docs: **[docs hub](docs/README.md)**.
+Stack: Node.js (vanilla, minimal deps) · Telegraf · bare-agent · bareguard · litectx (FTS5 + PDF/DOCX via pdfjs-dist/mammoth). Architecture and source map: **[system-state.md](docs/00-context/system-state.md)** · all docs: **[docs hub](docs/README.md)**.
 
 ## License
 
