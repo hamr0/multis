@@ -24,10 +24,35 @@ let _ctx = null;
 let _initP = null;
 let _bounds = {};
 
-/** Translate multis-native scope → litectx scope. 'public'/'kb' is the global (null) KB. */
+/**
+ * Translate a multis-native WRITE/ingest scope → litectx scope. 'public'/'kb'/null
+ * is the global (null) KB. This is the write axis: an unscoped ingest lands in the
+ * world-readable KB, which is the intended default for owner uploads.
+ */
 function toLcxScope(scope) {
   if (scope == null || scope === 'public' || scope === 'kb') return null;
   return scope; // 'admin' / 'user:<chatId>' are litectx scope strings verbatim
+}
+
+/**
+ * Translate a multis-native RECALL scope → litectx scope — FAIL-CLOSED.
+ *
+ * Recall is the multi-tenant boundary. litectx `recall({scope: null})` returns
+ * EVERY scope (the SQL fence short-circuits on `:scope IS NULL`), so a missing or
+ * "global" recall scope is a cross-tenant leak, not a safe default. Unlike the
+ * write axis, there is deliberately NO null/'public'/'kb' shortcut here: every
+ * recall MUST name the requesting principal's concrete scope ('admin' or
+ * 'user:<chatId>'). An absent/global scope throws so the bug surfaces in dev
+ * instead of silently exposing other tenants in prod.
+ */
+function toRecallScope(scope) {
+  if (scope == null || scope === 'public' || scope === 'kb') {
+    throw new Error(
+      `context recall: a concrete scope is required (got ${String(scope)}); ` +
+      `recall(null) returns every tenant — pass 'admin' or 'user:<chatId>'`
+    );
+  }
+  return scope; // 'admin' / 'user:<chatId>' verbatim; litectx returns scope ∪ null-global
 }
 
 /**
@@ -103,10 +128,10 @@ async function rememberMemory(scope, text, { expiresAt = null, meta = {} } = {})
  * Unified recall (docs + memory, both kind=doc), mapped to the chunk shape
  * buildRAGPrompt/buildMemorySystemPrompt consume ({ name, content }).
  * @param {string} query
- * @param {{ scope?: string|null, n?: number }} [opts]
+ * @param {{ scope: string, n?: number }} opts  scope is REQUIRED (fail-closed; see toRecallScope)
  */
-async function search(query, { scope = null, n = 5 } = {}) {
-  const hits = await ctx().recall(query, { kind: 'doc', scope: toLcxScope(scope), n, body: true });
+async function search(query, { scope, n = 5 } = {}) {
+  const hits = await ctx().recall(query, { kind: 'doc', scope: toRecallScope(scope), n, body: true });
   return hits.map((h) => ({
     name: h.path,
     content: h.body || '',
@@ -129,10 +154,10 @@ async function search(query, { scope = null, n = 5 } = {}) {
  * (litectx-asks/recent-memory-by-scope.md). FTS recall still works for any query
  * carrying a non-stopword term.
  * @param {string} query
- * @param {{ scope?: string|null, n?: number }} [opts]
+ * @param {{ scope: string, n?: number }} opts  scope is REQUIRED (fail-closed; see toRecallScope)
  */
-async function searchMemory(query, { scope = null, n = 5 } = {}) {
-  const hits = await ctx().recall(query, { kind: 'doc', scope: toLcxScope(scope), n: n * 4, body: true });
+async function searchMemory(query, { scope, n = 5 } = {}) {
+  const hits = await ctx().recall(query, { kind: 'doc', scope: toRecallScope(scope), n: n * 4, body: true });
   return hits
     .filter((h) => h.meta && h.meta.type === 'memory')
     .slice(0, n)

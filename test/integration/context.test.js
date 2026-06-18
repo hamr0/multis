@@ -75,13 +75,27 @@ describe('context wrapper (litectx policy layer)', () => {
     assert.doesNotMatch(text, /customer beta/, 'owner must NOT be pulled into customer scopes (#6)');
   });
 
-  it('unscoped recall (owner agentic job) sees every scope', async () => {
-    const hits = await context.search('widget', { n: 20 }); // scope omitted = sees everything
-    const text = names(hits).join('\n');
-    assert.match(text, /customer alpha/);
-    assert.match(text, /customer beta/);
-    assert.match(text, /admin-private/);
-    assert.match(text, /global knowledge base/);
+  it('recall is fail-closed: an omitted scope throws instead of crossing tenants', async () => {
+    // litectx recall({scope:null}) returns EVERY tenant, so a missing recall scope
+    // must throw (fail-closed), not silently leak. The owner agentic job recalls with
+    // an explicit scope:'admin' (admin ∪ global-KB), never unscoped.
+    await assert.rejects(
+      () => context.search('widget', { n: 20 }),
+      /concrete scope is required/,
+      'search() with no scope must throw, not see every scope'
+    );
+    await assert.rejects(
+      () => context.searchMemory('widget', { n: 20 }),
+      /concrete scope is required/,
+      'searchMemory() with no scope must throw, not see every scope'
+    );
+    // 'public'/'kb' are write-only scopes; using one for recall would map to null
+    // (every tenant) in litectx, so the wrapper rejects them on the recall axis too.
+    await assert.rejects(
+      () => context.search('widget', { scope: 'public', n: 20 }),
+      /concrete scope is required/,
+      "recall with the 'public' write-scope must throw"
+    );
   });
 
   it('searchMemory returns memory rows only, never an uploaded document', async () => {

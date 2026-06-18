@@ -929,10 +929,14 @@ async function routeRead(msg, platform, config, filePath, toolDeps = {}) {
 }
 
 async function routeIndex(msg, platform, config, indexer, args) {
-  // Limited admins manage the knowledge base too (mode/index/ask), so allow any
-  // admin window — not just the super-admin. Shell (/exec,/read) stays owner-only.
-  if (!isAdmin(msg.senderId, config, msg)) {
-    await platform.send(msg.chatId, 'Admin only command.');
+  // `/index <path>` reads from the HOST filesystem (indexFile -> fs.readFileSync),
+  // so it is an OWNER-only capability — same trust boundary as /exec and /read. A
+  // limited admin has no host/file access; letting one index an arbitrary path
+  // (e.g. `/index /etc/passwd public`) would be a host-file read primitive that
+  // also plants the bytes into the world-readable KB. Limited admins contribute to
+  // the KB by uploading a file in chat (handled as a scoped upload), not by path.
+  if (!isOwner(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, 'Owner only command. (Limited admins: send the file in chat to index it.)');
     return;
   }
 
@@ -958,15 +962,6 @@ async function routeIndex(msg, platform, config, indexer, args) {
 
   if (!role) {
     await platform.send(msg.chatId, 'Please specify role: public (knowledge base) or admin (owner-only).\nExample: /index ~/doc.pdf public');
-    return;
-  }
-
-  // The `admin` scope is the owner's trusted RAG context (owner queries retrieve
-  // public+admin and inject it into the tool-enabled agent loop). A limited admin
-  // manages only the public KB — letting one write `admin` would plant trusted
-  // content into the owner's privileged context. Restrict admin scope to owner.
-  if (role === 'admin' && !isOwner(msg.senderId, config, msg)) {
-    await platform.send(msg.chatId, 'Only the owner can index to the admin scope. Use: /index <path> public');
     return;
   }
 
@@ -1010,6 +1005,13 @@ async function routeSearch(msg, platform, config, indexer, query) {
 }
 
 async function routeDocs(msg, platform, config, indexer) {
+  // stats() is a process-wide count across ALL scopes (docs + memory for every
+  // tenant). litectx exposes no per-scope count, so the figure is global — gate it
+  // to admins rather than leak the cross-tenant total to a customer.
+  if (!isAdmin(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, 'Admin only command.');
+    return;
+  }
   const stats = indexer.stats();
   const line = `Indexed items: ${stats.total}`;
   await platform.send(msg.chatId, stats.total ? line : 'No documents indexed yet.');
@@ -1783,8 +1785,10 @@ function createSchedulerTick({ platformRegistry, config, provider, indexer, getM
       const userTools = getToolsForUser(allTools || [], admin, toolsConfig);
       const mem = getMem ? getMem(job.chatId, { isAdmin: admin }) : null;
       const memoryMd = mem ? mem.loadMemory() : '';
-      // Agentic jobs run as owner — unscoped recall sees every scope (admin ∪ all).
-      const chunks = indexer ? await indexer.search(job.action, { n: 5 }) : [];
+      // Agentic jobs run as owner, so recall is scoped to 'admin' (admin ∪ global-KB)
+      // — identical to the owner's interactive /ask. recall() is fail-closed and never
+      // crosses into customer (user:*) scopes, even for an owner-run job.
+      const chunks = indexer ? await indexer.search(job.action, { scope: 'admin', n: 5 }) : [];
       const system = buildMemorySystemPrompt(memoryMd, chunks);
 
       const answer = await runAgentLoop(provider, [{ role: 'user', content: job.action }], userTools, {
@@ -2439,218 +2443,6 @@ async function handleSilentAttachment(msg, platform, config, indexer, source) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Legacy Telegraf-style handlers (kept for backward compat, delegates to above)
-// ---------------------------------------------------------------------------
-
-function handleStart(config) {
-  return (ctx) => {
-    const userId = ctx.from.id;
-    const username = ctx.from.username || ctx.from.first_name;
-
-    if (isPaired(ctx, config)) {
-      ctx.reply(`Welcome back, ${username}! You're already paired. Send me any message.`);
-      logAudit({ action: 'start', user_id: userId, username, status: 'already_paired' });
-      return;
-    }
-
-    const text = ctx.message.text || '';
-    const parts = text.split(/\s+/);
-    const code = ctx.startPayload || parts[1];
-
-    if (!code) {
-      ctx.reply('Send: /start <pairing_code>\nOr use deep link: t.me/multis02bot?start=<code>');
-      logAudit({ action: 'start', user_id: userId, username, status: 'no_code' });
-      return;
-    }
-
-    if (code.toUpperCase() === config.pairing_code.toUpperCase()) {
-      const id = String(userId);
-      addAllowedUser(id);
-      if (!config.allowed_users.map(String).includes(id)) {
-        config.allowed_users.push(id);
-      }
-      if (!config.owner_id) config.owner_id = id;
-      const role = String(config.owner_id) === id ? 'owner' : 'user';
-      ctx.reply(`Paired successfully as ${role}! Welcome, ${username}.`);
-      logAudit({ action: 'pair', user_id: id, username, status: 'success' });
-    } else {
-      ctx.reply('Invalid pairing code. Try again.');
-      logAudit({ action: 'pair', user_id: userId, username, status: 'invalid_code', code_given: code });
-    }
-  };
-}
-
-function handleStatus(config) {
-  return (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    const owner = isOwner(ctx.from.id, config);
-    const info = [
-      `multis bot v${PKG_VERSION}`,
-      `Role: ${owner ? 'owner' : 'user'}`,
-      `Paired users: ${config.allowed_users.length}`,
-      `LLM provider: ${config.llm.provider}`,
-      `Governance: bareguard Gate (bareguard 0.4 + bare-agent 0.10)`
-    ];
-    ctx.reply(info.join('\n'));
-  };
-}
-
-function handleUnpair(config) {
-  return (ctx) => {
-    const userId = ctx.from.id;
-    if (!isPaired(ctx, config)) return;
-    config.allowed_users = config.allowed_users.filter(id => id !== userId);
-    const { saveConfig } = require('../config');
-    saveConfig(config);
-    ctx.reply('Unpaired. Send /start <code> to pair again.');
-    logAudit({ action: 'unpair', user_id: userId, status: 'success' });
-  };
-}
-
-function handleExec(config) {
-  return async (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    if (!isOwner(ctx.from.id, config)) { ctx.reply('Owner only command.'); return; }
-    const text = ctx.message.text || '';
-    const command = text.replace(/^\/exec\s*/, '').trim();
-    if (!command) { ctx.reply('Usage: /exec <command>'); return; }
-    const result = await execCommand(command, ctx.from.id);
-    ctx.reply(result.output);
-  };
-}
-
-function handleRead(config) {
-  return (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    if (!isOwner(ctx.from.id, config)) { ctx.reply('Owner only command.'); return; }
-    const text = ctx.message.text || '';
-    const filePath = text.replace(/^\/read\s*/, '').trim();
-    if (!filePath) { ctx.reply('Usage: /read <path>'); return; }
-    const result = readFile(filePath, ctx.from.id);
-    ctx.reply(result.output);
-  };
-}
-
-function handleSkills(config) {
-  return (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    ctx.reply(`Available skills:\n${listSkills()}`);
-  };
-}
-
-function handleHelp(config) {
-  return (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    const cmds = [
-      'multis commands:',
-      '/ask <question> - Ask about indexed documents',
-      '/status - Bot info',
-      '/search <query> - Search indexed documents',
-      '/docs - Show indexing stats',
-      '/skills - List available skills',
-      '/unpair - Remove pairing',
-      '/help - This message',
-      '',
-      'Plain text messages are treated as questions.'
-    ];
-    if (isOwner(ctx.from.id, config)) {
-      cmds.splice(1, 0,
-        '/exec <cmd> - Run a shell command (owner)',
-        '/read <path> - Read a file or directory (owner)',
-        '/index <path> - Index a document (owner)',
-        '/mode <business|silent|off> - Set chat mode (owner)',
-        'Send a file to index it (owner)'
-      );
-    }
-    ctx.reply(cmds.join('\n'));
-  };
-}
-
-function handleIndex(config, indexer) {
-  return async (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    if (!isOwner(ctx.from.id, config)) { ctx.reply('Owner only command.'); return; }
-    const text = ctx.message.text || '';
-    const filePath = text.replace(/^\/index\s*/, '').trim();
-    if (!filePath) { ctx.reply('Usage: /index <path>'); return; }
-    const expanded = filePath.replace(/^~/, process.env.HOME || process.env.USERPROFILE);
-    try {
-      ctx.reply(`Indexing: ${filePath}...`);
-      const count = await indexer.indexFile(expanded);
-      ctx.reply(`Indexed ${count} chunks from ${filePath}`);
-    } catch (err) {
-      ctx.reply(`Index error: ${err.message}`);
-    }
-  };
-}
-
-function handleDocument(config, indexer) {
-  return async (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    if (!isOwner(ctx.from.id, config)) { ctx.reply('Owner only.'); return; }
-    const doc = ctx.message.document;
-    if (!doc) return;
-    const filename = doc.file_name || 'unknown';
-    const ext = filename.split('.').pop().toLowerCase();
-    const supported = ['pdf', 'docx', 'md', 'txt'];
-    if (!supported.includes(ext)) { ctx.reply(`Unsupported: .${ext}`); return; }
-    try {
-      ctx.reply(`Downloading and indexing: ${filename}...`);
-      const fileLink = await ctx.telegram.getFileLink(doc.file_id);
-      const response = await fetch(fileLink.href);
-      const buffer = Buffer.from(await response.arrayBuffer());
-      const count = await indexer.indexBuffer(buffer, filename);
-      ctx.reply(`Indexed ${count} chunks from ${filename}`);
-      logAudit({ action: 'index_upload', user_id: ctx.from.id, filename, chunks: count });
-    } catch (err) {
-      ctx.reply(`Index error: ${err.message}`);
-      logAudit({ action: 'index_error', user_id: ctx.from.id, filename, error: err.message });
-    }
-  };
-}
-
-function handleSearch(config, indexer) {
-  return async (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    const text = ctx.message.text || '';
-    const query = text.replace(/^\/search\s*/, '').trim();
-    if (!query) { ctx.reply('Usage: /search <query>'); return; }
-    const results = await indexer.search(query, { n: 5 });
-    if (results.length === 0) { ctx.reply('No results found.'); return; }
-    const formatted = results.map((r, i) => {
-      const preview = r.content.slice(0, 200).replace(/\n/g, ' ');
-      return `${i + 1}. ${r.name}\n${preview}...`;
-    });
-    ctx.reply(formatted.join('\n\n'));
-    logAudit({ action: 'search', user_id: ctx.from.id, query, results: results.length });
-  };
-}
-
-function handleDocs(config, indexer) {
-  return (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    const stats = indexer.stats();
-    ctx.reply(stats.total ? `Indexed items: ${stats.total}` : 'No documents indexed yet.');
-  };
-}
-
-function handleMessage(config) {
-  return (ctx) => {
-    const userId = ctx.from.id;
-    const username = ctx.from.username || ctx.from.first_name;
-    if (!isPaired(ctx, config)) {
-      ctx.reply('You are not paired. Send /start <pairing_code> to pair.');
-      logAudit({ action: 'message', user_id: userId, username, status: 'unpaired' });
-      return;
-    }
-    const text = ctx.message.text;
-    if (text.startsWith('/')) return;
-    logAudit({ action: 'message', user_id: userId, username, text });
-    ctx.reply(`Echo: ${text}`);
-  };
-}
-
 module.exports = {
   // Platform-agnostic
   createMessageRouter,
@@ -2658,18 +2450,5 @@ module.exports = {
   buildAgentRegistry,
   resolveAgent,
   clearAdminPauses,
-  // Legacy Telegraf handlers
-  handleStart,
-  handleStatus,
-  handleUnpair,
-  handleExec,
-  handleRead,
-  handleIndex,
-  handleDocument,
-  handleSearch,
-  handleDocs,
-  handleSkills,
-  handleHelp,
-  handleMessage,
   isPaired
 };
