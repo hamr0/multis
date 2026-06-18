@@ -18,6 +18,12 @@ const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler
 const { createGate } = require('../governance/gate');
 const { createHumanPrompt, createPinChallenge, createConfirmChallenge } = require('../governance/human-channel');
 const { PendingRegistry } = require('./pending');
+
+// Picker / wizard lifetimes, single-sourced from config (see config.js
+// `interaction` block). Quick numeric pickers expire fast; the multi-step
+// business wizard gets a longer window so a slow fill isn't dropped mid-flow.
+const pickerTtlMs = (config) => (config.interaction?.picker_ttl_minutes ?? 5) * 60_000;
+const wizardTtlMs = (config) => (config.interaction?.wizard_ttl_minutes ?? 30) * 60_000;
 const PKG_VERSION = require('../../package.json').version;
 const { looksLikeCommand } = require('../platforms/message');
 const { mark, startClock } = require('../debug/instr'); // TEMP: timeout instrumentation
@@ -337,7 +343,7 @@ function createMessageRouter(config, deps = {}) {
         // business mode, non-owner: silently index, no interactive prompt
         await handleSilentAttachment(msg, platform, config, indexer, 'beeper');
       } else if (isOwner(msg.senderId, config, msg)) {
-        await handleBeeperFileIndex(msg, platform, config, indexer);
+        await handleBeeperFileIndex(msg, platform, config, indexer, pending);
       } else {
         await handleSilentAttachment(msg, platform, config, indexer, 'beeper');
       }
@@ -391,116 +397,112 @@ function createMessageRouter(config, deps = {}) {
             const stored = entry.data; // { command, args, msg, platform }
             pending.clear(msg.chatId, msg.senderId);
             await platform.send(msg.chatId, 'PIN accepted.');
-            await executeCommand(stored.command, stored.args, stored.msg, platform, config, indexer, provider, memoryManagers, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, gov });
+            await executeCommand(stored.command, stored.args, stored.msg, platform, config, indexer, provider, memoryManagers, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, gov, pending });
             return;
           }
-        }
-      }
-    }
 
-    // Handle pending /admin designation flow (pick → confirm → PIN). Keyed by
-    // chatId. Placed before the digit-matching handlers below so its numeric
-    // picks aren't swallowed by the index/mode pickers.
-    if (config._pendingAdmin?.[msg.chatId]) {
-      if (text.trim().startsWith('/')) {
-        delete config._pendingAdmin[msg.chatId];
-        await platform.send(msg.chatId, 'Admin setup cancelled.');
-        // fall through to command routing
-      } else {
-        await handleAdminFlowReply(msg, platform, config, text.trim(), pinManager);
-        return;
-      }
-    }
+          // --- Interactive pickers / wizards (migrated from config._pending*) ---
+          // None carry a `match` fn, so they always enter here. Each owns its
+          // cancel/fall-through contract: a case that `return`s consumes the
+          // reply; a case that `break`s lets the message fall through to normal
+          // command routing below (used for the /command-cancels-a-picker path).
+          // Only one entry exists per (chat,sender), so the latest prompt is
+          // authoritative — this also kills the old hazard where a numeric reply
+          // meant for the mode picker was swallowed by a still-open index prompt.
 
-    // Handle pending file index scope reply (1 = public, 2 = admin, 3 = skip)
-    // Must come before pending-mode handler — both match digits, this is more specific
-    if (config._pendingIndex?.[msg.senderId] && /^[123]$/.test(text.trim())) {
-      const pending = config._pendingIndex[msg.senderId];
-      delete config._pendingIndex[msg.senderId];
-      const choice = text.trim();
-      if (choice === '3') {
-        await platform.send(msg.chatId, 'Skipped.');
-        return;
-      }
-      const scope = choice === '1' ? 'public' : 'admin';
-      try {
-        await platform.send(msg.chatId, `Downloading and indexing: ${pending.fileName} (${scope})...`);
-        const buffer = await platform.downloadAsset(pending.srcURL);
-        const count = await indexer.indexBuffer(buffer, pending.fileName, scope);
-        await platform.send(msg.chatId, `Indexed ${count} chunks from ${pending.fileName} [${scope}]`);
-        logAudit({ action: 'index_upload', user_id: msg.senderId, filename: pending.fileName, chunks: count, scope, platform: 'beeper' });
-      } catch (err) {
-        await platform.send(msg.chatId, `Index error: ${err.message}`);
-      }
-      return;
-    }
-    // Clear stale pending index if user sends something else
-    if (config._pendingIndex?.[msg.senderId]) {
-      delete config._pendingIndex[msg.senderId];
-    }
+          case 'admin':
+            if (t.startsWith('/')) {
+              pending.clear(msg.chatId, msg.senderId);
+              await platform.send(msg.chatId, 'Admin setup cancelled.');
+              break; // /command cancels the picker, then routes normally
+            }
+            await handleAdminFlowReply(msg, platform, config, t, pinManager, entry.data, pending);
+            return;
 
-    // Handle pending mode selection (interactive picker reply)
-    // Keyed by chatId (not senderId) — Beeper senderId can vary across messages
-    const pendingMode = config._pendingMode?.[msg.chatId];
-    if (pendingMode) {
-      // /commands cancel the picker and fall through to command routing
-      if (text.startsWith('/')) {
-        delete config._pendingMode[msg.chatId];
-        await platform.send(msg.chatId, 'Mode selection cancelled.');
-        // Fall through to command routing below
-      } else if (/^\d+$/.test(text.trim())) {
-        const idx = parseInt(text.trim(), 10) - 1;
-        if (idx >= 0 && idx < pendingMode.matches.length) {
-          const chat = pendingMode.matches[idx];
-          // Block silent/off for personal/note-to-self chats
-          const beeperPlat = platformRegistry?.get('beeper');
-          if ((pendingMode.mode === 'silent' || pendingMode.mode === 'off') && beeperPlat?._personalChats?.has(chat.id)) {
-            delete config._pendingMode[msg.chatId];
-            await platform.send(msg.chatId, 'Personal/note-to-self chats cannot be set to silent or off.');
+          case 'index': {
+            if (/^[123]$/.test(t)) {
+              const idx = entry.data; // { fileName, srcURL }
+              pending.clear(msg.chatId, msg.senderId);
+              if (t === '3') {
+                await platform.send(msg.chatId, 'Skipped.');
+                return;
+              }
+              const scope = t === '1' ? 'public' : 'admin';
+              try {
+                await platform.send(msg.chatId, `Downloading and indexing: ${idx.fileName} (${scope})...`);
+                const buffer = await platform.downloadAsset(idx.srcURL);
+                const count = await indexer.indexBuffer(buffer, idx.fileName, scope);
+                await platform.send(msg.chatId, `Indexed ${count} chunks from ${idx.fileName} [${scope}]`);
+                logAudit({ action: 'index_upload', user_id: msg.senderId, filename: idx.fileName, chunks: count, scope, platform: 'beeper' });
+              } catch (err) {
+                await platform.send(msg.chatId, `Index error: ${err.message}`);
+              }
+              return;
+            }
+            // Any non-[123] reply drops the stale prompt and falls through
+            // (mirrors the old clear-on-other-input behavior — no message).
+            pending.clear(msg.chatId, msg.senderId);
+            break;
+          }
+
+          case 'mode': {
+            if (text.startsWith('/')) {
+              pending.clear(msg.chatId, msg.senderId);
+              await platform.send(msg.chatId, 'Mode selection cancelled.');
+              break; // /command cancels the picker, then routes normally
+            }
+            const m = entry.data; // { mode, matches, agent }
+            if (/^\d+$/.test(t)) {
+              const idx = parseInt(t, 10) - 1;
+              if (idx >= 0 && idx < m.matches.length) {
+                const chat = m.matches[idx];
+                // Block silent/off for personal/note-to-self chats
+                const beeperPlat = platformRegistry?.get('beeper');
+                if ((m.mode === 'silent' || m.mode === 'off') && beeperPlat?._personalChats?.has(chat.id)) {
+                  pending.clear(msg.chatId, msg.senderId);
+                  await platform.send(msg.chatId, 'Personal/note-to-self chats cannot be set to silent or off.');
+                  return;
+                }
+                setChatMode(config, chat.id, m.mode);
+                if (m.agent) {
+                  if (!config.chat_agents) config.chat_agents = {};
+                  config.chat_agents[chat.id] = m.agent;
+                  saveConfig(config);
+                }
+                pending.clear(msg.chatId, msg.senderId);
+                const agentNote = m.agent ? `, agent: ${m.agent}` : '';
+                await platform.send(msg.chatId, `${chat.title || chat.id} set to: ${m.mode}${agentNote}`);
+                logAudit({ action: 'mode', user_id: msg.senderId, chatId: chat.id, mode: m.mode, agent: m.agent });
+              } else {
+                await platform.send(msg.chatId, `Invalid choice. Pick 1-${m.matches.length}.`);
+              }
+              return;
+            }
+            // Non-number, non-command reply: remind, keep the picker open.
+            await platform.send(msg.chatId, `Pick a number (1-${m.matches.length}) or send a /command to cancel.`);
             return;
           }
-          setChatMode(config, chat.id, pendingMode.mode);
-          if (pendingMode.agent) {
-            if (!config.chat_agents) config.chat_agents = {};
-            config.chat_agents[chat.id] = pendingMode.agent;
-            saveConfig(config);
+
+          case 'business_menu': {
+            if (text.startsWith('/')) {
+              pending.clear(msg.chatId, msg.senderId);
+              await platform.send(msg.chatId, 'Business menu cancelled.');
+              break; // /command cancels the picker, then routes normally
+            }
+            const handled = await handleBusinessMenuReply(msg, platform, config, t, agentRegistry, platformRegistry, entry.data, pending);
+            if (handled) return;
+            break;
           }
-          delete config._pendingMode[msg.chatId];
-          const agentNote = pendingMode.agent ? `, agent: ${pendingMode.agent}` : '';
-          await platform.send(msg.chatId, `${chat.title || chat.id} set to: ${pendingMode.mode}${agentNote}`);
-          logAudit({ action: 'mode', user_id: msg.senderId, chatId: chat.id, mode: pendingMode.mode, agent: pendingMode.agent });
-        } else {
-          await platform.send(msg.chatId, `Invalid choice. Pick 1-${pendingMode.matches.length}.`);
+
+          case 'business_wizard':
+            if (text.startsWith('/')) {
+              pending.clear(msg.chatId, msg.senderId);
+              await platform.send(msg.chatId, 'Business setup cancelled.');
+              break; // /command cancels the wizard, then routes normally
+            }
+            await handleBusinessWizardStep(msg, platform, config, t, entry.data, pending);
+            return;
         }
-        return;
-      } else {
-        // Non-number, non-command reply while picker is open — remind user
-        await platform.send(msg.chatId, `Pick a number (1-${pendingMode.matches.length}) or send a /command to cancel.`);
-        return;
-      }
-    }
-
-    // Handle pending /mode business menu selection
-    if (config._pendingBusinessMenu?.[msg.chatId]) {
-      if (text.startsWith('/')) {
-        delete config._pendingBusinessMenu[msg.chatId];
-        await platform.send(msg.chatId, 'Business menu cancelled.');
-      } else {
-        const handled = await handleBusinessMenuReply(msg, platform, config, text.trim(), agentRegistry, platformRegistry);
-        if (handled) return;
-      }
-    }
-
-    // Handle pending /business setup wizard
-    if (config._pendingBusiness?.[msg.senderId]) {
-      // /commands during wizard cancel it and fall through to command routing
-      if (text.startsWith('/')) {
-        delete config._pendingBusiness[msg.senderId];
-        await platform.send(msg.chatId, 'Business setup cancelled.');
-        // Fall through — the command will be routed normally below
-      } else {
-        await handleBusinessWizardStep(msg, platform, config, text.trim());
-        return;
       }
     }
 
@@ -702,10 +704,10 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
         await routeRemember(msg, platform, config, getMem, args);
         break;
       case 'mode':
-        await routeMode(msg, platform, config, args, agentRegistry, toolDeps.platformRegistry);
+        await routeMode(msg, platform, config, args, agentRegistry, toolDeps.platformRegistry, toolDeps.pending);
         break;
       case 'admin':
-        await routeAdmin(msg, platform, config, args, toolDeps.platformRegistry);
+        await routeAdmin(msg, platform, config, args, toolDeps.platformRegistry, toolDeps.pending);
         break;
       case 'agent':
         await routeAgent(msg, platform, config, args, agentRegistry);
@@ -1286,7 +1288,7 @@ async function routeRemember(msg, platform, config, getMem, note) {
 
 const VALID_MODES = ['off', 'business', 'silent'];
 
-async function routeMode(msg, platform, config, args, agentRegistry, platformRegistry) {
+async function routeMode(msg, platform, config, args, agentRegistry, platformRegistry, pending) {
   // Admin command (super-admin or a designated limited admin).
   if (!isAdmin(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Admin only command.');
@@ -1342,8 +1344,11 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
       }
       if (match.length > 1) {
         const list = match.map((c, i) => `  ${i + 1}) ${c.title || c.name || c.id}`).join('\n');
-        if (!config._pendingMode) config._pendingMode = {};
-        config._pendingMode[msg.chatId] = { mode, matches: match, agent: null };
+        pending.set(msg.chatId, msg.senderId, 'mode', {
+          data: { mode, matches: match, agent: null },
+          ttlMs: pickerTtlMs(config),
+          expireMsg: 'Mode selection expired — re-run /mode.',
+        });
         await platform.send(msg.chatId, `Multiple matches:\n${list}\n\nReply with a number:`);
         return;
       }
@@ -1361,7 +1366,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
 
     // No target + business → show business menu
     if (mode === 'business') {
-      await showBusinessMenu(msg, platform, config);
+      await showBusinessMenu(msg, platform, config, pending);
       return;
     }
 
@@ -1438,8 +1443,11 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
     if (match.length > 1) {
       const list = match.map((c, i) => `  ${i + 1}) ${c.title || c.name || c.id}`).join('\n');
       // Store pending mode selection (include agent for deferred assignment)
-      if (!config._pendingMode) config._pendingMode = {};
-      config._pendingMode[msg.chatId] = { mode, matches: match, agent: agentArg };
+      pending.set(msg.chatId, msg.senderId, 'mode', {
+        data: { mode, matches: match, agent: agentArg },
+        ttlMs: pickerTtlMs(config),
+        expireMsg: 'Mode selection expired — re-run /mode.',
+      });
       await platform.send(msg.chatId, `Multiple matches:\n${list}\n\nReply with a number:`);
       return;
     }
@@ -1477,8 +1485,11 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
       return `  ${i + 1}) ${c.title || c.name || c.id} [${currentMode}]`;
     }).join('\n');
     // Store pending mode selection (include agent for deferred assignment)
-    if (!config._pendingMode) config._pendingMode = {};
-    config._pendingMode[msg.chatId] = { mode, matches: chats, agent: agentArg };
+    pending.set(msg.chatId, msg.senderId, 'mode', {
+      data: { mode, matches: chats, agent: agentArg },
+      ttlMs: pickerTtlMs(config),
+      expireMsg: 'Mode selection expired — re-run /mode.',
+    });
     await platform.send(msg.chatId, `Pick a chat to set to ${mode}:\n${list}\n\nReply with a number:`);
     return;
   }
@@ -1497,7 +1508,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
  * Limited admins get mode/index/ask, NOT host shell (exec/read stay owner-only).
  * Subcommands: /admin list, /admin remove <number>.
  */
-async function routeAdmin(msg, platform, config, args, platformRegistry) {
+async function routeAdmin(msg, platform, config, args, platformRegistry, pending) {
   if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only command.');
     return;
@@ -1542,16 +1553,21 @@ async function routeAdmin(msg, platform, config, args, platformRegistry) {
     return;
   }
   const list = chats.map((c, i) => `  ${i + 1}) ${c.title}`).join('\n');
-  if (!config._pendingAdmin) config._pendingAdmin = {};
-  config._pendingAdmin[msg.chatId] = { step: 'pick', matches: chats };
+  pending.set(msg.chatId, msg.senderId, 'admin', {
+    data: { step: 'pick', matches: chats },
+    ttlMs: pickerTtlMs(config),
+    expireMsg: 'Admin setup expired — re-run /admin.',
+  });
   await platform.send(msg.chatId,
     `Pick a chat to make a LIMITED admin (mode/index/ask — NOT shell):\n${list}\n\n` +
     `Reply with a number. Or: /admin list, /admin remove <n>.`);
 }
 
 /** Drive the multi-step /admin designation flow (pick → confirm → PIN). */
-async function handleAdminFlowReply(msg, platform, config, text, pinManager) {
-  const pending = config._pendingAdmin[msg.chatId];
+async function handleAdminFlowReply(msg, platform, config, text, pinManager, state, registry) {
+  // `state` is the registry entry's payload (mutated in place across steps);
+  // `registry` clears it on completion/cancel.
+  const pending = state;
   const nameOf = (c) => c.title || c.id;
 
   if (pending.step === 'pick') {
@@ -1572,7 +1588,7 @@ async function handleAdminFlowReply(msg, platform, config, text, pinManager) {
 
   if (pending.step === 'confirm') {
     if (!/^y(es)?$/i.test(text)) {
-      delete config._pendingAdmin[msg.chatId];
+      registry.clear(msg.chatId, msg.senderId);
       await platform.send(msg.chatId, 'Cancelled.');
       return;
     }
@@ -1580,7 +1596,7 @@ async function handleAdminFlowReply(msg, platform, config, text, pinManager) {
       // No PIN configured — promote directly (the owner already confirmed).
       addAdmin(config, pending.selected.id);
       const name = nameOf(pending.selected);
-      delete config._pendingAdmin[msg.chatId];
+      registry.clear(msg.chatId, msg.senderId);
       await platform.send(msg.chatId, `Done. "${name}" is now a limited admin. (No PIN is set — consider /pin.)`);
       logAudit({ action: 'admin_add', user_id: msg.senderId, chatId: pending.selected.id });
       return;
@@ -1598,12 +1614,12 @@ async function handleAdminFlowReply(msg, platform, config, text, pinManager) {
     const result = pinManager.authenticate(msg.senderId, text);
     if (!result.success) {
       await platform.send(msg.chatId, result.reason);
-      if (result.locked) delete config._pendingAdmin[msg.chatId];
+      if (result.locked) registry.clear(msg.chatId, msg.senderId);
       return;
     }
     addAdmin(config, pending.selected.id);
     const name = nameOf(pending.selected);
-    delete config._pendingAdmin[msg.chatId];
+    registry.clear(msg.chatId, msg.senderId);
     await platform.send(msg.chatId, `Done. "${name}" is now a limited admin.`);
     logAudit({ action: 'admin_add', user_id: msg.senderId, chatId: pending.selected.id });
   }
@@ -1945,9 +1961,12 @@ async function routePlan(msg, platform, config, provider, goal, toolDeps) {
 // /mode business menu + setup wizard
 // ---------------------------------------------------------------------------
 
-async function showBusinessMenu(msg, platform, config) {
-  if (!config._pendingBusinessMenu) config._pendingBusinessMenu = {};
-  config._pendingBusinessMenu[msg.chatId] = { senderId: msg.senderId };
+async function showBusinessMenu(msg, platform, config, pending) {
+  pending.set(msg.chatId, msg.senderId, 'business_menu', {
+    data: { senderId: msg.senderId },
+    ttlMs: pickerTtlMs(config),
+    expireMsg: 'Business menu expired — re-run /mode business.',
+  });
   await platform.send(msg.chatId,
     'Business Mode\n' +
     '1) Setup persona\n' +
@@ -1959,8 +1978,8 @@ async function showBusinessMenu(msg, platform, config) {
   );
 }
 
-async function handleBusinessMenuReply(msg, platform, config, input, agentRegistry, platformRegistry) {
-  const pending = config._pendingBusinessMenu[msg.chatId];
+async function handleBusinessMenuReply(msg, platform, config, input, agentRegistry, platformRegistry, state, registry) {
+  const pending = state;
   if (!pending) return false;
 
   const choice = parseInt(input, 10);
@@ -1969,22 +1988,26 @@ async function handleBusinessMenuReply(msg, platform, config, input, agentRegist
     return true;
   }
 
-  delete config._pendingBusinessMenu[msg.chatId];
+  registry.clear(msg.chatId, msg.senderId);
 
   switch (choice) {
     case 1: {
-      // Launch wizard — pre-populated from existing config
-      if (!config._pendingBusiness) config._pendingBusiness = {};
+      // Launch wizard — pre-populated from existing config. Replaces the menu
+      // entry on the same (chat,sender) key; longer TTL for the multi-step fill.
       const existing = config.business || {};
-      config._pendingBusiness[msg.senderId] = {
-        step: 'name',
+      registry.set(msg.chatId, msg.senderId, 'business_wizard', {
+        ttlMs: wizardTtlMs(config),
+        expireMsg: 'Business setup expired — re-run /mode business → 1.',
         data: {
-          name: existing.name || null,
-          greeting: existing.greeting || null,
-          topics: existing.topics ? existing.topics.map(t => ({ ...t })) : [],
-          rules: existing.rules ? [...existing.rules] : []
+          step: 'name',
+          data: {
+            name: existing.name || null,
+            greeting: existing.greeting || null,
+            topics: existing.topics ? existing.topics.map(t => ({ ...t })) : [],
+            rules: existing.rules ? [...existing.rules] : []
+          }
         }
-      };
+      });
       const current = existing.name ? `\nCurrent: ${existing.name}` : '';
       await platform.send(msg.chatId, `Step 1/5 — Name${current}\nSend new name or "skip" to keep it.`);
       return true;
@@ -2046,8 +2069,11 @@ async function handleBusinessMenuReply(msg, platform, config, input, agentRegist
         const currentMode = getChatMode(config, c.id);
         return `  ${i + 1}) ${c.title || c.name || c.id} [${currentMode}]`;
       }).join('\n');
-      if (!config._pendingMode) config._pendingMode = {};
-      config._pendingMode[msg.chatId] = { mode: 'business', matches: chats, agent: null };
+      registry.set(msg.chatId, msg.senderId, 'mode', {
+        data: { mode: 'business', matches: chats, agent: null },
+        ttlMs: pickerTtlMs(config),
+        expireMsg: 'Mode selection expired — re-run /mode.',
+      });
       await platform.send(msg.chatId, `Pick a chat to set to business:\n${list}\n\nReply with a number:`);
       return true;
     }
@@ -2055,12 +2081,14 @@ async function handleBusinessMenuReply(msg, platform, config, input, agentRegist
   return false;
 }
 
-async function handleBusinessWizardStep(msg, platform, config, input) {
-  const pending = config._pendingBusiness[msg.senderId];
+async function handleBusinessWizardStep(msg, platform, config, input, state, registry) {
+  // `state` is the registry entry payload { step, data } (mutated in place
+  // across steps); `registry` clears it on save/cancel.
+  const pending = state;
   const lower = input.toLowerCase();
 
   if (lower === 'cancel') {
-    delete config._pendingBusiness[msg.senderId];
+    registry.clear(msg.chatId, msg.senderId);
     await platform.send(msg.chatId, 'Business setup cancelled.');
     return;
   }
@@ -2184,11 +2212,11 @@ async function handleBusinessWizardStep(msg, platform, config, input) {
       if (lower === 'yes' || lower === 'y') {
         config.business = { ...config.business, ...pending.data };
         saveConfig(config);
-        delete config._pendingBusiness[msg.senderId];
+        registry.clear(msg.chatId, msg.senderId);
         await platform.send(msg.chatId, 'Business persona saved.');
         logAudit({ action: 'business_setup', user_id: msg.senderId, name: pending.data.name });
       } else {
-        delete config._pendingBusiness[msg.senderId];
+        registry.clear(msg.chatId, msg.senderId);
         await platform.send(msg.chatId, 'Discarded.');
       }
       break;
@@ -2257,7 +2285,7 @@ async function routeHelp(msg, platform, config) {
   await platform.send(msg.chatId, cmds.join('\n'));
 }
 
-async function handleBeeperFileIndex(msg, platform, config, indexer) {
+async function handleBeeperFileIndex(msg, platform, config, indexer, pending) {
   if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only. File indexing not available.');
     return;
@@ -2285,8 +2313,11 @@ async function handleBeeperFileIndex(msg, platform, config, indexer) {
 
   if (!scope) {
     // Ask for scope
-    if (!config._pendingIndex) config._pendingIndex = {};
-    config._pendingIndex[msg.senderId] = { fileName, srcURL };
+    pending.set(msg.chatId, msg.senderId, 'index', {
+      data: { fileName, srcURL },
+      ttlMs: pickerTtlMs(config),
+      expireMsg: 'File index prompt expired — re-send the file.',
+    });
     await platform.send(msg.chatId, `Got "${fileName}". Index as:\n1. Public (kb)\n2. Admin only\n3. Skip\nReply 1, 2, or 3.`);
     return;
   }

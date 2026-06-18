@@ -410,6 +410,8 @@ The wizard walks through 5 steps. Re-running shows current values — send "skip
 
 Type "cancel" at any step to abort. Any `/command` typed during the wizard cancels it and routes the command normally.
 
+Interactive prompts don't wait forever: a numbered picker (mode/index/admin/business menu) lapses after a few minutes and the setup wizard after a longer window, after which the bot tells you the prompt expired and to re-run the command rather than treating a late reply as a question. Tune the windows under `interaction` in `~/.multis/config.json` (`picker_ttl_minutes`, `wizard_ttl_minutes`). Pending prompts are in-memory only, so restarting multis cancels any half-finished picker.
+
 Escalation notifications are sent automatically to all admin channels (Telegram + Beeper Note-to-self) — no manual configuration needed.
 
 ### How It Works

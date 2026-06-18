@@ -273,6 +273,19 @@ function loadConfig() {
     ...config.documents
   };
 
+  // Interactive picker / wizard lifetimes. These bound how long an open prompt
+  // (mode/index/admin picker, business menu, business setup wizard) stays live
+  // before it expires and the router announces "re-send the command" instead of
+  // letting a late numeric reply fall through to RAG. In-memory only — a pending
+  // picker is intentionally dropped on restart. Quick numeric pickers get a short
+  // window; the multi-step business wizard gets longer so a slow fill isn't lost.
+  if (!config.interaction) config.interaction = {};
+  config.interaction = {
+    picker_ttl_minutes: 5,
+    wizard_ttl_minutes: 30,
+    ...config.interaction
+  };
+
   // Migrate: set first allowed user as owner if owner_id missing
   if (!config.owner_id && config.allowed_users && config.allowed_users.length > 0) {
     config.owner_id = config.allowed_users[0];

@@ -1112,7 +1112,8 @@ describe('Beeper file indexing', () => {
     const env = createTestEnv({ allowed_users: ['self1'], owner_id: 'self1' });
     const platform = mockPlatform();
     const indexer = stubIndexer();
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
+    const pending = new PendingRegistry();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer, pending });
 
     const m = msg('here is a doc', {
       platform: 'beeper', senderId: 'self1', isSelf: true
@@ -1127,7 +1128,8 @@ describe('Beeper file indexing', () => {
     await router(m, platform);
     assert.match(platform.lastTo('chat1').text, /Index as/);
     assert.match(platform.lastTo('chat1').text, /3\. Skip/);
-    assert.ok(env.config._pendingIndex?.self1, 'should store pending index');
+    const entry = pending.peek('chat1', 'self1');
+    assert.ok(entry && entry.kind === 'index', 'should store pending index in registry');
   });
 
   it('scope reply 1 indexes as public', async () => {
@@ -1137,11 +1139,12 @@ describe('Beeper file indexing', () => {
     const indexer = stubIndexer();
     indexer.indexBuffer = async (buf, name, role) => { indexedRole = role; return 5; };
     platform.downloadAsset = async () => Buffer.from('test content');
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
+    const pending = new PendingRegistry();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer, pending });
 
-    env.config._pendingIndex = {
-      self1: { fileName: 'report.pdf', srcURL: 'mxc://beeper.local/abc123' }
-    };
+    pending.set('chat1', 'self1', 'index', {
+      data: { fileName: 'report.pdf', srcURL: 'mxc://beeper.local/abc123' }
+    });
 
     const m = msg('1', {
       platform: 'beeper', senderId: 'self1', isSelf: true
@@ -1158,11 +1161,12 @@ describe('Beeper file indexing', () => {
     const indexer = stubIndexer();
     indexer.indexBuffer = async (buf, name, role) => { indexedRole = role; return 2; };
     platform.downloadAsset = async () => Buffer.from('test content');
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
+    const pending = new PendingRegistry();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer, pending });
 
-    env.config._pendingIndex = {
-      self1: { fileName: 'notes.md', srcURL: 'mxc://beeper.local/def456' }
-    };
+    pending.set('chat1', 'self1', 'index', {
+      data: { fileName: 'notes.md', srcURL: 'mxc://beeper.local/def456' }
+    });
 
     const m = msg('2', {
       platform: 'beeper', senderId: 'self1', isSelf: true
@@ -1176,18 +1180,47 @@ describe('Beeper file indexing', () => {
     const env = createTestEnv({ allowed_users: ['self1'], owner_id: 'self1' });
     const platform = mockPlatform();
     const indexer = stubIndexer();
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
+    const pending = new PendingRegistry();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer, pending });
 
-    env.config._pendingIndex = {
-      self1: { fileName: 'report.pdf', srcURL: 'mxc://beeper.local/abc123' }
-    };
+    pending.set('chat1', 'self1', 'index', {
+      data: { fileName: 'report.pdf', srcURL: 'mxc://beeper.local/abc123' }
+    });
 
     const m = msg('3', {
       platform: 'beeper', senderId: 'self1', isSelf: true
     });
     await router(m, platform);
     assert.match(platform.lastTo('chat1').text, /Skipped/);
-    assert.strictEqual(env.config._pendingIndex?.self1, undefined);
+    assert.strictEqual(pending.peek('chat1', 'self1'), null, 'pending cleared after skip');
+  });
+
+  // The whole point of routing pickers through the registry: a reply that
+  // arrives after the picker's TTL is announced as expired, NOT silently
+  // forwarded to the RAG pipeline as a search query (the orphaned-reply bug).
+  it('an expired picker announces and does not fall through to RAG', async () => {
+    const env = createTestEnv({ allowed_users: ['self1'], owner_id: 'self1' });
+    const platform = mockPlatform();
+    const llm = mockLLM();
+    let clock = 1000;
+    const pending = new PendingRegistry({ now: () => clock });
+    const router = createMessageRouter(env.config, { llm, indexer: stubIndexer(), pending });
+
+    // An open mode picker with the picker-specific expiry message.
+    pending.set('chat1', 'self1', 'mode', {
+      data: { mode: 'business', matches: [{ id: 'x', title: 'X' }], agent: null },
+      ttlMs: 60_000,
+      expireMsg: 'Mode selection expired — re-run /mode.',
+    });
+
+    // Advance past the TTL, then send the numeric reply that WOULD have selected.
+    clock += 61_000;
+    await router(msg('1', { platform: 'beeper', senderId: 'self1', isSelf: true }), platform);
+
+    assert.match(platform.lastTo('chat1').text, /Mode selection expired/, 'uses the picker-specific expiry message');
+    assert.notStrictEqual(env.config.chats?.x?.mode, 'business', 'the late reply did not select a chat');
+    assert.strictEqual(pending.peek('chat1', 'self1'), null, 'expired entry consumed exactly once');
+    assert.strictEqual(llm.calls.length, 0, 'the late reply was not forwarded to RAG');
   });
 
   it('unsupported file type is rejected', async () => {
