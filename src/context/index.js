@@ -3,18 +3,23 @@
  * src/context/index.js — multis's thin POLICY layer over litectx.
  *
  * litectx (ESM) owns ALL storage: ingest, format-convert, chunk, blob-store,
- * scope-filter, recall, retention. multis keeps NO homegrown index/memory store
- * (M3: src/indexer/* deleted). This module only shapes POLICY onto litectx's
- * primitives. litectx is ESM, dynamic-imported from CJS (like bareguard).
+ * scope-filter, recall, retention — AND, since 0.18.0, the multi-tenant FENCE
+ * itself. multis keeps NO homegrown store and NO hand-rolled scope guard:
+ *   - `strictScope: true` (set at init) → litectx fails CLOSED: a missing scope on
+ *     recall/get/ingest THROWS instead of returning/writing every tenant's rows.
+ *   - `GLOBAL` (litectx sentinel) → the shared knowledge base (maps to scope IS NULL).
+ *   - `ctx.scoped(scope)` → a handle whose recall/get/ingest carry the bound scope,
+ *     so a call site has no per-call scope to forget.
  *
- * Scope vocabulary is multis-native (unchanged from the legacy store):
- *   'public' | 'kb' → litectx null  (global KB; visible from every chat)
- *   'admin'         → litectx 'admin' (owner-private)
- *   'user:<chatId>' → litectx 'user:<chatId>' (customer)
- * litectx R2 `recall({scope})` returns `scope ∪ null-global`, so the security
- * model falls straight out: owner(admin) recall = admin ∪ kb; customer recall =
- * own ∪ kb — never another customer, never admin. One LiteCtx per process;
- * isolation is the per-CALL scope, never the instance owner.
+ * This module only maps multis's scope vocabulary onto those primitives and shapes
+ * litectx hits into the {name, content} chunks the prompt builders consume. Scope
+ * vocabulary:
+ *   'public' | 'kb' → litectx GLOBAL  (shared KB; unioned into every tenant recall)
+ *   'admin'         → 'admin'          (owner-private)
+ *   'user:<chatId>' → 'user:<chatId>'  (one customer)
+ * A bound tenant scope recalls `scope ∪ GLOBAL` and writes to exactly that scope;
+ * GLOBAL recalls/writes only the shared KB. There is no "see everything" path — a
+ * missing scope is a bug and throws. litectx is ESM, dynamic-imported from CJS.
  */
 const path = require('path');
 const fs = require('fs');
@@ -23,52 +28,42 @@ const { PATHS } = require('../config');
 let _ctx = null;
 let _initP = null;
 let _bounds = {};
+let _GLOBAL = null;
+let _memSeq = 0;
 
 /**
- * Translate a multis-native WRITE/ingest scope → litectx scope. 'public'/'kb'/null
- * is the global (null) KB. This is the write axis: an unscoped ingest lands in the
- * world-readable KB, which is the intended default for owner uploads.
+ * Map a multis-native scope → the litectx scope value for a `scoped()` handle.
+ * ONE translator for read AND write. Fail-closed: a missing scope throws (a
+ * forgotten scope is a bug, not "see everything"); litectx's `strictScope` is the
+ * backstop if a null ever slips past here. 'public'/'kb' is the shared KB (GLOBAL).
  */
-function toLcxScope(scope) {
-  if (scope == null || scope === 'public' || scope === 'kb') return null;
+function toScope(scope) {
+  if (scope == null) {
+    throw new Error(
+      `context: a scope is required (got ${String(scope)}) — pass 'admin', ` +
+      `'user:<chatId>', or 'kb'/'public' for the shared KB`
+    );
+  }
+  if (scope === 'public' || scope === 'kb') return _GLOBAL;
   return scope; // 'admin' / 'user:<chatId>' are litectx scope strings verbatim
 }
 
 /**
- * Translate a multis-native RECALL scope → litectx scope — FAIL-CLOSED.
- *
- * Recall is the multi-tenant boundary. litectx `recall({scope: null})` returns
- * EVERY scope (the SQL fence short-circuits on `:scope IS NULL`), so a missing or
- * "global" recall scope is a cross-tenant leak, not a safe default. Unlike the
- * write axis, there is deliberately NO null/'public'/'kb' shortcut here: every
- * recall MUST name the requesting principal's concrete scope ('admin' or
- * 'user:<chatId>'). An absent/global scope throws so the bug surfaces in dev
- * instead of silently exposing other tenants in prod.
- */
-function toRecallScope(scope) {
-  if (scope == null || scope === 'public' || scope === 'kb') {
-    throw new Error(
-      `context recall: a concrete scope is required (got ${String(scope)}); ` +
-      `recall(null) returns every tenant — pass 'admin' or 'user:<chatId>'`
-    );
-  }
-  return scope; // 'admin' / 'user:<chatId>' verbatim; litectx returns scope ∪ null-global
-}
-
-/**
- * Construct (once) the process-wide LiteCtx. Idempotent and concurrency-safe.
+ * Construct (once) the process-wide LiteCtx in fail-closed multi-tenant mode.
+ * Idempotent and concurrency-safe.
  * @param {{ documents?: object, writeGate?: object, writeAudit?: object }} [opts]
  */
 async function init(opts = {}) {
   if (_ctx) return _ctx;
   if (_initP) return _initP;
   _initP = (async () => {
-    const { LiteCtx } = await import('litectx');
+    const { LiteCtx, GLOBAL } = await import('litectx');
+    _GLOBAL = GLOBAL;
     const dataDir = path.dirname(PATHS.db());        // ~/.multis/data
     const root = path.join(dataDir, 'ctx');           // litectx root (inert: multis never index()-es a repo)
-    const dbPath = path.join(dataDir, 'litectx.db');  // own DB — never collides with the legacy documents.db
+    const dbPath = path.join(dataDir, 'litectx.db');  // own DB
     fs.mkdirSync(root, { recursive: true });
-    const cfg = { root, dbPath };
+    const cfg = { root, dbPath, strictScope: true };  // fail-closed: missing scope throws (multis is multi-tenant)
     if (opts.writeGate) cfg.writeGate = opts.writeGate;
     if (opts.writeAudit) cfg.writeAudit = opts.writeAudit;
     _ctx = new LiteCtx(cfg);
@@ -93,81 +88,84 @@ function setBounds(documents = {}) {
 }
 
 const toU8 = (b) => (b instanceof Uint8Array ? b : new Uint8Array(b));
-
-/** Ingest an uploaded document buffer. @returns {Promise<number>} chunks produced (0 for a stored blob). */
-async function indexBuffer(buffer, filename, scope, { expiresAt = null } = {}) {
-  const r = await ctx().ingest(toU8(buffer), { filename, scope: toLcxScope(scope), expiresAt, ..._bounds });
-  return r.chunks;
-}
-
-/** Ingest a document from a filesystem path (the /index <path> flow). @returns {Promise<number>} chunks. */
-async function indexFile(filePath, scope, opts = {}) {
-  return indexBuffer(fs.readFileSync(filePath), path.basename(filePath), scope, opts);
-}
-
-let _memSeq = 0;
-/**
- * Persist a memory summary as a scope-tagged doc row. litectx scopes facts by
- * INSTANCE owner (not per-call), so per-chat memory rides the doc scope axis.
- * Tagged meta.type='memory' to distinguish memory rows from real uploads.
- */
-async function rememberMemory(scope, text, { expiresAt = null, meta = {} } = {}) {
-  const id = `mem-${Date.now()}-${_memSeq++}`;
-  return ctx().ingest(toU8(Buffer.from(String(text))), {
-    filename: `${id}.md`,
-    scope: toLcxScope(scope),
-    expiresAt,
-    // createdAt rides meta so recall_memory can date a hit (litectx's occurredAt is
-    // fact/episode-only; our memory rides the doc axis). type='memory' is forced last
-    // so a memory row is always distinguishable from an uploaded document on recall.
-    meta: { createdAt: new Date().toISOString(), ...meta, type: 'memory' },
-  });
-}
+const mapDocHit = (h) => ({ name: h.path, content: h.body || '', chunkId: h.path, format: h.format, score: h.score });
+const mapMemHit = (h) => ({ name: h.path, content: h.body || '', createdAt: h.meta?.createdAt || null, score: h.score });
 
 /**
- * Unified recall (docs + memory, both kind=doc), mapped to the chunk shape
- * buildRAGPrompt/buildMemorySystemPrompt consume ({ name, content }).
- * @param {string} query
- * @param {{ scope: string, n?: number }} opts  scope is REQUIRED (fail-closed; see toRecallScope)
+ * A scope-bound context handle over litectx's `scoped()` view. Scope is fixed once,
+ * so no operation can be reached without it: `search` recalls `scope ∪ GLOBAL`,
+ * `indexBuffer`/`rememberMemory` write to exactly the bound scope, `get` is fenced
+ * to it. Use `forScope('kb')`/`forScope('public')` for the shared KB (GLOBAL).
+ * @param {string} scope  'admin' | 'user:<chatId>' | 'public' | 'kb'
  */
-async function search(query, { scope, n = 5 } = {}) {
-  const hits = await ctx().recall(query, { kind: 'doc', scope: toRecallScope(scope), n, body: true });
-  return hits.map((h) => ({
-    name: h.path,
-    content: h.body || '',
-    chunkId: h.path,   // litectx tracks its own recall demand-signal; kept for caller back-compat
-    format: h.format,
-    score: h.score,
-  }));
+function forScope(scope) {
+  const view = ctx().scoped(toScope(scope));
+  return {
+    /** Unified recall (docs + memory), mapped to {name, content} for the prompt builders. */
+    async search(query, { n = 5 } = {}) {
+      const hits = await view.recall(query, { kind: 'doc', n, body: true });
+      return hits.map(mapDocHit);
+    },
+    /**
+     * Memory-only recall for the recall_memory tool — same fence as search(), filtered
+     * to rows written by rememberMemory (meta.type==='memory'). Over-fetches then slices
+     * since recall mixes docs + memory in one kind:'doc' ranking.
+     *
+     * NOTE (M3 behaviour, flagged): the legacy store had a recency fallback (recentByType)
+     * so an all-stopword query still surfaced recent memory. litectx exposes no recent-by-
+     * scope query for memory rows, so the fallback is dropped — filed as a litectx ask
+     * (litectx-asks/recent-memory-by-scope.md). FTS recall still works for any real term.
+     */
+    async searchMemory(query, { n = 5 } = {}) {
+      const hits = await view.recall(query, { kind: 'doc', n: n * 4, body: true });
+      return hits.filter((h) => h.meta && h.meta.type === 'memory').slice(0, n).map(mapMemHit);
+    },
+    /** Ingest an uploaded document buffer into the bound scope. @returns {Promise<number>} chunks. */
+    async indexBuffer(buffer, filename, { expiresAt = null } = {}) {
+      const r = await view.ingest(toU8(buffer), { filename, expiresAt, ..._bounds });
+      return r.chunks;
+    },
+    /** Ingest a document from a filesystem path (the /index <path> flow). @returns {Promise<number>} chunks. */
+    async indexFile(filePath, opts = {}) {
+      return this.indexBuffer(fs.readFileSync(filePath), path.basename(filePath), opts);
+    },
+    /**
+     * Persist a memory summary as a scope-tagged doc row. Tagged meta.type='memory'
+     * (forced last) so it's always distinguishable from an uploaded document on recall.
+     */
+    async rememberMemory(text, { expiresAt = null, meta = {} } = {}) {
+      const id = `mem-${Date.now()}-${_memSeq++}`;
+      return view.ingest(toU8(Buffer.from(String(text))), {
+        filename: `${id}.md`,
+        expiresAt,
+        // createdAt rides meta so recall_memory can date a hit (litectx's occurredAt is
+        // fact/episode-only; our memory rides the doc axis). type='memory' forced last.
+        meta: { createdAt: new Date().toISOString(), ...meta, type: 'memory' },
+      });
+    },
+    /** Fetch one row by id, fenced to the bound scope (R2 handle fence). */
+    get(id) {
+      return view.get(id);
+    },
+  };
 }
 
-/**
- * Memory-only recall for the recall_memory tool: same scope fence as search(), but
- * filtered to rows written by rememberMemory (meta.type==='memory'), so the memory
- * tool never returns an uploaded document. Over-fetches then slices, since recall
- * mixes docs + memory in one kind:'doc' ranking.
- *
- * NOTE (M3 behaviour change, flagged): the legacy store had a recency fallback
- * (recentByType) so an all-stopword query still surfaced recent memory. litectx
- * exposes no recent-by-scope query for memory rows (recentActivity logs witnessed
- * EDITS, not ingests), so the fallback is dropped here — filed as a litectx ask
- * (litectx-asks/recent-memory-by-scope.md). FTS recall still works for any query
- * carrying a non-stopword term.
- * @param {string} query
- * @param {{ scope: string, n?: number }} opts  scope is REQUIRED (fail-closed; see toRecallScope)
- */
-async function searchMemory(query, { scope, n = 5 } = {}) {
-  const hits = await ctx().recall(query, { kind: 'doc', scope: toRecallScope(scope), n: n * 4, body: true });
-  return hits
-    .filter((h) => h.meta && h.meta.type === 'memory')
-    .slice(0, n)
-    .map((h) => ({ name: h.path, content: h.body || '', createdAt: h.meta?.createdAt || null, score: h.score }));
-}
+// --- Top-level convenience API — each delegates to a scope-bound forScope() handle,
+//     so every storage op goes through litectx's scoped() fence + strictScope. ---
 
-/** Fetch one row by id, scope-fenced (R2 handle fence). Pass the requesting scope on customer paths. */
-async function get(id, scope) {
-  return ctx().get(id, scope !== undefined ? { scope: toLcxScope(scope) } : {});
-}
+// `async` so a synchronous toScope() throw (missing scope) surfaces as a rejected
+// promise, uniform with the storage I/O — not a sync throw beside it.
+/** @param {string} scope @returns {Promise<number>} chunks */
+const indexBuffer = async (buffer, filename, scope, opts = {}) => forScope(scope).indexBuffer(buffer, filename, opts);
+/** @param {string} scope @returns {Promise<number>} chunks */
+const indexFile = async (filePath, scope, opts = {}) => forScope(scope).indexFile(filePath, opts);
+const rememberMemory = async (scope, text, opts = {}) => forScope(scope).rememberMemory(text, opts);
+/** @param {string} query @param {{ scope: string, n?: number }} opts  scope REQUIRED (fail-closed) */
+const search = async (query, { scope, n = 5 } = {}) => forScope(scope).search(query, { n });
+/** @param {string} query @param {{ scope: string, n?: number }} opts  scope REQUIRED (fail-closed) */
+const searchMemory = async (query, { scope, n = 5 } = {}) => forScope(scope).searchMemory(query, { n });
+/** Fetch one row by id, fenced to scope (R2 handle fence). */
+const get = (id, scope) => forScope(scope).get(id);
 
 /** Reclaim storage for rows past their expiresAt (R5). The retention sweep calls this. */
 async function purge() {
@@ -183,6 +181,6 @@ function stats() {
 function raw() { return ctx(); }
 
 module.exports = {
-  init, setBounds, raw,
+  init, setBounds, raw, forScope,
   indexFile, indexBuffer, rememberMemory, search, searchMemory, get, purge, stats,
 };

@@ -75,27 +75,26 @@ describe('context wrapper (litectx policy layer)', () => {
     assert.doesNotMatch(text, /customer beta/, 'owner must NOT be pulled into customer scopes (#6)');
   });
 
-  it('recall is fail-closed: an omitted scope throws instead of crossing tenants', async () => {
-    // litectx recall({scope:null}) returns EVERY tenant, so a missing recall scope
-    // must throw (fail-closed), not silently leak. The owner agentic job recalls with
-    // an explicit scope:'admin' (admin ∪ global-KB), never unscoped.
+  it('recall is fail-closed: a missing scope throws; "public" is KB-only, never every tenant', async () => {
+    // litectx strictScope + the wrapper's toScope both reject a missing scope, so a
+    // forgotten scope throws (fail-closed) rather than returning every tenant. The owner
+    // agentic job recalls with an explicit scope:'admin' (admin ∪ global-KB), never unscoped.
     await assert.rejects(
       () => context.search('widget', { n: 20 }),
-      /concrete scope is required/,
+      /scope is required/,
       'search() with no scope must throw, not see every scope'
     );
     await assert.rejects(
       () => context.searchMemory('widget', { n: 20 }),
-      /concrete scope is required/,
+      /scope is required/,
       'searchMemory() with no scope must throw, not see every scope'
     );
-    // 'public'/'kb' are write-only scopes; using one for recall would map to null
-    // (every tenant) in litectx, so the wrapper rejects them on the recall axis too.
-    await assert.rejects(
-      () => context.search('widget', { scope: 'public', n: 20 }),
-      /concrete scope is required/,
-      "recall with the 'public' write-scope must throw"
-    );
+    // 'public'/'kb' map to litectx GLOBAL — the shared KB only (never a tenant). A naive
+    // 'public' recall now returns exactly the KB, the safe thing a caller would expect —
+    // NOT the old fail-open "every tenant".
+    const kb = names(await context.search('widget', { scope: 'public', n: 20 })).join('\n');
+    assert.match(kb, /global knowledge base/, "'public' recall returns the shared KB");
+    assert.doesNotMatch(kb, /customer alpha|customer beta|admin-private/, "'public' recall returns ONLY the KB");
   });
 
   it('searchMemory returns memory rows only, never an uploaded document', async () => {
