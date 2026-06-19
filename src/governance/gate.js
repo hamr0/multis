@@ -400,9 +400,19 @@ async function createGate(opts = {}) {
   return {
     gate,
     policy,
+    // Axis-A only — bareguard's deterministic floor (allowlist/denylist, fs.deny,
+    // content patterns, budget, always-ask flags), WITHOUT the multis owner-check
+    // or exec 3-tier ceremony that `policy` composes on top. The M9 governed core
+    // runs this as its `floor` dep so the slash door enforces the same boundary the
+    // LLM door gets, while the ceremony lives once in the core (no double-ceremony).
+    floorPolicy: wired.policy,
     onLlmResult: wired.onLlmResult,
     onToolResult: wired.onToolResult,
     filterTools: wired.filterTools,
+    // The command denylist drives the M9 core's shell-severity classifier
+    // (classifyEffectiveSeverity → makeDestructiveCheck). Surface it here so the
+    // single governed core reads the SAME list the LLM-path 3-tier already uses.
+    denylist: governance?.commands?.denylist || [],
     HaltError,
   };
 }

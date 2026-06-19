@@ -1,7 +1,7 @@
 const path = require('path');
 const { logAudit } = require('../governance/audit');
 const { addAllowedUser, isOwner, isAdmin, addAdmin, removeAdmin, saveConfig, backupConfig, updateChatMeta, getMultisDir, PATHS } = require('../config');
-const { execCommand, readFile, listSkills } = require('../skills/executor');
+const { listSkills } = require('../skills/executor');
 const context = require('../context');
 const { createProvider, simpleGenerate } = require('../llm/provider-adapter');
 const { buildRAGPrompt, buildMemorySystemPrompt, buildBusinessPrompt } = require('../llm/prompts');
@@ -18,6 +18,8 @@ const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler
 const { createGate } = require('../governance/gate');
 const { createHumanPrompt, createPinChallenge, createConfirmChallenge } = require('../governance/human-channel');
 const { PendingRegistry } = require('./pending');
+const { runGovernedAction, RESULT } = require('../capabilities/govern');
+const { buildGovernDeps } = require('../capabilities/deps');
 
 // Picker / wizard lifetimes, single-sourced from config (see config.js
 // `interaction` block). Quick numeric pickers expire fast; the multi-step
@@ -133,8 +135,11 @@ function createGovernanceCarrier(config, opts = {}) {
           fileless: opts.fileless,
           governance: opts.governance,
         });
-        resolved = built;
-        return built;
+        // Expose the SAME ceremony instances to the M9 governed core (slash door),
+        // so a single intent ceremonies once via one PendingRegistry — no second,
+        // parallel PIN path. denylist rides through from createGate's return.
+        resolved = { ...built, pinChallenge, confirmChallenge };
+        return resolved;
       })();
       // Self-heal on transient init failure (e.g. bareguard ESM import error).
       // Without this, every subsequent message would receive the same rejected
@@ -314,9 +319,6 @@ function createMessageRouter(config, deps = {}) {
   const runtimePlatform = deps.runtimePlatform || getPlatform();
   const maxToolRounds = config.llm?.max_tool_rounds || 5;
 
-  // Owner commands that require PIN auth
-  const PIN_PROTECTED = new Set(['exec', 'read', 'index']);
-
   // Platform registry — populated via router.registerPlatform()
   const platformRegistry = new Map();
 
@@ -378,25 +380,9 @@ function createMessageRouter(config, deps = {}) {
           case 'pin_change':
             await handlePinChangeStep(msg, platform, config, pinManager, pending, t, entry);
             return;
-          case 'pin_command': {
-            const result = pinManager.authenticate(msg.senderId, t);
-            if (!result.success) {
-              // Wrong PIN keeps the pending command so the owner can retry;
-              // only a lockout clears it.
-              if (result.locked) pending.clear(msg.chatId, msg.senderId);
-              await platform.send(msg.chatId, result.reason);
-              return;
-            }
-            // PIN correct — claim the entry SYNCHRONOUSLY, before the first await,
-            // so a concurrent duplicate reply finds nothing and can't double-run
-            // the stored command (the get→clear window otherwise spans the
-            // platform.send below). authenticate() above is synchronous.
-            const stored = entry.data; // { command, args, msg, platform }
-            pending.clear(msg.chatId, msg.senderId);
-            await platform.send(msg.chatId, 'PIN accepted.');
-            await executeCommand(stored.command, stored.args, stored.msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, gov, pending });
-            return;
-          }
+          // (The 'pin_command' router-PIN resume was retired with PIN_PROTECTED —
+          // exec/read/index now ceremony inside the M9 governed core, whose PIN
+          // reply parks as a 'gate_reply' waiter, handled above.)
 
           // --- Interactive pickers / wizards (migrated from config._pending*) ---
           // None carry a `match` fn, so they always enter here. Each owns its
@@ -627,23 +613,10 @@ function createMessageRouter(config, deps = {}) {
       return;
     }
 
-    // PIN check for protected owner commands
-    if (PIN_PROTECTED.has(command) && isOwner(msg.senderId, config, msg)) {
-      const authNeeded = pinManager.needsAuth(msg.senderId);
-      if (authNeeded === 'locked') {
-        await platform.send(msg.chatId, 'Account locked due to failed PIN attempts. Try again later.');
-        return;
-      }
-      if (authNeeded === true) {
-        pending.set(msg.chatId, msg.senderId, 'pin_command', {
-          data: { command, args, msg, platform },
-          match: (t) => /^\d{4,6}$/.test(t.trim()),
-          expireMsg: 'PIN entry expired — please re-send the command.',
-        });
-        await platform.send(msg.chatId, 'Enter your PIN:');
-        return;
-      }
-    }
+    // No router-level PIN gate here any more. The M9 governed core
+    // (runGovernedAction) is the single floor + ceremony: exec ceremonies by
+    // command severity, read/index by the owner floor — all at dispatch time,
+    // with one PendingRegistry. The old PIN_PROTECTED double-path is retired.
 
     await executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, gov, pending });
   };
@@ -681,7 +654,7 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
         await routeRead(msg, platform, config, args, toolDeps);
         break;
       case 'index':
-        await routeIndex(msg, platform, config, indexer, args);
+        await routeIndex(msg, platform, config, indexer, args, toolDeps);
         break;
       case 'search':
         await routeSearch(msg, platform, config, indexer, args);
@@ -861,119 +834,128 @@ async function routeUnpair(msg, platform, config) {
 }
 
 /**
- * Run a direct (slash-command) action through the same bareguard policy the
- * agent loop uses, so /exec and /read are governed identically to LLM tool
- * calls. governance = bareguard: every privileged path goes through the gate,
- * not just the LLM tool path. Returns null when allowed, or a deny/halt
- * message to surface to the user.
+ * Run a declared capability through the single M9 governed core
+ * (runGovernedAction): floor → arg-validation → classify → ceremony → execute →
+ * audit. Both the slash app-verbs and (later) the LLM tool path resolve here, so
+ * a host action ceremonies exactly once, via one PendingRegistry — no second,
+ * parallel PIN path. Returns the core's tagged result for the caller to render.
  */
-async function enforceGate(gov, toolName, args, msg) {
-  if (!gov) return null; // no governance configured — nothing to enforce
+async function dispatchCapability(capName, args, msg, config, toolDeps = {}) {
+  const { gov, indexer } = toolDeps;
+  const bundle = gov ? await gov.resolve() : {};
+  const deps = buildGovernDeps({
+    pinChallenge: bundle.pinChallenge,
+    confirmChallenge: bundle.confirmChallenge,
+    floorPolicy: bundle.floorPolicy,
+    denylist: bundle.denylist,
+    indexer,
+  });
   const ctx = {
     senderId: msg.senderId,
     chatId: msg.chatId,
-    isOwner: true, // slash exec/read are owner-only (caller already checked)
+    isOwner: isOwner(msg.senderId, config, msg),
     platform: msg.platform,
   };
-  try {
-    const { policy } = await gov.resolve();
-    const verdict = await policy(toolName, args, ctx);
-    if (verdict === true) return null;
-    return typeof verdict === 'string' ? verdict : 'Denied by governance.';
-  } catch (err) {
-    // HaltError or gate failure → deny closed
-    return err?.message || 'Denied by governance.';
+  return runGovernedAction({ capability: capName, args, ctx, deps });
+}
+
+/**
+ * Render a governed-core result to the user. `format(result)` shapes the OK
+ * text; `usage` shows when a required arg is missing/invalid (the picker
+ * stand-in for the slash door). DENIED maps the owner floor and a declined
+ * ceremony to plain language.
+ */
+async function sendCapabilityResult(r, platform, msg, opts = {}) {
+  if (r.kind === RESULT.OK) {
+    const text = opts.format ? opts.format(r.result) : String(r.result ?? '(done)');
+    await platform.send(msg.chatId, text);
+    return;
   }
+  if (r.kind === RESULT.NEEDS_ARG) {
+    await platform.send(msg.chatId, opts.usage || `Missing required input: ${(r.missing || []).join(', ')}`);
+    return;
+  }
+  if (r.kind === RESULT.DENIED) {
+    if (r.reason === 'owner_only') {
+      await platform.send(msg.chatId, opts.ownerOnly || 'Owner only command.');
+    } else if (/_ceremony_declined$/.test(r.reason || '')) {
+      await platform.send(msg.chatId, 'Action cancelled.');
+    } else {
+      // floor deny — surface bareguard's own verdict string (it carries the
+      // allowlist/fs.deny reason the audit also records).
+      await platform.send(msg.chatId, r.message || 'Denied by governance.');
+    }
+    return;
+  }
+  // UNKNOWN — no such capability (shouldn't happen from a fixed slash route).
+  await platform.send(msg.chatId, 'Unknown command.');
 }
 
 async function routeExec(msg, platform, config, command, toolDeps = {}) {
-  if (!isOwner(msg.senderId, config, msg)) {
-    await platform.send(msg.chatId, 'Owner only command.');
-    return;
-  }
-
-  if (!command) {
-    await platform.send(msg.chatId, 'Usage: /exec <command>');
-    return;
-  }
-
-  const deny = await enforceGate(toolDeps.gov, 'exec', { command }, msg);
-  if (deny) {
-    await platform.send(msg.chatId, deny);
-    return;
-  }
-
-  const result = await execCommand(command, msg.senderId);
-  await platform.send(msg.chatId, result.output);
+  // run_shell: the core applies the owner floor first (non-owner → owner_only),
+  // then arg-validation (empty → usage), then dynamic shell-severity ceremony —
+  // benign runs free, destructive → PIN, catastrophic → PIN+CONFIRM.
+  const r = await dispatchCapability('run_shell', { command: command || '' }, msg, config, toolDeps);
+  await sendCapabilityResult(r, platform, msg, { usage: 'Usage: /exec <command>' });
 }
 
 async function routeRead(msg, platform, config, filePath, toolDeps = {}) {
-  if (!isOwner(msg.senderId, config, msg)) {
-    await platform.send(msg.chatId, 'Owner only command.');
-    return;
-  }
-
-  if (!filePath) {
-    await platform.send(msg.chatId, 'Usage: /read <path>');
-    return;
-  }
-
-  const deny = await enforceGate(toolDeps.gov, 'read_file', { path: filePath }, msg);
-  if (deny) {
-    await platform.send(msg.chatId, deny);
-    return;
-  }
-
-  const result = readFile(filePath, msg.senderId);
-  await platform.send(msg.chatId, result.output);
+  // read_file: owner-floor only (benign — no ceremony). The old router-level PIN
+  // on /read is retired; the core is the single floor.
+  const r = await dispatchCapability('read_file', { path: filePath || '' }, msg, config, toolDeps);
+  await sendCapabilityResult(r, platform, msg, { usage: 'Usage: /read <path>' });
 }
 
-async function routeIndex(msg, platform, config, indexer, args) {
-  // `/index <path>` reads from the HOST filesystem (indexFile -> fs.readFileSync),
-  // so it is an OWNER-only capability — same trust boundary as /exec and /read. A
-  // limited admin has no host/file access; letting one index an arbitrary path
-  // (e.g. `/index /etc/passwd public`) would be a host-file read primitive that
-  // also plants the bytes into the world-readable KB. Limited admins contribute to
-  // the KB by uploading a file in chat (handled as a scoped upload), not by path.
-  if (!isOwner(msg.senderId, config, msg)) {
-    await platform.send(msg.chatId, 'Owner only command. (Limited admins: send the file in chat to index it.)');
-    return;
+// Parse `/index <path> <public|admin>` into the registry's scope vocab.
+// `/index <path>` reads from the HOST filesystem (indexFile -> fs.readFileSync)
+// AND plants the bytes into the world-readable KB, so the capability is declared
+// owner-only — the core enforces that floor (a limited admin has no host/file
+// access; they contribute by uploading a file in chat, a scoped upload).
+// Registry scope vocab: 'kb' = the public KB, 'admin' = owner-private. We accept
+// the user words public|kb|admin and normalise; null scope → ask for the role.
+function parseIndexArgs(args) {
+  if (!args || !args.trim()) return null;
+  const parts = args.trim().split(/\s+/);
+  const roleToken = { public: 'kb', kb: 'kb', admin: 'admin' };
+  const last = parts[parts.length - 1].toLowerCase();
+  let scope = null;
+  let fileParts = parts;
+  if (parts.length >= 2 && roleToken[last]) {
+    scope = roleToken[last];
+    fileParts = parts.slice(0, -1);
   }
+  const display = fileParts.join(' ');
+  const path = display.replace(/^~/, process.env.HOME || process.env.USERPROFILE);
+  return { scope, path, display };
+}
 
-  if (!args) {
+async function routeIndex(msg, platform, config, indexer, args, toolDeps = {}) {
+  const parsed = parseIndexArgs(args);
+  if (!parsed) {
     await platform.send(msg.chatId, 'Usage: /index <path> <public|admin>');
     return;
   }
-
-  // Parse: last token may be role (public, kb, or admin)
-  const parts = args.trim().split(/\s+/);
-  const validRoles = ['public', 'kb', 'admin'];
-  let role = null;
-  let filePath;
-
-  if (parts.length >= 2 && validRoles.includes(parts[parts.length - 1].toLowerCase())) {
-    role = parts.pop().toLowerCase();
-    // Accept old 'kb' as alias for 'public'
-    if (role === 'kb') role = 'public';
-    filePath = parts.join(' ');
-  } else {
-    filePath = parts.join(' ');
-  }
-
-  if (!role) {
+  if (!parsed.scope) {
     await platform.send(msg.chatId, 'Please specify role: public (knowledge base) or admin (owner-only).\nExample: /index ~/doc.pdf public');
     return;
   }
-
-  const expanded = filePath.replace(/^~/, process.env.HOME || process.env.USERPROFILE);
-
+  // Progress ping is a display nicety, gated on owner so a non-owner doesn't see
+  // "Indexing…" before the core's owner floor denies them. The core remains the
+  // single enforcement floor — this is UX, not a second authz check.
+  if (isOwner(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, `Indexing: ${parsed.display} (${parsed.scope === 'admin' ? 'admin' : 'public'})...`);
+  }
+  let r;
   try {
-    await platform.send(msg.chatId, `Indexing: ${filePath} (role: ${role})...`);
-    const count = await indexer.indexFile(expanded, role);
-    await platform.send(msg.chatId, `Indexed ${count} chunks from ${filePath} [${role}]`);
+    r = await dispatchCapability('index', { path: parsed.path, scope: parsed.scope }, msg, config, { ...toolDeps, indexer });
   } catch (err) {
     await platform.send(msg.chatId, `Index error: ${err.message}`);
+    return;
   }
+  await sendCapabilityResult(r, platform, msg, {
+    format: (res) => `Indexed ${res.count} chunks from ${parsed.display} [${res.role}]`,
+    ownerOnly: 'Owner only command. (Limited admins: send the file in chat to index it.)',
+  });
 }
 
 async function routeSearch(msg, platform, config, indexer, query) {

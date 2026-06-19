@@ -158,179 +158,109 @@ describe('RAG pipeline', () => {
 // PIN auth
 // ---------------------------------------------------------------------------
 
-describe('PIN auth', () => {
-  it('prompts for PIN on protected command, then executes after correct PIN', async () => {
-    const pinHash = hashPin('1234');
+// M9: /exec, /read, /index no longer carry a blanket router-level PIN
+// (PIN_PROTECTED is retired). Host actions resolve to a declared capability and
+// run through the single governed core (runGovernedAction): the owner floor +
+// Axis-A boundary + a severity ceremony (benign runs free; destructive → PIN;
+// catastrophic → PIN+CONFIRM). These tests prove the SLASH-door wiring into that
+// core. The ceremony is now INLINE-AWAIT (the core awaits the PIN reply on the
+// shared gate_reply waiter) rather than the old parked pin_command state, so a
+// /exec call does not resolve until the ceremony does — hence the
+// fire-without-await + poll pattern below. (createPinChallenge internals —
+// wrong-PIN copy, lockout, timeout — are unit-covered in pin-challenge.test.js.)
+describe('PIN auth — governed-core ceremony (M9 slash door)', () => {
+  const flush = () => new Promise((r) => setImmediate(r));
+  async function waitFor(pred, label = 'condition', tries = 500) {
+    for (let i = 0; i < tries; i++) {
+      if (pred()) return;
+      await flush();
+    }
+    throw new Error(`waitFor timed out: ${label}`);
+  }
+  // echo is in BOTH lists: allowlisted so Axis-A lets it run, denylisted so the
+  // core classifies it destructive → ceremony. Running `echo` is harmless and
+  // deterministic, so "the command ran" is observable without a real mutation.
+  const DESTRUCTIVE_GOV = { commands: { allowlist: ['echo'], denylist: ['echo'] }, paths: { allowed: ['.*'], denied: [] } };
+  const BENIGN_GOV = { commands: { allowlist: ['echo'], denylist: [] }, paths: { allowed: ['.*'], denied: [] } };
+
+  function build(gov, llm) {
     const env = createTestEnv({
-      allowed_users: ['user1'],
-      owner_id: 'user1',
-      security: { pin_hash: pinHash, pin_timeout_hours: 24 }
-    });
-    const platform = mockPlatform();
-    const pinManager = new PinManager(env.config);
-    pinManager.sessions = {}; // Clear any persisted sessions
-    const router = createMessageRouter(env.config, {
-      llm: mockLLM(),
-      indexer: stubIndexer(),
-      pinManager
-    });
-
-    // Send protected command — should prompt for PIN
-    await router(msg('/exec ls'), platform);
-    assert.match(platform.sent[0].text, /Enter your PIN/);
-
-    // Send correct PIN
-    await router(msg('1234'), platform);
-    assert.match(platform.sent[1].text, /PIN accepted/);
-  });
-
-  it('wrong PIN shows remaining attempts', async () => {
-    const pinHash = hashPin('1234');
-    const env = createTestEnv({
-      allowed_users: ['user1'],
-      owner_id: 'user1',
-      security: { pin_hash: pinHash, pin_timeout_hours: 24 }
-    });
-    const platform = mockPlatform();
-    const pinManager = new PinManager(env.config);
-    pinManager.sessions = {}; // Clear any persisted sessions
-    const router = createMessageRouter(env.config, {
-      llm: mockLLM(),
-      indexer: stubIndexer(),
-      pinManager
-    });
-
-    await router(msg('/exec ls'), platform);
-    await router(msg('9999'), platform);
-    assert.match(platform.sent[1].text, /Wrong PIN/);
-    assert.match(platform.sent[1].text, /attempts remaining/);
-  });
-
-  it('locked account rejects command', async () => {
-    const pinHash = hashPin('1234');
-    const env = createTestEnv({
-      allowed_users: ['user1'],
-      owner_id: 'user1',
-      security: { pin_hash: pinHash, pin_timeout_hours: 24 }
-    });
-    const platform = mockPlatform();
-    const pinManager = new PinManager(env.config);
-    // Simulate lockout
-    pinManager.failCounts.set('user1', { count: 3, lockedUntil: Date.now() + 60000 });
-    const router = createMessageRouter(env.config, {
-      llm: mockLLM(),
-      indexer: stubIndexer(),
-      pinManager
-    });
-
-    await router(msg('/exec ls'), platform);
-    assert.match(platform.sent[0].text, /locked/i);
-  });
-
-  it('two concurrent PIN replies execute the stored command exactly once (no double-run race)', async () => {
-    // The race: the get→clear window spans an `await platform.send('PIN accepted')`,
-    // so two near-simultaneous correct PINs could both reach executeCommand. The
-    // fix claims the entry synchronously before the first await.
-    const pinHash = hashPin('1234');
-    const env = createTestEnv({
-      allowed_users: ['user1'],
-      owner_id: 'user1',
-      governance: { commands: { allowlist: ['echo'], denylist: [] }, paths: { allowed: ['.*'], denied: [] } },
-      security: { pin_hash: pinHash, pin_timeout_hours: 24, checkpoint_tools: [] },
-    });
-    const platform = mockPlatform();
-    const pinManager = new PinManager(env.config);
-    pinManager.sessions = {};
-    const router = createMessageRouter(env.config, {
-      llm: mockLLM(),
-      indexer: stubIndexer(),
-      pinManager,
-      fileless: true,
-      governanceFile: { commands: { allowlist: ['echo'], denylist: [] }, paths: { allowed: ['.*'], denied: [] } },
-    });
-    router.registerPlatform('telegram', platform);
-
-    await router(msg('/exec echo hello'), platform);
-    assert.match(platform.sent[0].text, /Enter your PIN/);
-
-    // Fire the two replies WITHOUT awaiting the first — they interleave the way
-    // two inbound messages would. (On Telegram the loser becomes an implicit
-    // /ask once the PIN entry is gone; only the winner runs the exec.)
-    await Promise.all([router(msg('1234'), platform), router(msg('1234'), platform)]);
-
-    const ran = platform.sent.filter((s) => /hello/.test(s.text));
-    assert.strictEqual(ran.length, 1, 'the PIN-gated command executed exactly once');
-  });
-
-  it('a non-digit message while a PIN is pending does not consume or disturb the pending command', async () => {
-    const pinHash = hashPin('1234');
-    const env = createTestEnv({
-      allowed_users: ['user1'],
-      owner_id: 'user1',
-      security: { pin_hash: pinHash, pin_timeout_hours: 24, checkpoint_tools: [] },
+      allowed_users: ['user1'], owner_id: 'user1',
+      security: { pin_hash: hashPin('1234'), pin_timeout_hours: 24, checkpoint_tools: [] },
     });
     const platform = mockPlatform();
     const pinManager = new PinManager(env.config);
     pinManager.sessions = {};
     const pending = new PendingRegistry();
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer(), pinManager, pending });
+    const router = createMessageRouter(env.config, {
+      llm: llm || mockLLM(), indexer: stubIndexer(), pinManager, pending,
+      fileless: true, governanceFile: gov,
+    });
+    router.registerPlatform('telegram', platform);
+    return { env, platform, router, pending };
+  }
+  const out = (platform) => platform.sent.filter((s) => !/PIN/i.test(s.text)); // command output, not the prompt
 
-    await router(msg('/exec ls'), platform);
-    assert.match(platform.sent[0].text, /Enter your PIN/);
+  it('a destructive /exec prompts via the core ceremony (verbatim echo) and runs after the correct PIN', async () => {
+    const { platform, router } = build(DESTRUCTIVE_GOV);
+    const execP = router(msg('/exec echo hello'), platform);
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
 
-    // A non-digit reply must NOT be read as a PIN — no "Wrong PIN", no "accepted",
-    // and the pending command survives for the real PIN that follows.
-    await router(msg('hello there'), platform);
-    assert.ok(pending.peek('chat1', 'user1'), 'pending PIN command still parked after a non-digit');
-    assert.ok(!platform.sent.some((s) => /Wrong PIN|accepted/i.test(s.text)), 'non-digit was not treated as a PIN attempt');
+    // The prompt echoes the VERBATIM resolved command, not a model intent (POC #2).
+    assert.match(platform.sent.find((s) => /PIN/i.test(s.text)).text, /echo hello/);
 
-    // The real PIN still works afterwards.
     await router(msg('1234'), platform);
-    assert.ok(platform.sent.some((s) => /accepted/i.test(s.text)), 'correct PIN still accepted after the non-digit');
+    await execP;
+    assert.ok(platform.sent.some((s) => /accepted/i.test(s.text)), 'PIN accepted');
+    assert.ok(out(platform).some((s) => /hello/.test(s.text)), 'command produced its output');
   });
 
-  it('a PIN reply that arrives after the prompt EXPIRES is announced, not routed to /ask (orphaned-reply bug)', async () => {
-    // The bug: once the PIN prompt's pending state lapses, the user's late PIN
-    // digits fell through the dispatch and, in a natural/business chat, landed
-    // in the RAG pipeline as a search query (or were silently dropped). The
-    // registry's announce-on-expiry must intercept it instead.
-    const pinHash = hashPin('1234');
-    const env = createTestEnv({
-      allowed_users: ['user1'],
-      owner_id: 'user1',
-      security: { pin_hash: pinHash, pin_timeout_hours: 24 },
-    });
-    const platform = mockPlatform();
-    const pinManager = new PinManager(env.config);
-    pinManager.sessions = {};
+  it('a benign /exec does NOT prompt for a PIN, even when one is configured', async () => {
+    const { platform, router } = build(BENIGN_GOV);
+    await router(msg('/exec echo benign-marker'), platform);
+    assert.ok(!platform.sent.some((s) => /PIN/i.test(s.text)), 'no ceremony for a benign command');
+    assert.ok(platform.sent.some((s) => /benign-marker/.test(s.text)), 'benign command ran straight through');
+  });
 
-    // Injected clock so we can age the pending entry past its TTL deterministically.
-    let clock = 1_000_000;
-    const pending = new PendingRegistry({ now: () => clock });
+  it('a wrong PIN on a destructive /exec cancels — the command never runs', async () => {
+    const { platform, router } = build(DESTRUCTIVE_GOV);
+    const execP = router(msg('/exec echo should-not-run'), platform);
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
 
-    const llm = mockLLM('RAG answer — should never be produced for a PIN reply');
-    const router = createMessageRouter(env.config, {
-      llm,
-      indexer: stubIndexer(),
-      pinManager,
-      pending,
-    });
+    await router(msg('9999'), platform); // wrong
+    await execP;
+    assert.ok(platform.sent.some((s) => /cancelled/i.test(s.text)), 'ceremony declined → cancelled');
+    assert.ok(!out(platform).some((s) => /should-not-run/.test(s.text)), 'command did not execute');
+  });
 
-    // Owner issues a protected command → PIN prompt; entry stamped at t0.
-    await router(msg('/exec ls'), platform);
-    assert.match(platform.sent[0].text, /Enter your PIN/);
+  it('two concurrent correct PINs run the destructive command exactly once (no double-run)', async () => {
+    const { platform, router } = build(DESTRUCTIVE_GOV, mockLLM('mock-rag'));
+    const execP = router(msg('/exec echo hello'), platform);
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
 
-    // Time passes beyond the 5-minute TTL, then the owner finally types the PIN
-    // in a natural-routed chat (the exact path the old code sent to routeAsk).
-    clock += 6 * 60 * 1000;
-    await router(msg('1234', { routeAs: 'natural' }), platform);
+    // Fire both replies without awaiting the first — they interleave like two
+    // inbound messages. The winner resolves the gate_reply waiter (which clears
+    // the entry synchronously); the loser finds nothing and falls through.
+    await Promise.all([router(msg('1234'), platform), router(msg('1234'), platform)]);
+    await execP;
+    assert.strictEqual(out(platform).filter((s) => /hello/.test(s.text)).length, 1,
+      'the ceremony-gated command executed exactly once');
+  });
 
-    // It is intercepted as an expiry announcement…
-    assert.match(platform.sent[1].text, /expired/i);
-    // …NOT handed to the LLM/RAG pipeline as a query…
-    assert.strictEqual(llm.calls.length, 0, 'late PIN digits must not reach the LLM');
-    // …and the stale entry is gone (announce-once).
-    assert.strictEqual(pending.get('chat1', 'user1'), null);
+  it('a stray message during the ceremony is consumed as a failed PIN, not routed to the LLM', async () => {
+    // The gate_reply waiter claims the NEXT message (no digit-match), so a stray
+    // reply is read as a PIN attempt and fails the ceremony — it must NOT leak
+    // through to the RAG pipeline as a query (the orphaned-reply class).
+    const llm = mockLLM('RAG answer — must never be produced for a ceremony reply');
+    const { platform, router } = build(DESTRUCTIVE_GOV, llm);
+    const execP = router(msg('/exec echo should-not-run'), platform);
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
+
+    await router(msg('hello there', { routeAs: 'natural' }), platform);
+    await execP;
+    assert.strictEqual(llm.calls.length, 0, 'the stray reply never reached the LLM');
+    assert.ok(platform.sent.some((s) => /cancelled/i.test(s.text)), 'ceremony was cancelled');
+    assert.ok(!out(platform).some((s) => /should-not-run/.test(s.text)), 'command did not execute');
   });
 });
 

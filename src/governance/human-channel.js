@@ -110,7 +110,11 @@ function createHumanPrompt({ platformRegistry, pinManager, config, autoResponder
  * no channel to prompt on — fails closed).
  */
 function createPinChallenge({ platformRegistry, pinManager, pending, timeoutMs = 300_000 } = {}) {
-  return async function pinChallenge(ctx) {
+  // opts.echo (M9): the verbatim RESOLVED action the PIN authorises (e.g. the exact
+  // `rm -rf …` command), so the owner approves what will actually run — not a model
+  // intent (POC finding #2). The LLM-path caller (gate.js) passes only ctx; echo is
+  // optional and omitted there, so the prompt degrades to the generic line.
+  return async function pinChallenge(ctx, opts = {}) {
     if (!pinManager || !pinManager.isEnabled()) return true; // no PIN configured
     const auth = pinManager.needsAuth(ctx?.senderId);
     if (auth === false) return true; // session still fresh
@@ -123,8 +127,9 @@ function createPinChallenge({ platformRegistry, pinManager, pending, timeoutMs =
       return false;
     }
 
+    const echoLine = opts.echo ? `\n\n  ${opts.echo}\n` : ' ';
     try {
-      await platform.send(ctx.chatId, '🔒 That action needs your PIN. Reply with your PIN:');
+      await platform.send(ctx.chatId, `🔒 That action needs your PIN.${echoLine}Reply with your PIN:`);
     } catch {
       return false;
     }
