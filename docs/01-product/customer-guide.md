@@ -692,7 +692,7 @@ multis only responds when it's running. If your computer is off or asleep, the b
 | Device | Cost | Notes |
 |--------|------|-------|
 | **VPS** (RackNerd, Hetzner, Oracle) | $0-20/year | Best option. Headless, always on. Oracle free tier = $0. |
-| **Android** (spare phone + Termux) | $0 | Runs Node.js. Bonus: SMS, calls, camera via termux-api. Must stay on and charged. |
+| **Android** | $0 | Telegram only — runs the Node.js bot under Termux, no host/device control. Must stay on and charged. |
 | **Laptop** | $0 | Works but sleeps. Fine for daytime use. |
 
 **Business use (Beeper bridges — WhatsApp, Signal, etc.):**

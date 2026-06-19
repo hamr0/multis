@@ -4,14 +4,21 @@
  * Each tool has:
  *   name        — unique identifier sent to LLM
  *   description — what the LLM sees (guides tool selection)
- *   platforms   — which platforms support it ['linux','macos','android']
+ *   platforms   — which platforms support it ['linux','macos']
  *   input_schema— JSON Schema for parameters
  *   execute     — async (input, ctx) => string result
  *
  * ctx has: { senderId, chatId, isOwner, platform (runtime), indexer, memoryManager }
  */
 
-const { execCommand, readFile } = require('../skills/executor');
+const { execCommand, execArgv, readFile } = require('../skills/executor');
+
+// Single-quote shell escaper for the few tools that genuinely need a shell
+// (pipes, `||` fallbacks). Single quotes disable ALL shell expansion; the
+// replace escapes an embedded single quote. Unlike JSON.stringify (which uses
+// double quotes and leaves `$()`/backticks live), this is injection-safe.
+// Prefer execArgv (no shell at all) wherever a single command suffices.
+const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
 const TOOLS = [
   // -------------------------------------------------------------------------
@@ -20,7 +27,7 @@ const TOOLS = [
   {
     name: 'exec',
     description: 'Run a shell command on the local machine. Governance (command allowlist/denylist) is handled by the Loop policy, not this tool.',
-    platforms: ['linux', 'macos', 'android'],
+    platforms: ['linux', 'macos'],
     input_schema: {
       type: 'object',
       properties: {
@@ -36,7 +43,7 @@ const TOOLS = [
   {
     name: 'read_file',
     description: 'Read a file or list a directory. Path governance is handled by the Loop policy.',
-    platforms: ['linux', 'macos', 'android'],
+    platforms: ['linux', 'macos'],
     input_schema: {
       type: 'object',
       properties: {
@@ -52,7 +59,7 @@ const TOOLS = [
   {
     name: 'send_file',
     description: 'Send a file to the current chat. Use when the user asks for a file, screenshot, or when output is better as an attachment.',
-    platforms: ['linux', 'macos', 'android'],
+    platforms: ['linux', 'macos'],
     input_schema: {
       type: 'object',
       properties: {
@@ -73,7 +80,7 @@ const TOOLS = [
   {
     name: 'grep_files',
     description: 'Search file contents using grep. Finds lines matching a pattern in files under a directory. Use when the user wants to find text inside files on disk (not indexed documents).',
-    platforms: ['linux', 'macos', 'android'],
+    platforms: ['linux', 'macos'],
     input_schema: {
       type: 'object',
       properties: {
@@ -85,9 +92,11 @@ const TOOLS = [
     },
     execute: async ({ pattern, path: searchPath, options: flags }, ctx) => {
       const dir = (searchPath || '~').replace(/^~/, process.env.HOME || '');
-      const opts = flags || '-rn';
-      const cmd = `grep ${opts} ${JSON.stringify(pattern)} ${JSON.stringify(dir)}`;
-      const result = await execCommand(cmd, ctx.senderId);
+      // argv, no shell: pattern/dir/flags reach grep literally, so `$()`, `;`,
+      // backticks etc. cannot inject. `--` terminates flags so a pattern
+      // starting with `-` is treated as the pattern, not an option.
+      const optArgs = (flags || '-rn').split(/\s+/).filter(Boolean);
+      const result = await execArgv('grep', [...optArgs, '--', pattern, dir], ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.output || 'No matches found.';
     }
@@ -95,7 +104,7 @@ const TOOLS = [
   {
     name: 'find_files',
     description: 'Find files by name. Matching is case-insensitive and substring by default, so "amr-hassan-resume" finds "amr-hassan-resume.txt" — pass just the distinctive part of the name. An explicit glob (containing * ? or [ ]) is used as-is. Searches recursively; defaults to the home directory.',
-    platforms: ['linux', 'macos', 'android'],
+    platforms: ['linux', 'macos'],
     input_schema: {
       type: 'object',
       properties: {
@@ -110,8 +119,9 @@ const TOOLS = [
       // matches the real file incl. its extension; honor an explicit glob as-is.
       const hasGlob = /[*?[\]]/.test(name);
       const pattern = hasGlob ? name : `*${name}*`;
-      const cmd = `find ${JSON.stringify(dir)} -maxdepth 6 -iname ${JSON.stringify(pattern)} 2>/dev/null`;
-      const result = await execCommand(cmd, ctx.senderId);
+      // argv, no shell: dir/pattern reach find literally, so `$()`/backticks in
+      // the name cannot inject. (find has no `--`; dir is owner-supplied.)
+      const result = await execArgv('find', [dir, '-maxdepth', '6', '-iname', pattern], ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.output || 'No files found.';
     }
@@ -119,7 +129,7 @@ const TOOLS = [
   {
     name: 'search_docs',
     description: 'Search indexed documents (PDFs, DOCX, etc.) for relevant information. Returns matching excerpts with sources.',
-    platforms: ['linux', 'macos', 'android'],
+    platforms: ['linux', 'macos'],
     input_schema: {
       type: 'object',
       properties: {
@@ -144,7 +154,7 @@ const TOOLS = [
   {
     name: 'recall_memory',
     description: 'Search your memory of past conversations. Use when the user references something discussed before ("do you remember...", "what did I say about...", "my wife\'s name"), or when answering requires personal context. This searches conversation summaries, NOT documents.',
-    platforms: ['linux', 'macos', 'android'],
+    platforms: ['linux', 'macos'],
     input_schema: {
       type: 'object',
       properties: {
@@ -170,7 +180,7 @@ const TOOLS = [
   {
     name: 'remember',
     description: 'Save a note to persistent memory for this conversation. Use when the user asks to remember something.',
-    platforms: ['linux', 'macos', 'android'],
+    platforms: ['linux', 'macos'],
     input_schema: {
       type: 'object',
       properties: {
@@ -188,7 +198,7 @@ const TOOLS = [
   {
     name: 'escalate',
     description: 'Escalate a conversation to the admin/owner for human attention. Use when you cannot resolve the customer\'s issue, when they request a human, or when the situation requires human judgment (refunds, complaints, urgent matters).',
-    platforms: ['linux', 'macos', 'android'],
+    platforms: ['linux', 'macos'],
     owner_only: false,
     input_schema: {
       type: 'object',
@@ -237,7 +247,7 @@ const TOOLS = [
   {
     name: 'open_url',
     description: 'Open a URL in the default browser.',
-    platforms: ['linux', 'macos', 'android'],
+    platforms: ['linux', 'macos'],
     input_schema: {
       type: 'object',
       properties: {
@@ -246,10 +256,10 @@ const TOOLS = [
       required: ['url']
     },
     execute: async ({ url }, ctx) => {
-      const cmds = { linux: 'xdg-open', macos: 'open', android: 'termux-open-url' };
+      const cmds = { linux: 'xdg-open', macos: 'open' };
       const cmd = cmds[ctx.runtimePlatform];
       if (!cmd) return `Unsupported platform: ${ctx.runtimePlatform}`;
-      const result = await execCommand(`${cmd} ${JSON.stringify(url)}`, ctx.senderId);
+      const result = await execArgv(cmd, [url], ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? `Opened: ${url}` : result.output;
     }
@@ -287,7 +297,7 @@ const TOOLS = [
   {
     name: 'notify',
     description: 'Show a desktop or phone notification.',
-    platforms: ['linux', 'macos', 'android'],
+    platforms: ['linux', 'macos'],
     input_schema: {
       type: 'object',
       properties: {
@@ -298,14 +308,18 @@ const TOOLS = [
     },
     execute: async ({ title, message }, ctx) => {
       const t = title || 'multis';
-      const cmds = {
-        linux: `notify-send ${JSON.stringify(t)} ${JSON.stringify(message)}`,
-        macos: `osascript -e 'display notification ${JSON.stringify(message)} with title ${JSON.stringify(t)}'`,
-        android: `termux-notification --title ${JSON.stringify(t)} --content ${JSON.stringify(message)}`
-      };
-      const cmd = cmds[ctx.runtimePlatform];
-      if (!cmd) return `Unsupported platform: ${ctx.runtimePlatform}`;
-      const result = await execCommand(cmd, ctx.senderId);
+      // execArgv (no shell): title/message reach the program as literal argv.
+      // macos osascript embeds them as AppleScript string literals via
+      // JSON.stringify (double-quoted, escaped) — safe now that no shell parses it.
+      let result;
+      if (ctx.runtimePlatform === 'linux') {
+        result = await execArgv('notify-send', [t, message], ctx.senderId);
+      } else if (ctx.runtimePlatform === 'macos') {
+        const osa = `display notification ${JSON.stringify(message)} with title ${JSON.stringify(t)}`;
+        result = await execArgv('osascript', ['-e', osa], ctx.senderId);
+      } else {
+        return `Unsupported platform: ${ctx.runtimePlatform}`;
+      }
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? 'Notification sent.' : result.output;
     }
@@ -313,7 +327,7 @@ const TOOLS = [
   {
     name: 'clipboard',
     description: 'Get or set the clipboard contents.',
-    platforms: ['linux', 'macos', 'android'],
+    platforms: ['linux', 'macos'],
     input_schema: {
       type: 'object',
       properties: {
@@ -325,20 +339,20 @@ const TOOLS = [
     execute: async ({ action, text }, ctx) => {
       if (action === 'set') {
         if (!text) return 'Text required for clipboard set.';
+        // Pipe needs a shell; shq() makes the user text injection-safe.
         const cmds = {
-          linux: `echo ${JSON.stringify(text)} | xclip -selection clipboard`,
-          macos: `echo ${JSON.stringify(text)} | pbcopy`,
-          android: `termux-clipboard-set ${JSON.stringify(text)}`
+          linux: `printf '%s' ${shq(text)} | xclip -selection clipboard`,
+          macos: `printf '%s' ${shq(text)} | pbcopy`
         };
         const cmd = cmds[ctx.runtimePlatform];
+        if (!cmd) return `Unsupported platform: ${ctx.runtimePlatform}`;
         const result = await execCommand(cmd, ctx.senderId);
         if (result.denied) return `Denied: ${result.reason}`;
         return result.success ? 'Copied to clipboard.' : result.output;
       }
       const cmds = {
         linux: 'xclip -selection clipboard -o',
-        macos: 'pbpaste',
-        android: 'termux-clipboard-get'
+        macos: 'pbpaste'
       };
       const cmd = cmds[ctx.runtimePlatform];
       const result = await execCommand(cmd, ctx.senderId);
@@ -360,8 +374,8 @@ const TOOLS = [
     execute: async ({ output }, ctx) => {
       const file = output || '/tmp/screenshot.png';
       const cmd = ctx.runtimePlatform === 'linux'
-        ? `gnome-screenshot -f ${JSON.stringify(file)} 2>/dev/null || grim ${JSON.stringify(file)}`
-        : `screencapture ${JSON.stringify(file)}`;
+        ? `gnome-screenshot -f ${shq(file)} 2>/dev/null || grim ${shq(file)}`
+        : `screencapture ${shq(file)}`;
       const result = await execCommand(cmd, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? `Screenshot saved to ${file}` : result.output;
@@ -370,7 +384,7 @@ const TOOLS = [
   {
     name: 'system_info',
     description: 'Get system information — CPU load, memory usage, disk space, battery status.',
-    platforms: ['linux', 'macos', 'android'],
+    platforms: ['linux', 'macos'],
     input_schema: {
       type: 'object',
       properties: {},
@@ -379,8 +393,7 @@ const TOOLS = [
     execute: async (_input, ctx) => {
       const cmds = {
         linux: "echo '--- CPU ---' && uptime && echo '--- Memory ---' && free -h && echo '--- Disk ---' && df -h / && (upower -i /org/freedesktop/UPower/devices/battery_BAT0 2>/dev/null | grep -E 'percentage|state' || echo 'No battery')",
-        macos: "echo '--- CPU ---' && uptime && echo '--- Memory ---' && vm_stat | head -5 && echo '--- Disk ---' && df -h / && echo '--- Battery ---' && pmset -g batt",
-        android: 'termux-battery-status'
+        macos: "echo '--- CPU ---' && uptime && echo '--- Memory ---' && vm_stat | head -5 && echo '--- Disk ---' && df -h / && echo '--- Battery ---' && pmset -g batt"
       };
       const cmd = cmds[ctx.runtimePlatform];
       if (!cmd) return `Unsupported platform: ${ctx.runtimePlatform}`;
@@ -412,10 +425,11 @@ const TOOLS = [
         return result.output;
       }
       if (!ssid) return 'SSID required for connect.';
-      const cmd = ctx.runtimePlatform === 'linux'
-        ? `nmcli device wifi connect ${JSON.stringify(ssid)}${password ? ` password ${JSON.stringify(password)}` : ''}`
-        : `networksetup -setairportnetwork en0 ${JSON.stringify(ssid)}${password ? ` ${JSON.stringify(password)}` : ''}`;
-      const result = await execCommand(cmd, ctx.senderId);
+      // execArgv (no shell): ssid/password reach the program as literal argv.
+      const [bin, args] = ctx.runtimePlatform === 'linux'
+        ? ['nmcli', ['device', 'wifi', 'connect', ssid, ...(password ? ['password', password] : [])]]
+        : ['networksetup', ['-setairportnetwork', 'en0', ssid, ...(password ? [password] : [])]];
+      const result = await execArgv(bin, args, ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? `Connected to ${ssid}` : result.output;
     }
@@ -441,197 +455,6 @@ const TOOLS = [
       return result.success ? `Brightness set to ${pct}%` : result.output;
     }
   },
-
-  // -------------------------------------------------------------------------
-  // Android tools (Termux)
-  // -------------------------------------------------------------------------
-  {
-    name: 'phone_call',
-    description: 'Make a phone call to a number.',
-    platforms: ['android'],
-    input_schema: {
-      type: 'object',
-      properties: {
-        number: { type: 'string', description: 'Phone number to call' }
-      },
-      required: ['number']
-    },
-    execute: async ({ number }, ctx) => {
-      const result = await execCommand(`termux-telephony-call ${JSON.stringify(number)}`, ctx.senderId);
-      if (result.denied) return `Denied: ${result.reason}`;
-      return result.success ? `Calling ${number}...` : result.output;
-    }
-  },
-  {
-    name: 'sms_send',
-    description: 'Send an SMS message.',
-    platforms: ['android'],
-    input_schema: {
-      type: 'object',
-      properties: {
-        number: { type: 'string', description: 'Phone number to send to' },
-        message: { type: 'string', description: 'Message text' }
-      },
-      required: ['number', 'message']
-    },
-    execute: async ({ number, message }, ctx) => {
-      const result = await execCommand(`termux-sms-send -n ${JSON.stringify(number)} ${JSON.stringify(message)}`, ctx.senderId);
-      if (result.denied) return `Denied: ${result.reason}`;
-      return result.success ? `SMS sent to ${number}` : result.output;
-    }
-  },
-  {
-    name: 'sms_list',
-    description: 'Read recent SMS messages from inbox.',
-    platforms: ['android'],
-    input_schema: {
-      type: 'object',
-      properties: {
-        limit: { type: 'number', description: 'Number of messages to return (default 10)' }
-      },
-      required: []
-    },
-    execute: async ({ limit }, ctx) => {
-      const n = limit || 10;
-      const result = await execCommand(`termux-sms-list -l ${n}`, ctx.senderId);
-      if (result.denied) return `Denied: ${result.reason}`;
-      return result.output;
-    }
-  },
-  {
-    name: 'contacts',
-    description: 'List contacts from the phone.',
-    platforms: ['android'],
-    input_schema: {
-      type: 'object',
-      properties: {},
-      required: []
-    },
-    execute: async (_input, ctx) => {
-      const result = await execCommand('termux-contact-list', ctx.senderId);
-      if (result.denied) return `Denied: ${result.reason}`;
-      return result.output;
-    }
-  },
-  {
-    name: 'location',
-    description: 'Get current GPS location.',
-    platforms: ['android'],
-    input_schema: {
-      type: 'object',
-      properties: {},
-      required: []
-    },
-    execute: async (_input, ctx) => {
-      const result = await execCommand('termux-location -p network', ctx.senderId);
-      if (result.denied) return `Denied: ${result.reason}`;
-      return result.output;
-    }
-  },
-  {
-    name: 'camera',
-    description: 'Take a photo with the phone camera.',
-    platforms: ['android'],
-    input_schema: {
-      type: 'object',
-      properties: {
-        camera: { type: 'number', description: 'Camera ID (0=back, 1=front). Default: 0' }
-      },
-      required: []
-    },
-    execute: async ({ camera }, ctx) => {
-      const cam = camera || 0;
-      const file = `/data/data/com.termux/files/home/photo_${Date.now()}.jpg`;
-      const result = await execCommand(`termux-camera-photo -c ${cam} ${file}`, ctx.senderId);
-      if (result.denied) return `Denied: ${result.reason}`;
-      return result.success ? `Photo saved: ${file}` : result.output;
-    }
-  },
-  {
-    name: 'tts',
-    description: 'Speak text aloud using text-to-speech.',
-    platforms: ['android'],
-    input_schema: {
-      type: 'object',
-      properties: {
-        text: { type: 'string', description: 'Text to speak' }
-      },
-      required: ['text']
-    },
-    execute: async ({ text }, ctx) => {
-      const result = await execCommand(`termux-tts-speak ${JSON.stringify(text)}`, ctx.senderId);
-      if (result.denied) return `Denied: ${result.reason}`;
-      return result.success ? 'Speaking...' : result.output;
-    }
-  },
-  {
-    name: 'torch',
-    description: 'Toggle the phone flashlight on or off.',
-    platforms: ['android'],
-    input_schema: {
-      type: 'object',
-      properties: {
-        enabled: { type: 'boolean', description: 'true = on, false = off' }
-      },
-      required: ['enabled']
-    },
-    execute: async ({ enabled }, ctx) => {
-      const result = await execCommand(`termux-torch ${enabled ? 'on' : 'off'}`, ctx.senderId);
-      if (result.denied) return `Denied: ${result.reason}`;
-      return result.success ? `Flashlight ${enabled ? 'on' : 'off'}` : result.output;
-    }
-  },
-  {
-    name: 'vibrate',
-    description: 'Vibrate the phone.',
-    platforms: ['android'],
-    input_schema: {
-      type: 'object',
-      properties: {
-        duration: { type: 'number', description: 'Duration in milliseconds (default 1000)' }
-      },
-      required: []
-    },
-    execute: async ({ duration }, ctx) => {
-      const ms = duration || 1000;
-      const result = await execCommand(`termux-vibrate -d ${ms}`, ctx.senderId);
-      if (result.denied) return `Denied: ${result.reason}`;
-      return result.success ? 'Vibrated.' : result.output;
-    }
-  },
-  {
-    name: 'volume',
-    description: 'Set phone volume (media, ring, or alarm).',
-    platforms: ['android'],
-    input_schema: {
-      type: 'object',
-      properties: {
-        stream: { type: 'string', enum: ['music', 'ring', 'alarm', 'notification'], description: 'Volume stream' },
-        level: { type: 'number', description: 'Volume level (0-15)' }
-      },
-      required: ['stream', 'level']
-    },
-    execute: async ({ stream, level }, ctx) => {
-      const result = await execCommand(`termux-volume ${stream} ${level}`, ctx.senderId);
-      if (result.denied) return `Denied: ${result.reason}`;
-      return result.success ? `${stream} volume set to ${level}` : result.output;
-    }
-  },
-  {
-    name: 'battery',
-    description: 'Get phone battery status.',
-    platforms: ['android'],
-    input_schema: {
-      type: 'object',
-      properties: {},
-      required: []
-    },
-    execute: async (_input, ctx) => {
-      const result = await execCommand('termux-battery-status', ctx.senderId);
-      if (result.denied) return `Denied: ${result.reason}`;
-      return result.output;
-    }
-  }
 ];
 
 module.exports = { TOOLS };

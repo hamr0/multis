@@ -394,7 +394,7 @@ function createMessageRouter(config, deps = {}) {
             const stored = entry.data; // { command, args, msg, platform }
             pending.clear(msg.chatId, msg.senderId);
             await platform.send(msg.chatId, 'PIN accepted.');
-            await executeCommand(stored.command, stored.args, stored.msg, platform, config, indexer, provider, memoryManagers, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, gov, pending });
+            await executeCommand(stored.command, stored.args, stored.msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, gov, pending });
             return;
           }
 

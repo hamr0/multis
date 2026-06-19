@@ -56,10 +56,10 @@ src/
 │   ├── human-channel.js  # humanPrompt closure — single callback for every ask/halt event
 │   └── audit.js          # Append-only JSONL app-event log (distinct from bareguard's gate.jsonl)
 ├── tools/
-│   ├── definitions.js    # 25+ tool definitions across desktop, Android, universal
+│   ├── definitions.js    # desktop + universal tool definitions (no-shell execArgv / shq-quoted)
 │   ├── registry.js       # Platform filtering, owner-only gating, config overrides
 │   ├── adapter.js        # Converts multis tools to bare-agent format with ctx closure
-│   └── platform.js       # Runtime platform detection (linux/macos/android)
+│   └── platform.js       # Runtime platform detection (linux/macos)
 ├── context/
 │   └── index.js          # Thin litectx policy wrapper — indexFile/indexBuffer, rememberMemory,
 │                         #   search/searchMemory (per-call scope), get (fenced), purge, stats.

@@ -4,6 +4,18 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+### Security — pre-merge gate: shell-injection class closed in the agent tools
+
+A `/security` + `/diff-review` pass before merging the migration branch found and fixed a **command-injection / gate-bypass** class in the LLM agent tools:
+
+- **`find_files` / `grep_files` (HIGH, proven RCE).** Both built a `bash` string by interpolating LLM-supplied args via `JSON.stringify`, which escapes `"`/`\` but **not** `$` or backticks — so `name: "$(…)"` or a `;`-laden `options` executed arbitrary shell. Because these tools translate to a `read` action at the gate, the dangerous string never reached bareguard's shell-metachar deny — a full bypass of command governance, reachable via prompt injection on the owner/agent path. Proven live (red), fixed, re-proven (green). **Fix:** a new no-shell `execArgv(file, args)` (argv via `execFile`) in `src/skills/executor.js`; `find`/`grep` now pass argv, so `$()`/`;`/backticks are inert literals. `--` terminates grep flags.
+- **Desktop tools hardened (`open_url`, `notify`, `wifi`, `clipboard`, `screenshot`).** Same `JSON.stringify`-into-shell pattern. Single-command tools moved to `execArgv` (no shell); the two that genuinely need a shell (clipboard pipe, screenshot `||` fallback) use a single-quote escaper `shq()`. Regression tests assert `$()` stays inert across all of them.
+- **PIN-resume dependency fix.** After a correct PIN, the resumed command was handed the `memoryManagers` Map in the `getMem` slot and dropped `platformRegistry` — a latent crash for PIN-gated `/ask`/`/remember`. Now matches the normal dispatch path.
+
+### Removed — Termux / Android device-control tools
+
+The 11 Android-only Termux tools (`phone_call`, `sms_send`, `sms_list`, `contacts`, `location`, `camera`, `tts`, `torch`, `vibrate`, `volume`, `battery`) are removed, along with Android platform detection, the `android-setup.md` guide, and `scripts/setup-termux.sh`. They were a deferred aspiration (phone control from a Termux-hosted bot) that never shipped in practice; multi-platform reach is delivered by beeperbox instead. The cross-platform tools (`open_url`/`notify`/`clipboard`/`system_info`) drop their `termux-*` branches; `getPlatform()` now returns `linux`/`macos` only.
+
 ### Changed — `/help` redesigned (grouped by intent, role-aware, progressive disclosure)
 
 `/help` was a flat ~25-line wall built by splicing owner commands into a base list — alphabetical-ish, with the same `/mode` listed twice (once as the mode setter, once as the business menu). Replaced with a single command catalogue (`HELP_COMMANDS`) rendered **grouped by intent** — **ASK** (find answers) · **REMEMBER** (build memory & knowledge) · **SCHEDULE** (do things later) · **RUN** (act on this machine) · **MANAGE** (configure the bot) — and **filtered to the viewer's role** (`all` / `admin` / `owner`), so a customer sees only Ask + personal memory + status, a limited admin adds `/index` + `/mode`, and the owner sees everything. `/mode` now appears **once**. Adds **progressive disclosure**: `/help <command>` returns that one command's usage + detail (e.g. `/help mode` explains the business menu and silent/off semantics); an unknown or not-permitted topic falls back to the full menu with a nudge (and an owner-only command's detail is never disclosed to a non-owner). One metadata table now drives both views — no more splice-wall drift. 519/519 green; grouping, the `/mode` dedup, role-filtering, and the detail/fallback paths are covered by tests.

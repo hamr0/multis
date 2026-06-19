@@ -13,17 +13,6 @@
     "system_info":   { "enabled": true,  "owner_only": true },
     "wifi":          { "enabled": true,  "owner_only": true },
     "brightness":    { "enabled": true,  "owner_only": true },
-    "phone_call":    { "enabled": true,  "owner_only": true },
-    "sms_send":      { "enabled": true,  "owner_only": true },
-    "sms_list":      { "enabled": true,  "owner_only": true },
-    "contacts":      { "enabled": true,  "owner_only": true },
-    "location":      { "enabled": false, "owner_only": true },
-    "camera":        { "enabled": false, "owner_only": true },
-    "tts":           { "enabled": true,  "owner_only": false },
-    "torch":         { "enabled": true,  "owner_only": true },
-    "vibrate":       { "enabled": true,  "owner_only": true },
-    "volume":        { "enabled": true,  "owner_only": true },
-    "battery":       { "enabled": true,  "owner_only": false },
     "remember":      { "enabled": true,  "owner_only": false }
   }
 }

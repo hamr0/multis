@@ -473,6 +473,8 @@ Nice-to-have adds ~135 lines if needed.
 
 ## Android Device Control: Termux vs DroidClaw
 
+> **Superseded (2026-06-19).** The Termux device-control tools (phone/SMS/camera/TTS/etc.) were removed from multis — the aspiration was blocked in practice and the multi-platform reach it promised is now delivered by **beeperbox**. This section is retained as historical exploration only; the `termux-*` tools no longer ship.
+
 Two complementary approaches for controlling an Android phone from multis.
 
 ### Termux + termux-api (system-level)
