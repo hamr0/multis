@@ -43,5 +43,12 @@
   },
   "optionalDependencies": {
     "@matrix-org/matrix-sdk-crypto-nodejs": "^0.4.0"
+  },
+  "comments": {
+    "overrides": "Pin patched transitive deps of mammoth (the DOCX->md parser multis supplies as litectx's peerOptional). @xmldom/xmldom <=0.8.12 (XML injection/DoS) and underscore <=1.13.7 (recursion DoS) are reachable via a malicious uploaded DOCX. Both patched versions are within mammoth's declared ranges (^0.8.6, ^1.13.1), so this is a non-breaking security pin, durable against lockfile regen. Drop once mammoth bumps them upstream."
+  },
+  "overrides": {
+    "@xmldom/xmldom": "^0.8.13",
+    "underscore": "^1.13.8"
   }
 }
