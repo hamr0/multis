@@ -22,21 +22,25 @@ const { logAudit } = require('../governance/audit');
  * Build the `deps` bundle for runGovernedAction.
  * @param {Object}   p
  * @param {Function} [p.pinChallenge]      async (ctx, { echo }) => boolean
- * @param {Function} [p.confirmChallenge]  async (ctx, echo)     => boolean
  * @param {Function} [p.floorPolicy]       bareguard Axis-A policy: async (toolName, args, ctx) => true|denyString
  * @param {string[]} [p.denylist]          command denylist (shell severity classifier)
  * @param {Object}   [p.indexer]           litectx policy wrapper (for the `index` verb)
  * @param {Object}   [p.appExec]           name → (args, ctx) => result, for the
  *                                          config/memory-coupled app-verbs
  *                                          (set_mode, forget, remember, memory)
+ * @param {Function} [p.execute]            override the default executor entirely:
+ *                                          async (cap, args, ctx) => result. The
+ *                                          LLM door passes this to delegate to the
+ *                                          bare-agent-adapted tool (keeping its
+ *                                          tool_call audit) instead of calling
+ *                                          cap.tool.execute directly.
  */
-function buildGovernDeps({ pinChallenge, confirmChallenge, floorPolicy, denylist = [], indexer, appExec } = {}) {
+function buildGovernDeps({ pinChallenge, floorPolicy, denylist = [], indexer, appExec, execute } = {}) {
   return {
     pinChallenge,
-    confirmChallenge,
     denylist,
     floor: makeFloor({ floorPolicy }),
-    execute: makeExecute({ indexer, appExec }),
+    execute: execute || makeExecute({ indexer, appExec }),
     audit: async (intentLine, meta = {}) => {
       logAudit({
         action: 'govern',

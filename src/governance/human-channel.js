@@ -149,38 +149,6 @@ function createPinChallenge({ platformRegistry, pinManager, pending, timeoutMs =
   };
 }
 
-/**
- * Build a typed-confirmation challenge for catastrophic commands (the third
- * tier above PIN). After the PIN clears, the gate calls this for the small set
- * of machine-wreckers (rm -rf /, dd to a device, mkfs, fork bomb, shutdown…):
- * it shows the exact command and requires the owner to reply the literal word
- * CONFIRM — a deliberate speed bump a stray message can't satisfy. Routes and
- * waits via the same PendingRegistry path as the PIN/approval flow.
- *
- * Returns (ctx, command) => Promise<boolean>. true only on an exact "CONFIRM".
- */
-function createConfirmChallenge({ platformRegistry, pending, timeoutMs = 300_000 } = {}) {
-  return async function confirmChallenge(ctx, command) {
-    const platform = platformRegistry?.get(ctx?.platform);
-    if (!platform || typeof platform.send !== 'function') return false; // can't prompt → deny
-    try {
-      await platform.send(ctx.chatId,
-        `⚠️ This command can destroy data or your system:\n\n  ${command}\n\n`
-        + `Reply CONFIRM (exactly, all caps) within 5 minutes to run it. Anything else cancels.`);
-    } catch {
-      return false;
-    }
-    const reply = await waitForReply(pending, ctx.chatId, ctx.senderId, { timeoutMs });
-    if (reply == null) {
-      try { await platform.send(ctx.chatId, 'Confirmation timed out — action cancelled.'); } catch { /* ignore */ }
-      return false;
-    }
-    if (reply.trim() === 'CONFIRM') return true;
-    try { await platform.send(ctx.chatId, 'Not confirmed — action cancelled.'); } catch { /* ignore */ }
-    return false;
-  };
-}
-
 function summarizeEvent(event) {
   if (event.kind === 'halt') {
     // Tool-round cap: the model kept calling tools without finishing. Plain
@@ -250,5 +218,4 @@ function waitForReply(pending, chatId, senderId, { timeoutMs } = {}) {
 module.exports = {
   createHumanPrompt,
   createPinChallenge,
-  createConfirmChallenge,
 };

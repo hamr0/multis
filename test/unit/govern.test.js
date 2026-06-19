@@ -8,14 +8,13 @@ const { runGovernedAction, RESULT } = require('../../src/capabilities/govern');
 const DENYLIST = ['rm', 'mv', 'chmod', 'chown', 'kill', 'dd', 'sudo'];
 
 // A test deps factory: records what was called, lets each ceremony pass/fail.
-function makeDeps({ pin = true, confirm = true } = {}) {
-  const calls = { pin: 0, confirm: 0, execute: 0, audit: [], echoSeen: null };
+function makeDeps({ pin = true } = {}) {
+  const calls = { pin: 0, execute: 0, audit: [], echoSeen: null };
   return {
     calls,
     deps: {
       denylist: DENYLIST,
       pinChallenge: async (_ctx, { echo } = {}) => { calls.pin += 1; calls.echoSeen = echo; return pin; },
-      confirmChallenge: async (_ctx, echo) => { calls.confirm += 1; calls.echoSeen = echo; return confirm; },
       execute: async (cap, args) => { calls.execute += 1; return { ran: cap.name, args }; },
       audit: async (line) => { calls.audit.push(line); },
     },
@@ -79,34 +78,27 @@ test('destructive action after a cleared PIN returns ok:true and RUNS', async ()
   assert.strictEqual(r.ok, true, 'cleared PIN → allowed (not the old null→deny)');
   assert.strictEqual(r.tier, 'destructive');
   assert.strictEqual(calls.pin, 1);
-  assert.strictEqual(calls.confirm, 0, 'destructive needs no CONFIRM');
   assert.strictEqual(calls.execute, 1, 'the command actually ran');
   assert.deepStrictEqual(r.result, { ran: 'run_shell', args: { command: 'rm notes.txt' } });
 });
 
-test('catastrophic action requires PIN + CONFIRM, then runs', async () => {
-  const { deps, calls } = makeDeps({ pin: true, confirm: true });
+test('catastrophic action is a HARD WALL — no PIN, no run, no override', async () => {
+  // The owner-decided model (2026-06-19): machine-wreckers never run through the
+  // bot. No ceremony can clear them — the owner uses a real terminal.
+  const { deps, calls } = makeDeps({ pin: true });
   const r = await runGovernedAction({ capability: 'run_shell', args: { command: 'rm -rf ~/*' }, ctx: OWNER, deps });
-  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.kind, RESULT.DENIED);
+  assert.strictEqual(r.reason, 'catastrophic_blocked');
   assert.strictEqual(r.tier, 'catastrophic');
-  assert.strictEqual(calls.pin, 1);
-  assert.strictEqual(calls.confirm, 1);
-  assert.strictEqual(calls.execute, 1);
+  assert.strictEqual(calls.pin, 0, 'a wall is not a ceremony — no PIN is asked');
+  assert.strictEqual(calls.execute, 0, 'it never runs');
 });
 
-test('declined PIN → DENIED, execute never runs', async () => {
+test('declined PIN on a destructive action → DENIED, execute never runs', async () => {
   const { deps, calls } = makeDeps({ pin: false });
   const r = await runGovernedAction({ capability: 'run_shell', args: { command: 'rm x' }, ctx: OWNER, deps });
   assert.strictEqual(r.kind, RESULT.DENIED);
   assert.strictEqual(r.reason, 'destructive_ceremony_declined');
-  assert.strictEqual(calls.execute, 0);
-});
-
-test('declined CONFIRM on a catastrophic action → DENIED', async () => {
-  const { deps, calls } = makeDeps({ pin: true, confirm: false });
-  const r = await runGovernedAction({ capability: 'run_shell', args: { command: 'rm -rf ~/*' }, ctx: OWNER, deps });
-  assert.strictEqual(r.kind, RESULT.DENIED);
-  assert.strictEqual(calls.confirm, 1);
   assert.strictEqual(calls.execute, 0);
 });
 
@@ -118,10 +110,10 @@ test('set_mode(off) is destructive → ceremonies', async () => {
   assert.strictEqual(calls.pin, 1);
 });
 
-test('the ceremony echoes the VERBATIM resolved command, not the intent', async () => {
-  const { deps, calls } = makeDeps({ pin: true, confirm: true });
-  await runGovernedAction({ capability: 'run_shell', args: { command: 'rm -rf ~/Downloads/*' }, ctx: OWNER, deps });
-  assert.strictEqual(calls.echoSeen, 'rm -rf ~/Downloads/*');
+test('the destructive PIN ceremony echoes the VERBATIM resolved command, not the intent', async () => {
+  const { deps, calls } = makeDeps({ pin: true });
+  await runGovernedAction({ capability: 'run_shell', args: { command: 'rm -rf ./build' }, ctx: OWNER, deps });
+  assert.strictEqual(calls.echoSeen, 'rm -rf ./build');
 });
 
 test('plain-language intent is recorded on every action', async () => {

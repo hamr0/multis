@@ -16,10 +16,11 @@ const { getPlatform } = require('../tools/platform');
 const { Loop, Retry, CircuitBreaker } = require('bare-agent');
 const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler');
 const { createGate } = require('../governance/gate');
-const { createHumanPrompt, createPinChallenge, createConfirmChallenge } = require('../governance/human-channel');
+const { createHumanPrompt, createPinChallenge } = require('../governance/human-channel');
 const { PendingRegistry } = require('./pending');
 const { runGovernedAction, RESULT } = require('../capabilities/govern');
 const { buildGovernDeps } = require('../capabilities/deps');
+const { getCapabilityForTool, SEVERITY } = require('../capabilities/registry');
 
 // Picker / wizard lifetimes, single-sourced from config (see config.js
 // `interaction` block). Quick numeric pickers expire fast; the multi-step
@@ -119,26 +120,22 @@ function createGovernanceCarrier(config, opts = {}) {
           pending: opts.pending,
           timeoutMs: (config?.security?.pin_prompt_timeout || 300) * 1000,
         });
-        // Catastrophic-command confirm tier (typed CONFIRM after the PIN).
-        const confirmChallenge = opts.confirmChallenge || createConfirmChallenge({
-          platformRegistry,
-          pending: opts.pending,
-          timeoutMs: (config?.security?.pin_prompt_timeout || 300) * 1000,
-        });
+        // createGate no longer consumes the ceremony (the 3-tier moved to the M9
+        // core); pinChallenge is built here only to ride the bundle below. There is
+        // no CONFIRM tier — catastrophic commands are hard-walled in the core, never
+        // ceremonied.
         const built = await createGate({
           config,
           humanPrompt,
-          pinChallenge,
-          confirmChallenge,
           auditPath: opts.auditPath,
           budgetFile: opts.budgetFile,
           fileless: opts.fileless,
           governance: opts.governance,
         });
-        // Expose the SAME ceremony instances to the M9 governed core (slash door),
-        // so a single intent ceremonies once via one PendingRegistry — no second,
-        // parallel PIN path. denylist rides through from createGate's return.
-        resolved = { ...built, pinChallenge, confirmChallenge };
+        // Expose the SAME PIN instance to the M9 governed core (both doors), so a
+        // single intent ceremonies once via one PendingRegistry — no second, parallel
+        // PIN path. denylist rides through from createGate's return.
+        resolved = { ...built, pinChallenge };
         return resolved;
       })();
       // Self-heal on transient init failure (e.g. bareguard ESM import error).
@@ -832,7 +829,6 @@ async function dispatchCapability(capName, args, msg, config, toolDeps = {}) {
   const bundle = gov ? await gov.resolve() : {};
   const deps = buildGovernDeps({
     pinChallenge: bundle.pinChallenge,
-    confirmChallenge: bundle.confirmChallenge,
     floorPolicy: bundle.floorPolicy,
     denylist: bundle.denylist,
     indexer,
@@ -884,6 +880,8 @@ async function sendCapabilityResult(r, platform, msg, opts = {}) {
   if (r.kind === RESULT.DENIED) {
     if (r.reason === 'owner_only') {
       await platform.send(msg.chatId, opts.ownerOnly || 'Owner only command.');
+    } else if (r.reason === 'catastrophic_blocked') {
+      await platform.send(msg.chatId, '⛔ Blocked: that command is too destructive to run through me — please do it yourself in a terminal.');
     } else if (/_ceremony_declined$/.test(r.reason || '')) {
       await platform.send(msg.chatId, 'Action cancelled.');
     } else {
@@ -1023,6 +1021,46 @@ function getCircuitBreaker(config) {
  * Includes retry (429/5xx) and circuit breaker for resilience.
  * @returns {Promise<string>} — final text answer
  */
+/**
+ * Wrap one bare-agent-adapted tool so its execute runs through the M9 governed
+ * core (runGovernedAction) — but only for a capability that can require a ceremony
+ * (dynamic/destructive/catastrophic severity; today that's `exec`/run_shell).
+ * Benign or unmapped tools are returned unchanged: the Loop's `policy` already
+ * floors them and they need no ceremony, so routing them through the core would
+ * only add a redundant audit line. The core gets NO floor dep here (the Loop's
+ * policy is the floor) and delegates execute back to the adapted tool, preserving
+ * its tool_call audit. A declined ceremony / floor deny becomes a plain tool
+ * result the model reports; it never silently runs.
+ */
+function wrapToolThroughCore(adaptedTool, govCtx, { pinChallenge, denylist }) {
+  const cap = getCapabilityForTool(adaptedTool.name);
+  if (!cap || cap.severity === SEVERITY.BENIGN) return adaptedTool; // policy is the sole gate
+  const original = adaptedTool.execute;
+  const deps = buildGovernDeps({
+    pinChallenge,
+    denylist,
+    // No floorPolicy: the Loop's policy already enforced Axis-A before execute.
+    execute: (_cap, args) => original(args), // delegate → adapter (tool_call audit + tool.execute)
+  });
+  return {
+    ...adaptedTool,
+    execute: async (args) => {
+      const r = await runGovernedAction({ capability: cap, args: args || {}, ctx: govCtx, deps });
+      if (r.kind === RESULT.OK) return r.result;
+      if (r.kind === RESULT.NEEDS_ARG) {
+        return `Missing required argument(s): ${(r.missing || []).join(', ')}. Provide them and retry.`;
+      }
+      if (r.kind === RESULT.DENIED) {
+        if (r.reason === 'owner_only') return 'Denied: this action requires owner privileges.';
+        if (r.reason === 'catastrophic_blocked') return 'Blocked: that command is too destructive to run through me — please do it yourself in a terminal.';
+        if (/_ceremony_declined$/.test(r.reason || '')) return 'Action cancelled — the required PIN was not provided.';
+        return r.message || 'Denied by governance.';
+      }
+      return 'Action could not be completed.';
+    },
+  };
+}
+
 async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   // maxRounds removed in bare-agent 0.10 — round caps live in the bareguard
   // Gate as limits.maxToolRounds, derived from config.llm.max_tool_rounds.
@@ -1032,8 +1070,28 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
 
   // Resolve governance lazily on first call (ESM bareguard requires await import)
   const _gc = startClock();
-  const { policy, onLlmResult, onToolResult } = gov ? await gov.resolve() : {};
+  const bundle = gov ? await gov.resolve() : {};
+  const { policy, onLlmResult, onToolResult, pinChallenge, denylist } = bundle;
   mark('runAgentLoop: gov.resolve done', _gc);
+
+  // M9 increment 3 — the LLM door through the one governed core. A tool whose
+  // capability can require a ceremony (today: `exec`/run_shell, dynamic severity)
+  // runs its execute through runGovernedAction, so the destructive/catastrophic PIN
+  // (+CONFIRM) ceremony lives in the SAME core as the slash door — never again in
+  // gate.js `policy`. The Loop's `policy` already enforced the Axis-A floor before
+  // execute (bash.allow ∪ denylist lets a destructive command reach here), so the
+  // core runs WITHOUT a floor dep (no double gate.check) and delegates execute back
+  // to the bare-agent-adapted tool (preserving its tool_call audit). Benign/unknown
+  // tools are left unwrapped — `policy` is their sole gate.
+  const govCtx = {
+    senderId: ctx.senderId,
+    chatId: ctx.chatId,
+    isOwner: ctx.isOwner,
+    platform: ctx.platform?.name || ctx.platform?.platform || ctx.platformName,
+  };
+  const governed = gov
+    ? adapted.map((t) => wrapToolThroughCore(t, govCtx, { pinChallenge, denylist }))
+    : adapted;
 
   // Build retry + circuit breaker from config
   const retryCfg = config?.llm?.retry || {};
@@ -1063,13 +1121,8 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   // Pass _ctx through so humanChannel can route prompts back via platformRegistry.
   const _rc = startClock();
   mark('runAgentLoop: loop.run start');
-  const result = await loop.run(messages, adapted, {
-    ctx: {
-      senderId: ctx.senderId,
-      chatId: ctx.chatId,
-      isOwner: ctx.isOwner,
-      platform: ctx.platform?.name || ctx.platform?.platform || ctx.platformName,
-    },
+  const result = await loop.run(messages, governed, {
+    ctx: govCtx,
   });
   mark(`runAgentLoop: loop.run done (rounds=${result.toolRounds ?? '?'}, err=${result.error ? 'yes' : 'no'})`, _rc);
   if (result.error) {

@@ -156,14 +156,27 @@ function schema(properties, required) { return { type: 'object', properties, req
 const CAPABILITIES = [...buildHostCapabilities(), ...APP_VERBS];
 
 const BY_NAME = new Map();
+// Host capabilities are renamed (exec → run_shell), so the LLM/agent path — which
+// only knows the SOURCE tool name (`exec`, `read_file`, …) — needs a reverse map.
+const BY_TOOL = new Map();
 for (const cap of CAPABILITIES) {
   BY_NAME.set(cap.name, cap);
   for (const alias of cap.aliases || []) BY_NAME.set(alias, cap);
+  if (cap.kind === 'host' && cap.tool) BY_TOOL.set(cap.tool.name, cap);
 }
 
 /** Look up a capability by name or alias. */
 function getCapability(name) {
   return BY_NAME.get(name) || null;
+}
+
+/**
+ * Look up a HOST capability by its source tool name (exec, read_file, …) — the
+ * name the bare-agent Loop calls tools by. Returns null for a tool that isn't a
+ * declared capability (it then runs unwrapped on the LLM path).
+ */
+function getCapabilityForTool(toolName) {
+  return BY_TOOL.get(toolName) || null;
 }
 
 /**
@@ -218,6 +231,7 @@ module.exports = {
   SEVERITY,
   CAPABILITIES,
   getCapability,
+  getCapabilityForTool,
   listCapabilities,
   classifyEffectiveSeverity,
   requiresCeremony,

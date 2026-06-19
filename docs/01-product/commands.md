@@ -26,7 +26,7 @@ The **owner** (super-admin, set at setup) can run everything below. A **limited 
 
 | Command | Who | Description |
 |---------|-----|-------------|
-| `/exec <cmd>` | Owner | Run a shell command — ceremony by severity: benign runs free, destructive → PIN, catastrophic → PIN + typed CONFIRM |
+| `/exec <cmd>` | Owner | Run a shell command — by severity: benign runs free, destructive → PIN, catastrophic (`rm -rf /`, `dd`, `mkfs`, …) → hard-blocked (never runs through the bot) |
 | `/read <path>` | Owner | Read a file or directory (benign — owner-floor, no PIN) |
 | `/index <path> <kb\|admin>` | Admin | Index a document with scope (benign — owner-floor, no PIN) |
 | `/pin` | Owner | Change or set PIN |

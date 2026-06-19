@@ -6,7 +6,8 @@
  * and run it through here. The flow:
  *
  *   floor (owner-only) → arg-validation (missing/placeholder → picker)
- *     → classify effective severity → ceremony (PIN / PIN+CONFIRM, verbatim-arg echo)
+ *     → classify effective severity → catastrophic = hard WALL; destructive = PIN
+ *       ceremony (verbatim-arg echo); benign = run
  *     → execute → record plain-language intent → return an UNAMBIGUOUS result.
  *
  * Return contract (fixes the dead-3-tier bug, PRD §F / M9 "known bug"): an explicit
@@ -16,8 +17,8 @@
  * correct PIN. Here a cleared destructive action returns `{ ok: true, result }`; both
  * consumers map their own verdict off `.ok`. Proven by a consumer-level test (govern.test.js).
  *
- * Pure orchestration: all I/O is injected via `deps` (pinChallenge, confirmChallenge,
- * execute, audit) so it is testable without the bot stack and so the ceremony seam stays
+ * Pure orchestration: all I/O is injected via `deps` (pinChallenge, execute, audit)
+ * so it is testable without the bot stack and so the ceremony seam stays
  * single-sourced in human-channel.js.
  */
 
@@ -43,7 +44,6 @@ const RESULT = Object.freeze({
  * @param {Object}   p.ctx              { isOwner, platform, chatId, senderId, ... }
  * @param {Object}   p.deps
  * @param {Function} [p.deps.pinChallenge]      async (ctx, { echo }) => boolean
- * @param {Function} [p.deps.confirmChallenge]  async (ctx, echo) => boolean
  * @param {Function} p.deps.execute             async (cap, args, ctx) => any  (REQUIRED)
  * @param {Function} [p.deps.floor]             async (cap, args, ctx) => true|denyString — Axis-A
  * @param {Function} [p.deps.audit]             async (intentLine, meta) => void
@@ -82,12 +82,23 @@ async function runGovernedAction({ capability, args = {}, ctx = {}, deps = {} })
   // 3. Effective severity (shell resolves from the command string; set_mode(off) escalates).
   const tier = classifyEffectiveSeverity(cap, args, deps.denylist);
 
-  // 4. Ceremony — verbatim-arg echo so the owner approves the RESOLVED action, not the
-  //    intent (POC finding #2: run_shell args are fabricated). The negative-POC invariant:
-  //    a destructive/catastrophic tier ALWAYS ceremonies, even a fully model-driven one.
+  // 4. Wall / ceremony — verbatim-arg echo so the owner approves the RESOLVED action,
+  //    not the intent (POC finding #2: run_shell args are fabricated).
   const echo = echoArgs(cap, args);
+  // Catastrophic = a permanent WALL. Machine-wreckers (rm -rf of a root/home target,
+  // dd to a device, mkfs, fork bomb, shutdown) NEVER run through the bot — no PIN, no
+  // CONFIRM, no override; the owner uses a real terminal for those. There is no
+  // legitimate automation need, and the negative POC showed the model is hijackable —
+  // so the strongest catch (a wall) beats a ceremony here. bareguard's content floor
+  // independently denies `rm -rf /…` too; this multis-owned half also covers the
+  // shapes that slip past it (`rm -rf ~/*`, `dd`, `mkfs`, …).
+  if (tier === SEVERITY.CATASTROPHIC) {
+    if (deps.audit) await deps.audit(plainIntent(cap, args, tier), { capability: cap.name, tier, ctx, blocked: true }).catch(() => {});
+    return { kind: RESULT.DENIED, ok: false, reason: 'catastrophic_blocked', tier, echo };
+  }
+  // Destructive = a PIN speed bump (the owner clears it and proceeds).
   if (requiresCeremony(tier)) {
-    const cleared = await runCeremony({ tier, ctx, echo, deps });
+    const cleared = await runCeremony({ ctx, echo, deps });
     if (!cleared) {
       return { kind: RESULT.DENIED, ok: false, reason: `${tier}_ceremony_declined`, tier, echo };
     }
@@ -105,15 +116,12 @@ async function runGovernedAction({ capability, args = {}, ctx = {}, deps = {} })
   return { kind: RESULT.OK, ok: true, tier, result, echo };
 }
 
-/** Run the tier's ceremony. destructive → PIN; catastrophic → PIN then CONFIRM. */
-async function runCeremony({ tier, ctx, echo, deps }) {
+/** Run the destructive tier's ceremony: a PIN speed bump. (Catastrophic never reaches
+ *  here — it is walled in step 4. Benign never reaches here either.) */
+async function runCeremony({ ctx, echo, deps }) {
   if (deps.pinChallenge) {
     const pinOk = await deps.pinChallenge(ctx, { echo });
     if (!pinOk) return false;
-  }
-  if (tier === SEVERITY.CATASTROPHIC && deps.confirmChallenge) {
-    const confirmOk = await deps.confirmChallenge(ctx, echo);
-    if (!confirmOk) return false;
   }
   return true;
 }

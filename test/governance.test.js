@@ -20,19 +20,18 @@ const GOV = {
 };
 
 describe('buildGateConfig — governance.json → bareguard config mapping', () => {
-  it('maps commands.allowlist to bash.allow', () => {
+  it('bash.allow = allowlist ∪ denylist (denylist = permitted-after-ceremony, must pass the floor)', () => {
+    // M9 increment 3: the denylist is SEVERITY classification, not permission.
+    // Its commands must pass the Axis-A floor to *reach* the core's ceremony, so
+    // they're admitted to bash.allow alongside the benign allowlist. A command in
+    // neither list stays unpermitted (floor denies it).
     const cfg = buildGateConfig({ governance: GOV });
-    assert.deepStrictEqual(cfg.bash.allow, ['ls', 'pwd', 'cat', 'grep', 'git']);
+    assert.deepStrictEqual(cfg.bash.allow, ['ls', 'pwd', 'cat', 'grep', 'git', 'rm', 'sudo', 'dd', 'shutdown']);
   });
 
-  it('denylist is NOT a hard deny — it is the destructive (PIN) tier, so no bash.denyPatterns', () => {
-    // Under the obedient command-governance model the denylist commands are
-    // PIN-gated in policy(), not hard-denied by bareguard. buildGateConfig only
-    // passes the allowlist through; the destructive/catastrophic tiers live in
-    // createGate's policy.
+  it('no bash.denyPatterns — severity (destructive/catastrophic) is classified+ceremonied in the M9 core, not denied here', () => {
     const cfg = buildGateConfig({ governance: GOV });
     assert.strictEqual(cfg.bash.denyPatterns, undefined);
-    assert.deepStrictEqual(cfg.bash.allow, ['ls', 'pwd', 'cat', 'grep', 'git']);
   });
 
   it('maps paths.allowed to fs.readScope and fs.writeScope', () => {
@@ -177,13 +176,20 @@ describe('createGate — end-to-end with fileless audit', () => {
     assert.strictEqual(verdict, true);
   });
 
-  it('destructive exec (rm a file) runs for owner when no PIN challenge is wired (PIN tier no-ops)', async () => {
-    // This bundle wires no pinChallenge, so the destructive PIN tier no-ops and
-    // the command is allowed (returns null) — destructive is PIN-GATED, not
-    // hard-denied, under the obedient model. (Deny-on-failed-PIN is covered in
-    // the command-governance tiers block below.)
-    const verdict = await bundle.policy('exec', { command: 'rm -rf /tmp/scratch' }, { isOwner: true, senderId: 'u1', chatId: 'c1' });
-    assert.strictEqual(verdict, null);
+  it('destructive exec PASSES the thin floor for the owner (allow ∪ denylist) — the ceremony is in the M9 core, not policy', async () => {
+    // M9 increment 3: policy is now just the Axis-A floor. A destructive command
+    // is admitted to bash.allow so it passes the floor (verdict true) and the
+    // core's classifier + PIN ceremony gate it on execute — NOT here. (The
+    // ceremony itself is covered by govern.test.js + the Loop-path tests.)
+    // NB: a non-recursive `rm <file>` — `rm -rf /…` is independently content-denied
+    // by bareguard's floor, which is intentional (see the catastrophic-wall tests).
+    const verdict = await bundle.policy('exec', { command: 'rm /home/testuser/Documents/old.txt' }, { isOwner: true, senderId: 'u1', chatId: 'c1' });
+    assert.strictEqual(verdict, true);
+  });
+
+  it('an UNKNOWN command (neither list) is still floor-denied for the owner', async () => {
+    const verdict = await bundle.policy('exec', { command: 'make all' }, { isOwner: true, senderId: 'u1', chatId: 'c1' });
+    assert.match(verdict, /\[deny:/);
   });
 
   it('policy denies exec for non-owner regardless of command', async () => {
@@ -311,11 +317,15 @@ describe('createGate — budget halt via humanChannel', () => {
   });
 });
 
-describe('createGate — command-governance tiers (benign / destructive→PIN / catastrophic→PIN+CONFIRM)', () => {
+describe('createGate — thin Axis-A floor (M9 increment 3: the severity ceremony moved to the core)', () => {
+  // policy() is now just the deterministic floor the bare-agent Loop calls before
+  // a tool: owner-bypass + wireGate.policy (allowlist/fs.deny/secrets/budget/rounds).
+  // The destructive/catastrophic PIN(+CONFIRM) ceremony NO LONGER lives here — it's
+  // in runGovernedAction (covered by govern.test.js + the Loop-path tests in
+  // handlers.test.js). createGate no longer consumes pin/confirm challenges, so a
+  // ceremony-bearing command just PASSES the floor (it's admitted to bash.allow via
+  // allowlist ∪ denylist) and the core gates it on execute.
   let bundle;
-  let pinReturn, confirmReturn;
-  const pinCalls = [];
-  const confirmCalls = [];
   const ctx = { isOwner: true, senderId: 'u1', chatId: 'c1', platform: 'telegram' };
 
   before(async () => {
@@ -324,61 +334,46 @@ describe('createGate — command-governance tiers (benign / destructive→PIN / 
       governance: GOV, // denylist: rm, sudo, dd, shutdown
       fileless: true,
       humanPrompt: async () => ({ decision: 'deny' }),
-      pinChallenge: async (c) => { pinCalls.push(c); return pinReturn; },
-      confirmChallenge: async (c, cmd) => { confirmCalls.push(cmd); return confirmReturn; },
     });
   });
 
-  it('benign exec (ls) runs with NO PIN', async () => {
-    pinCalls.length = 0; confirmCalls.length = 0;
-    const verdict = await bundle.policy('exec', { command: 'ls -la' }, ctx);
-    assert.strictEqual(verdict, true);
-    assert.strictEqual(pinCalls.length, 0, 'benign command must not prompt for a PIN');
+  it('benign exec (ls) passes the floor', async () => {
+    assert.strictEqual(await bundle.policy('exec', { command: 'ls -la' }, ctx), true);
   });
 
-  it('reads are benign — no PIN (full scope)', async () => {
-    pinCalls.length = 0;
-    const verdict = await bundle.policy('read_file', { path: '/home/testuser/Documents/notes.txt' }, ctx);
-    assert.strictEqual(pinCalls.length, 0, 'read_file is no longer PIN-gated');
-    assert.strictEqual(verdict, true, 'an in-scope read is allowed');
+  it('an in-scope read passes the floor', async () => {
+    assert.strictEqual(await bundle.policy('read_file', { path: '/home/testuser/Documents/notes.txt' }, ctx), true);
   });
 
-  it('destructive exec (rm a file) → PIN; passes → allowed', async () => {
-    pinCalls.length = 0; pinReturn = true;
-    const verdict = await bundle.policy('exec', { command: 'rm /home/testuser/Documents/old.txt' }, ctx);
-    assert.strictEqual(pinCalls.length, 1, 'destructive command prompts for a PIN');
-    assert.strictEqual(verdict, null, 'correct PIN → command allowed');
+  it('a destructive command PASSES the floor (reaches the core ceremony) — not gated here', async () => {
+    assert.strictEqual(await bundle.policy('exec', { command: 'rm /home/testuser/Documents/old.txt' }, ctx), true);
+    assert.strictEqual(await bundle.policy('exec', { command: 'sudo systemctl restart x' }, ctx), true);
   });
 
-  it('destructive exec with a failed PIN is cancelled (no CONFIRM asked)', async () => {
-    pinCalls.length = 0; confirmCalls.length = 0; pinReturn = false;
-    const verdict = await bundle.policy('exec', { command: 'sudo systemctl restart x' }, ctx);
-    assert.match(verdict, /PIN required/);
-    assert.strictEqual(pinCalls.length, 1);
-    assert.strictEqual(confirmCalls.length, 0, 'destructive tier does not ask for CONFIRM');
+  it('catastrophic shapes that slip past bareguard pass the floor (the CORE walls them on execute)', async () => {
+    // The core hard-walls these (govern.test.js); the floor itself only sees them
+    // as in-allowlist commands. `dd`/`mkfs`/`rm -rf ~/*` don't match bareguard's
+    // built-in content rule, so they reach the core where the wall lives.
+    assert.strictEqual(await bundle.policy('exec', { command: 'dd if=/dev/zero of=/dev/sda' }, ctx), true);
+    assert.strictEqual(await bundle.policy('exec', { command: 'rm -rf ~/*' }, ctx), true);
   });
 
-  it('catastrophic exec (rm -rf /) → PIN + typed CONFIRM; both pass → allowed', async () => {
-    pinCalls.length = 0; confirmCalls.length = 0; pinReturn = true; confirmReturn = true;
-    const verdict = await bundle.policy('exec', { command: 'rm -rf /' }, ctx);
-    assert.strictEqual(pinCalls.length, 1, 'PIN asked');
-    assert.strictEqual(confirmCalls.length, 1, 'CONFIRM asked after PIN');
-    assert.strictEqual(verdict, null, 'PIN + CONFIRM → allowed');
+  it("bareguard's own floor independently HARD-DENIES `rm -rf /…` (complementary to the core wall)", async () => {
+    assert.match(await bundle.policy('exec', { command: 'rm -rf /' }, ctx), /\[deny:/);
+    assert.match(await bundle.policy('exec', { command: 'rm -rf /var/data' }, ctx), /\[deny:/);
   });
 
-  it('catastrophic exec cancels if CONFIRM is refused even after a correct PIN', async () => {
-    pinCalls.length = 0; confirmCalls.length = 0; pinReturn = true; confirmReturn = false;
-    const verdict = await bundle.policy('exec', { command: 'dd if=/dev/zero of=/dev/sda' }, ctx);
-    assert.strictEqual(pinCalls.length, 1);
-    assert.strictEqual(confirmCalls.length, 1);
-    assert.match(verdict, /Confirmation required/);
+  it('an unknown command (neither list) is floor-denied', async () => {
+    assert.match(await bundle.policy('exec', { command: 'make all' }, ctx), /\[deny:/);
   });
 
-  it('non-owner is denied by ownerCheck before any PIN/CONFIRM', async () => {
-    pinCalls.length = 0; confirmCalls.length = 0; pinReturn = true;
+  it('a read of a denied path is floor-denied', async () => {
+    assert.match(await bundle.policy('read_file', { path: '/etc/passwd' }, ctx), /\[deny:/);
+  });
+
+  it('non-owner is denied by ownerCheck (no shell tool reaches the floor)', async () => {
     const verdict = await bundle.policy('exec', { command: 'ls' }, { isOwner: false, senderId: 'cust', chatId: 'c2', platform: 'beeper' });
     assert.match(verdict, /owner privileges/);
-    assert.strictEqual(pinCalls.length, 0, 'PIN must not run for non-owners');
   });
 });
 

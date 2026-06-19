@@ -319,7 +319,7 @@ The **owner** (super-admin, set at setup) can do everything below. A **limited a
 
 | Command | Who | Description |
 |---------|-----|-------------|
-| `/exec <command>` | Owner | Run a shell command on your machine — benign runs free, destructive needs the PIN, catastrophic needs PIN + typed CONFIRM |
+| `/exec <command>` | Owner | Run a shell command on your machine — benign runs free, destructive needs the PIN, catastrophic (e.g. `rm -rf /`, `dd`, `mkfs`) is hard-blocked |
 | `/read <path>` | Owner | Read a file or list a directory (benign — no PIN) |
 | `/index <path> <public\|admin>` | Admin | Index a document or directory |
 | `/pin` | Owner | Change or set your PIN |
@@ -595,8 +595,8 @@ Restart after editing config: `multis restart`
 
 The PIN guards **destructive actions** by *what they do*, not by which command name you typed. An action is classified when it runs:
 - **Benign** — reads (`/read`), `/index`, `/remember`, `/status`, non-`off` mode changes, and benign shell (e.g. `ls`, `cat`) — run free.
-- **Destructive** — a destructive shell command (`rm`, `mv`, `chmod`…), clearing a chat's memory (`/forget`), or turning a chat **off** (`/mode … off`) — require the **PIN**.
-- **Catastrophic** — machine-wreckers (`rm -rf` of a root-ish target, `dd` to a device, `mkfs`, shutdown…) — require the **PIN + a typed CONFIRM**.
+- **Destructive** — a destructive shell command (`rm <file>`, `rm -rf ./build`, `sudo`, `chmod`…), clearing a chat's memory (`/forget`), or turning a chat **off** (`/mode … off`) — require the **PIN**.
+- **Catastrophic** — machine-wreckers (`rm -rf` of a root/home target, `dd` to a device, `mkfs`, fork bomb, `shutdown`) — are **hard-blocked**. They never run through the bot, with no PIN override; do those in a real terminal. (There's no legitimate reason to automate them, and it removes a footgun if the assistant is ever fed a malicious instruction.)
 
 When an action needs it, the bot asks for your PIN. After entering the correct PIN, your session is active for 24 hours (configurable).
 
