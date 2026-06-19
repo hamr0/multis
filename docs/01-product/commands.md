@@ -14,9 +14,8 @@ Commands are sent via chat with a `/` prefix on every platform (Telegram and Bee
 | `/status` | Bot info (version, role, provider) |
 | `/memory` | Show conversation memory for this chat |
 | `/remember <note>` | Save a note to memory |
-| `/forget` | Clear conversation memory |
+| `/forget` | Clear conversation memory (PIN protected — it's destructive) |
 | `/skills` | List available skills |
-| `/unpair` | Remove pairing |
 | `/help` | Show commands, grouped by intent (Ask / Remember / Schedule / Run / Manage) and filtered to your role; `/help <command>` for one command's details |
 
 Plain text messages are treated as implicit `/ask`.
@@ -27,12 +26,12 @@ The **owner** (super-admin, set at setup) can run everything below. A **limited 
 
 | Command | Who | Description |
 |---------|-----|-------------|
-| `/exec <cmd>` | Owner | Run a shell command (PIN protected) |
-| `/read <path>` | Owner | Read a file or directory (PIN protected) |
-| `/index <path> <kb\|admin>` | Admin | Index a document with scope (PIN protected) |
+| `/exec <cmd>` | Owner | Run a shell command — ceremony by severity: benign runs free, destructive → PIN, catastrophic → PIN + typed CONFIRM |
+| `/read <path>` | Owner | Read a file or directory (benign — owner-floor, no PIN) |
+| `/index <path> <kb\|admin>` | Admin | Index a document with scope (benign — owner-floor, no PIN) |
 | `/pin` | Owner | Change or set PIN |
 | `/admin` | Owner | Designate / list / remove limited admins (`/admin`, `/admin list`, `/admin remove <n>`) |
-| `/mode <personal\|business\|silent> [agent]` | Admin | Set chat mode, optionally assign agent (PIN protected). `/mode business` (no target) opens business persona menu |
+| `/mode <personal\|business\|silent\|off> [agent]` | Admin | Set chat mode, optionally assign agent. Turning a chat **off** requires the PIN; other modes run free. `/mode business` (no target) opens the business persona menu |
 | `/agent [name]` | Owner | Show current agent (no args) or assign agent to this chat |
 | `/agents` | Owner | List all configured agents |
 | `/start <code>` | — | Pair with the bot using pairing code |

@@ -92,7 +92,6 @@ test('INVARIANT: a destructive/catastrophic effective tier ALWAYS requires cerem
   assert.ok(requiresCeremony(classifyEffectiveSeverity(sh, { command: 'rm x' }, DENYLIST)));
   assert.ok(requiresCeremony(classifyEffectiveSeverity(getCapability('set_mode'), { mode: 'off' })));
   assert.ok(requiresCeremony(classifyEffectiveSeverity(getCapability('forget'), { target: 'x' })));
-  assert.ok(requiresCeremony(classifyEffectiveSeverity(getCapability('unpair'), {})));
   // and a benign action does NOT (no false ceremony on every action)
   assert.ok(!requiresCeremony(classifyEffectiveSeverity(getCapability('status'), {})));
   assert.ok(!requiresCeremony(classifyEffectiveSeverity(sh, { command: 'cat readme' }, DENYLIST)));

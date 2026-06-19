@@ -4,6 +4,19 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+### Changed — M9 intent-first dispatch: one governed core (increments 1 & 2)
+
+Host and app actions now resolve to a **declared capability** (a capability registry where each entry declares `args + scope + severity`) and run through a single `runGovernedAction` core — the only place auth, ceremony, and audit happen. The flow is: owner-floor → schema arg-validation → Axis-A floor (bareguard's deterministic boundary) → severity classify → ceremony (benign runs free · destructive → PIN · catastrophic → PIN+CONFIRM, with verbatim-arg echo) → execute → record plain-language intent.
+
+- **Increment 1 — slash door.** `/exec`→`run_shell`, `/read`→`read_file`, `/index`→`index` flow through the core. **Removed** the router-level `PIN_PROTECTED` double-path, the orphaned `pin_command` resume case, the dead `enforceGate`, and the unused `execCommand`/`readFile` imports. **Fixes the dead-3-tier bug:** the core returns an explicit `{ok:true}` allow signal instead of the old `null` (which `bare-agent`'s Loop read as DENY — so a destructive command was denied even after a correct PIN). The Axis-A floor runs *inside* the core (single-sourced for both doors), mutation-proven load-bearing (a bypass would have leaked `/etc/passwd` / run `rm`).
+- **Increment 2 — app-verb door.** `/forget` now requires the **PIN** before wiping a chat's memory; `/mode … off` (per-chat) requires the PIN before turning a chat off — both via one `commitMode` helper that funnels every mode-commit site (including the interactive picker-resume) through the core. `/remember` and `/memory` run through the core too (benign, audited). The picker clears its pending *before* the ceremony so a PIN reply routes to the gate waiter, not back into the picker.
+
+### Removed — `/unpair`
+
+`/unpair` is gone. Removing a limited admin is already `/admin remove` (owner-only, and structurally cannot touch the owner); the only account in the paired list is the owner's, so a self-unpair would risk orphaning the bot with no owner left. Full teardown remains a CLI action (`multis stop` → `rm -rf ~/.multis`).
+
+> Note: global `/mode off` (no target) was found to be a dead setting — `getChatMode` maps `bot_mode:'off'`→`'business'`, so it never produces a global-off. Left un-gated (it does nothing) and flagged as a latent pre-existing bug.
+
 ## [0.17.0] - 2026-06-19
 
 Baresuite migration milestone — M-B (beeperbox MCP swap) + M3 (litectx 0.18.0 doc index) + security overhaul + init rewrite. Merged behind a reduced `/security` + `/diff-review` gate; full LIVE‡ pass follows M9.

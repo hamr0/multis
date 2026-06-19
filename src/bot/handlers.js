@@ -446,16 +446,15 @@ function createMessageRouter(config, deps = {}) {
                   await platform.send(msg.chatId, 'Personal/note-to-self chats cannot be set to silent or off.');
                   return;
                 }
-                setChatMode(config, chat.id, m.mode);
-                if (m.agent) {
-                  if (!config.chat_agents) config.chat_agents = {};
-                  config.chat_agents[chat.id] = m.agent;
-                  saveConfig(config);
-                }
+                // Clear the picker BEFORE the ceremony: an `off` set makes
+                // commitMode open a PIN gate_reply waiter, and the PIN reply must
+                // route there — not fall back into this still-open mode picker.
                 pending.clear(msg.chatId, msg.senderId);
-                const agentNote = m.agent ? `, agent: ${m.agent}` : '';
-                await platform.send(msg.chatId, `${chat.title || chat.id} set to: ${m.mode}${agentNote}`);
-                logAudit({ action: 'mode', user_id: msg.senderId, chatId: chat.id, mode: m.mode, agent: m.agent });
+                await commitMode(
+                  { chatId: chat.id, mode: m.mode, agent: m.agent, displayName: chat.title || chat.id },
+                  msg, platform, config,
+                  { gov, pending, platformRegistry, getMem },
+                );
               } else {
                 await platform.send(msg.chatId, `Invalid choice. Pick 1-${m.matches.length}.`);
               }
@@ -644,9 +643,6 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
       case 'status':
         await routeStatus(msg, platform, config);
         break;
-      case 'unpair':
-        await routeUnpair(msg, platform, config);
-        break;
       case 'exec':
         await routeExec(msg, platform, config, args, toolDeps);
         break;
@@ -669,16 +665,16 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
         await routeAsk(msg, platform, config, indexer, provider, args, getMem, memCfg, agentRegistry, toolDeps);
         break;
       case 'memory':
-        await routeMemory(msg, platform, config, getMem);
+        await routeMemory(msg, platform, config, getMem, toolDeps);
         break;
       case 'forget':
-        await routeForget(msg, platform, config, getMem);
+        await routeForget(msg, platform, config, getMem, toolDeps);
         break;
       case 'remember':
-        await routeRemember(msg, platform, config, getMem, args);
+        await routeRemember(msg, platform, config, getMem, args, toolDeps);
         break;
       case 'mode':
-        await routeMode(msg, platform, config, args, agentRegistry, toolDeps.platformRegistry, toolDeps.pending);
+        await routeMode(msg, platform, config, args, agentRegistry, { ...toolDeps, getMem });
         break;
       case 'admin':
         await routeAdmin(msg, platform, config, args, toolDeps.platformRegistry, toolDeps.pending);
@@ -824,15 +820,6 @@ async function routeStatus(msg, platform, config) {
   await platform.send(msg.chatId, info.join('\n'));
 }
 
-async function routeUnpair(msg, platform, config) {
-  const userId = msg.senderId;
-  config.allowed_users = config.allowed_users.filter(id => id !== userId);
-  saveConfig(config);
-
-  await platform.send(msg.chatId, 'Unpaired. Send /start <code> to pair again.');
-  logAudit({ action: 'unpair', user_id: userId, status: 'success' });
-}
-
 /**
  * Run a declared capability through the single M9 governed core
  * (runGovernedAction): floor → arg-validation → classify → ceremony → execute →
@@ -841,7 +828,7 @@ async function routeUnpair(msg, platform, config) {
  * parallel PIN path. Returns the core's tagged result for the caller to render.
  */
 async function dispatchCapability(capName, args, msg, config, toolDeps = {}) {
-  const { gov, indexer } = toolDeps;
+  const { gov, indexer, getMem } = toolDeps;
   const bundle = gov ? await gov.resolve() : {};
   const deps = buildGovernDeps({
     pinChallenge: bundle.pinChallenge,
@@ -849,6 +836,7 @@ async function dispatchCapability(capName, args, msg, config, toolDeps = {}) {
     floorPolicy: bundle.floorPolicy,
     denylist: bundle.denylist,
     indexer,
+    appExec: buildAppExec(config, getMem),
   });
   const ctx = {
     senderId: msg.senderId,
@@ -857,6 +845,24 @@ async function dispatchCapability(capName, args, msg, config, toolDeps = {}) {
     platform: msg.platform,
   };
   return runGovernedAction({ capability: capName, args, ctx, deps });
+}
+
+/**
+ * Execute bindings for the config/memory-coupled app-verbs, bound here where
+ * config + setChatMode + getMem are in scope (deps.js stays a pure binder, no
+ * circular import). The core has already applied the floor + ceremony before
+ * any of these run. The getMem-backed verbs are only reachable from routes that
+ * pass getMem in toolDeps (forget/remember/memory), so the closures are safe.
+ */
+function buildAppExec(config, getMem) {
+  const mem = (ctx) => getMem(ctx.chatId, { isAdmin: ctx.isOwner });
+  return {
+    // set_mode commits the resolved (chatId, mode) — off ceremonies via the core.
+    set_mode: (args) => { setChatMode(config, args.target, args.mode); return { target: args.target, mode: args.mode }; },
+    forget:   (args, ctx) => { mem(ctx).clearMemory(); return { chatId: ctx.chatId }; },
+    remember: (args, ctx) => { mem(ctx).appendMemory(args.note); return { note: args.note }; },
+    memory:   (args, ctx) => ({ memory: mem(ctx).loadMemory() }),
+  };
 }
 
 /**
@@ -1230,37 +1236,63 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
   }
 }
 
-async function routeMemory(msg, platform, config, getMem) {
-  const mem = getMem(msg.chatId, { isAdmin: isOwner(msg.senderId, config, msg) });
-  const memory = mem.loadMemory();
-  if (!memory.trim()) {
-    await platform.send(msg.chatId, 'No memory notes for this chat yet.');
-    return;
-  }
-  await platform.send(msg.chatId, `Memory notes:\n\n${memory}`);
+// memory/remember/forget run through the one governed core (audited there).
+// forget is DESTRUCTIVE → the core requires the PIN ceremony before wiping memory
+// (when a PIN is configured); remember/memory are benign and run straight through.
+async function routeMemory(msg, platform, config, getMem, toolDeps = {}) {
+  const r = await dispatchCapability('memory', {}, msg, config, { ...toolDeps, getMem });
+  await sendCapabilityResult(r, platform, msg, {
+    format: (res) => (res.memory && res.memory.trim())
+      ? `Memory notes:\n\n${res.memory}`
+      : 'No memory notes for this chat yet.',
+  });
 }
 
-async function routeForget(msg, platform, config, getMem) {
-  const mem = getMem(msg.chatId, { isAdmin: isOwner(msg.senderId, config, msg) });
-  mem.clearMemory();
-  await platform.send(msg.chatId, 'Memory cleared for this chat.');
-  logAudit({ action: 'forget', user_id: msg.senderId, chatId: msg.chatId });
+async function routeForget(msg, platform, config, getMem, toolDeps = {}) {
+  const r = await dispatchCapability('forget', { target: 'everything' }, msg, config, { ...toolDeps, getMem });
+  await sendCapabilityResult(r, platform, msg, { format: () => 'Memory cleared for this chat.' });
 }
 
-async function routeRemember(msg, platform, config, getMem, note) {
-  if (!note) {
-    await platform.send(msg.chatId, 'Usage: /remember <note>');
-    return;
-  }
-  const mem = getMem(msg.chatId, { isAdmin: isOwner(msg.senderId, config, msg) });
-  mem.appendMemory(note);
-  await platform.send(msg.chatId, 'Noted.');
-  logAudit({ action: 'remember', user_id: msg.senderId, chatId: msg.chatId, note });
+async function routeRemember(msg, platform, config, getMem, note, toolDeps = {}) {
+  const r = await dispatchCapability('remember', { note: note || '' }, msg, config, { ...toolDeps, getMem });
+  await sendCapabilityResult(r, platform, msg, {
+    usage: 'Usage: /remember <note>',
+    format: () => 'Noted.',
+  });
 }
 
 const VALID_MODES = ['off', 'business', 'silent'];
 
-async function routeMode(msg, platform, config, args, agentRegistry, platformRegistry, pending) {
+/**
+ * Commit a resolved (chatId, mode) through the one governed core. set_mode is
+ * benign for business/silent/personal but DESTRUCTIVE for `off` (the core's
+ * destructiveWhen), so turning a chat off triggers the PIN ceremony here — the
+ * single place every mode-set path funnels through (the four routeMode sites and
+ * the picker-resume). On a declined ceremony / floor deny it renders that and
+ * returns false; on success it assigns any agent and prints the confirmation.
+ * The admin-gate, target resolution, and personal-chat block stay upstream as
+ * pre-guards (the core doesn't model them).
+ *
+ * @returns {Promise<boolean>} true if the mode was committed.
+ */
+async function commitMode({ chatId, mode, agent, displayName }, msg, platform, config, toolDeps = {}) {
+  const r = await dispatchCapability('set_mode', { target: chatId, mode }, msg, config, toolDeps);
+  if (r.kind !== RESULT.OK) {
+    await sendCapabilityResult(r, platform, msg);
+    return false;
+  }
+  if (agent) {
+    if (!config.chat_agents) config.chat_agents = {};
+    config.chat_agents[chatId] = agent;
+    saveConfig(config);
+  }
+  const agentNote = agent ? `, agent: ${agent}` : '';
+  await platform.send(msg.chatId, `${displayName || chatId} set to: ${mode}${agentNote}`);
+  return true;
+}
+
+async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = {}) {
+  const { platformRegistry, pending } = toolDeps;
   // Admin command (super-admin or a designated limited admin).
   if (!isAdmin(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Admin only command.');
@@ -1330,9 +1362,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
         await platform.send(msg.chatId, 'Personal/note-to-self chats cannot be set to silent or off.');
         return;
       }
-      setChatMode(config, chat.id, mode);
-      await platform.send(msg.chatId, `${chat.title || chat.id} set to: ${mode}`);
-      logAudit({ action: 'mode', user_id: msg.senderId, chatId: chat.id, mode, target });
+      await commitMode({ chatId: chat.id, mode, displayName: chat.title || chat.id }, msg, platform, config, toolDeps);
       return;
     }
 
@@ -1396,14 +1426,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
     target = parts.slice(1).join(' ');
   }
 
-  // Helper: assign agent to the resolved target chat (not the command source)
-  function assignAgent(chatId) {
-    if (agentArg) {
-      if (!config.chat_agents) config.chat_agents = {};
-      config.chat_agents[chatId] = agentArg;
-      saveConfig(config);
-    }
-  }
+  // (Agent assignment to the resolved target now happens inside commitMode.)
 
   // Beeper: if target specified, search for chat by name/number
   if (target) {
@@ -1429,11 +1452,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
       await platform.send(msg.chatId, 'Personal/note-to-self chats cannot be set to silent or off.');
       return;
     }
-    setChatMode(config, chat.id, mode);
-    assignAgent(chat.id);
-    const agentNote = agentArg ? `, agent: ${agentArg}` : '';
-    await platform.send(msg.chatId, `${chat.title || chat.id} set to: ${mode}${agentNote}`);
-    logAudit({ action: 'mode', user_id: msg.senderId, chatId: chat.id, mode, target, agent: agentArg });
+    await commitMode({ chatId: chat.id, mode, agent: agentArg, displayName: chat.title || chat.id }, msg, platform, config, toolDeps);
     return;
   }
 
@@ -1467,11 +1486,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
   }
 
   // Beeper: no target, not self-chat — set current chat
-  setChatMode(config, msg.chatId, mode);
-  assignAgent(msg.chatId);
-  const agentNote = agentArg ? `, agent: ${agentArg}` : '';
-  await platform.send(msg.chatId, `Chat mode set to: ${mode}${agentNote}`);
-  logAudit({ action: 'mode', user_id: msg.senderId, chatId: msg.chatId, mode, agent: agentArg });
+  await commitMode({ chatId: msg.chatId, mode, agent: agentArg, displayName: 'Chat mode' }, msg, platform, config, toolDeps);
 }
 
 /**
@@ -2255,7 +2270,6 @@ const HELP_COMMANDS = [
   { name: 'admin',    group: 'MANAGE',   role: 'owner', usage: '/admin [list|remove <n>]',        summary: 'designate / list / remove limited admins' },
   { name: 'pin',      group: 'MANAGE',   role: 'owner', usage: '/pin',                            summary: 'set or change your PIN' },
   { name: 'status',   group: 'MANAGE',   role: 'all',   usage: '/status',                         summary: 'bot info & status' },
-  { name: 'unpair',   group: 'MANAGE',   role: 'all',   usage: '/unpair',                         summary: 'remove pairing' },
   { name: 'help',     group: 'MANAGE',   role: 'all',   usage: '/help [command]',                 summary: 'this menu — add a command for details' },
 ];
 

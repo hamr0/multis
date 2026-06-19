@@ -264,6 +264,99 @@ describe('PIN auth — governed-core ceremony (M9 slash door)', () => {
   });
 });
 
+// M9 increment 2: the APP-VERB door. The destructive app-verbs (/forget,
+// set_mode→off) now resolve to a declared capability and run through the SAME
+// governed core (runGovernedAction) as the slash host-tools, so they ceremony
+// (PIN) before the data-losing write; benign verbs (/remember, set_mode→silent)
+// run straight through. set_mode funnels every commit site through one commitMode
+// helper, including the interactive picker-resume — proven here end-to-end.
+describe('App-verb door — governed-core ceremony (M9 increment 2)', () => {
+  const flush = () => new Promise((r) => setImmediate(r));
+  async function waitFor(pred, label = 'condition', tries = 500) {
+    for (let i = 0; i < tries; i++) {
+      if (pred()) return;
+      await flush();
+    }
+    throw new Error(`waitFor timed out: ${label}`);
+  }
+  // A PIN is configured + the session is stale, so a destructive verb must prompt.
+  function buildPin() {
+    const env = createTestEnv({
+      allowed_users: ['user1'], owner_id: 'user1',
+      security: { pin_hash: hashPin('1234'), pin_timeout_hours: 24, checkpoint_tools: [] },
+    });
+    const platform = mockPlatform();
+    const pinManager = new PinManager(env.config);
+    pinManager.sessions = {};
+    const pending = new PendingRegistry();
+    const router = createMessageRouter(env.config, {
+      llm: mockLLM(), indexer: stubIndexer(), pinManager, pending,
+      fileless: true,
+      governanceFile: { commands: { allowlist: ['.*'], denylist: [] }, paths: { allowed: ['.*'], denied: [] } },
+      memoryBaseDir: env.memoryBaseDir,
+    });
+    router.registerPlatform('telegram', platform);
+    router.registerPlatform('beeper', platform);
+    return { env, platform, router, pending };
+  }
+
+  it('a destructive /forget prompts for the PIN, then clears memory after the correct PIN', async () => {
+    const { platform, router } = buildPin();
+    await router(msg('/remember keep-this-note'), platform); // benign seed, no PIN
+    const forgetP = router(msg('/forget'), platform);
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
+    await router(msg('1234'), platform);
+    await forgetP;
+    assert.ok(platform.sent.some((s) => /Memory cleared/i.test(s.text)), 'memory cleared after PIN');
+    await router(msg('/memory'), platform);
+    assert.match(platform.lastTo('chat1').text, /No memory notes/, 'memory is empty after the cleared forget');
+  });
+
+  it('a wrong PIN on /forget cancels — memory is NOT cleared', async () => {
+    const { platform, router } = buildPin();
+    await router(msg('/remember keep-this-note'), platform);
+    const forgetP = router(msg('/forget'), platform);
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
+    await router(msg('9999'), platform); // wrong
+    await forgetP;
+    assert.ok(platform.sent.some((s) => /cancelled/i.test(s.text)), 'declined ceremony cancels');
+    await router(msg('/memory'), platform);
+    assert.match(platform.lastTo('chat1').text, /keep-this-note/, 'memory survived the declined forget');
+  });
+
+  it('a benign /remember runs free even when a PIN is configured', async () => {
+    const { platform, router } = buildPin();
+    await router(msg('/remember hello-note'), platform);
+    assert.ok(!platform.sent.some((s) => /PIN/i.test(s.text)), 'no ceremony for a benign write');
+    assert.ok(platform.sent.some((s) => /Noted/i.test(s.text)), 'note saved');
+  });
+
+  it('selecting OFF in the mode picker requires the PIN before the chat is set off', async () => {
+    const { env, platform, router, pending } = buildPin();
+    pending.set('chat1', 'user1', 'mode', {
+      data: { mode: 'off', matches: [{ id: 'cust-x', title: 'Customer X' }], agent: null },
+      ttlMs: 60_000, expireMsg: 'Mode selection expired — re-run /mode.',
+    });
+    const selP = router(msg('1'), platform); // pick #1 from the open picker
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
+    assert.notStrictEqual(env.config.chats?.['cust-x']?.mode, 'off', 'not set off before the PIN clears');
+    await router(msg('1234'), platform);
+    await selP;
+    assert.strictEqual(env.config.chats?.['cust-x']?.mode, 'off', 'chat set off after the PIN');
+  });
+
+  it('selecting SILENT in the mode picker sets it straight through (no PIN)', async () => {
+    const { env, platform, router, pending } = buildPin();
+    pending.set('chat1', 'user1', 'mode', {
+      data: { mode: 'silent', matches: [{ id: 'cust-y', title: 'Customer Y' }], agent: null },
+      ttlMs: 60_000, expireMsg: 'Mode selection expired — re-run /mode.',
+    });
+    await router(msg('1'), platform);
+    assert.ok(!platform.sent.some((s) => /PIN/i.test(s.text)), 'no ceremony for a benign mode');
+    assert.strictEqual(env.config.chats?.['cust-y']?.mode, 'silent', 'chat set silent immediately');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Business escalation
 // ---------------------------------------------------------------------------
@@ -645,22 +738,6 @@ describe('Info commands', () => {
 
     await router(msg('/skills'), platform);
     assert.match(platform.sent[0].text, /Available skills/);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// /unpair
-// ---------------------------------------------------------------------------
-
-describe('Unpair', () => {
-  it('/unpair removes user from allowed list', async () => {
-    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
-    const platform = mockPlatform();
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
-
-    await router(msg('/unpair'), platform);
-    assert.strictEqual(env.config.allowed_users.includes('user1'), false);
-    assert.match(platform.sent[0].text, /Unpaired/);
   });
 });
 

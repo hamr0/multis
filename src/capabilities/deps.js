@@ -8,8 +8,12 @@
  *
  * `execute` is the one place a declared capability actually runs:
  *   - host capability  → its own tool.execute (reuses src/tools/definitions.js)
- *   - app  capability  → bound here (only the verbs that need a host-reaching
- *                        execute are wired in increment 1: `index`).
+ *   - app  capability  → `index` is bound here (needs only the injected indexer);
+ *                        the config/memory-coupled verbs (set_mode, forget,
+ *                        remember, memory) are passed in as a pre-bound `appExec`
+ *                        map by the caller, where config/getMem are in scope. That
+ *                        keeps this module a pure binder — no import of handlers.js
+ *                        (which owns setChatMode) — so there's no circular require.
  */
 
 const { logAudit } = require('../governance/audit');
@@ -22,14 +26,17 @@ const { logAudit } = require('../governance/audit');
  * @param {Function} [p.floorPolicy]       bareguard Axis-A policy: async (toolName, args, ctx) => true|denyString
  * @param {string[]} [p.denylist]          command denylist (shell severity classifier)
  * @param {Object}   [p.indexer]           litectx policy wrapper (for the `index` verb)
+ * @param {Object}   [p.appExec]           name → (args, ctx) => result, for the
+ *                                          config/memory-coupled app-verbs
+ *                                          (set_mode, forget, remember, memory)
  */
-function buildGovernDeps({ pinChallenge, confirmChallenge, floorPolicy, denylist = [], indexer } = {}) {
+function buildGovernDeps({ pinChallenge, confirmChallenge, floorPolicy, denylist = [], indexer, appExec } = {}) {
   return {
     pinChallenge,
     confirmChallenge,
     denylist,
     floor: makeFloor({ floorPolicy }),
-    execute: makeExecute({ indexer }),
+    execute: makeExecute({ indexer, appExec }),
     audit: async (intentLine, meta = {}) => {
       logAudit({
         action: 'govern',
@@ -61,12 +68,17 @@ function makeFloor({ floorPolicy } = {}) {
 }
 
 /** The single execution dispatcher: capability descriptor + concrete args → result. */
-function makeExecute({ indexer } = {}) {
+function makeExecute({ indexer, appExec = {} } = {}) {
   return async function execute(cap, args, ctx) {
     // Host capabilities carry their source tool definition — reuse its execute
     // verbatim (governance now lives in the core wrapping this call, not the tool).
     if (cap.kind === 'host') {
       return cap.tool.execute(args, ctx);
+    }
+    // Config/memory-coupled app-verbs are pre-bound by the caller (set_mode,
+    // forget, remember, memory) — runs after the core's floor/ceremony.
+    if (appExec[cap.name]) {
+      return appExec[cap.name](args, ctx);
     }
     // App-verbs whose execution reaches the host are bound explicitly.
     switch (cap.name) {

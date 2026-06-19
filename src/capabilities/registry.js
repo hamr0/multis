@@ -141,8 +141,10 @@ const APP_VERBS = [
   { name: 'cancel',  scope: 'app.schedule', severity: SEVERITY.BENIGN, ownerOnly: false,
     args: schema({ id: str('The job id to cancel') }, ['id']) },
   { name: 'plan',    scope: 'app.read',   severity: SEVERITY.BENIGN, ownerOnly: false, args: null },
-  // unpair tears down the owner pairing → destructive.
-  { name: 'unpair',  scope: 'app.admin',  severity: SEVERITY.DESTRUCTIVE, ownerOnly: true, args: null },
+  // NOTE: no `unpair` verb. Removing a limited admin is /admin remove (owner-only,
+  // can't touch the owner); a paired account is only ever the owner's, so a
+  // self-unpair would risk orphaning the bot (no owner left). Full teardown is a
+  // CLI action (`multis stop` → rm -rf ~/.multis), not a chat command.
 ].map((v) => ({ ...v, kind: 'app' }));
 
 // ---- tiny JSON-schema helpers (keep the declarations readable) ----

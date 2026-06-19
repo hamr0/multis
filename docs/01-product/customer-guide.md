@@ -170,7 +170,7 @@ The wizard verifies connectivity by sending a test message before proceeding.
 
 ### Step 4: Set a PIN
 
-Optionally set a 4-6 digit PIN to protect sensitive commands (`/exec`, `/read`, `/index`). The PIN is hashed and stored locally. You can skip this and set one later with `/pin`.
+Optionally set a 4-6 digit PIN. It guards **destructive actions** before they run — a destructive shell command (`/exec rm …`), clearing a chat's memory (`/forget`), or turning a chat **off** (`/mode … off`). Benign actions (reads, `/index`, `/remember`, other mode changes) run without it. The PIN is hashed and stored locally. You can skip this and set one later with `/pin`.
 
 After completing the wizard, you'll see a summary:
 
@@ -308,7 +308,6 @@ Set this up with `multis init` option 3 (Business chatbot).
 | `/remember <note>` | Save a note to this chat's memory |
 | `/forget` | Clear all memory for this chat |
 | `/skills` | List available skills |
-| `/unpair` | Remove your pairing (you'll need the code to pair again) |
 | `/help` | Show available commands — grouped by intent (Ask / Remember / Schedule / Run / Manage) and filtered to your role; send `/help <command>` (e.g. `/help mode`) for one command's details |
 | *(plain text)* | Drives the full tool-using agent (`/ask`): searches your documents and, on your machine, will find/read files and run things directly rather than telling you to do it yourself |
 
@@ -320,12 +319,12 @@ The **owner** (super-admin, set at setup) can do everything below. A **limited a
 
 | Command | Who | Description |
 |---------|-----|-------------|
-| `/exec <command>` | Owner | Run a shell command on your machine (PIN required) |
-| `/read <path>` | Owner | Read a file or list a directory (PIN required) |
+| `/exec <command>` | Owner | Run a shell command on your machine — benign runs free, destructive needs the PIN, catastrophic needs PIN + typed CONFIRM |
+| `/read <path>` | Owner | Read a file or list a directory (benign — no PIN) |
 | `/index <path> <public\|admin>` | Admin | Index a document or directory |
 | `/pin` | Owner | Change or set your PIN |
 | `/admin` | Owner | Designate / list / remove limited admins (`/admin`, `/admin list`, `/admin remove <n>`) |
-| `/mode [mode] [target]` | Admin | View or set chat modes (business/silent/off) |
+| `/mode [mode] [target]` | Admin | View or set chat modes (business/silent/off). Turning a chat **off** needs the PIN |
 | `/agent [name]` | Owner | View or assign an agent to this chat |
 | `/agents` | Owner | List all configured agents |
 | `/remind <duration> <action>` | Owner | Set a one-shot reminder (e.g. `/remind 30m call dentist`) |
@@ -592,16 +591,16 @@ Restart after editing config: `multis restart`
 
 ## 14. PIN and Security
 
-### PIN-Protected Commands
+### PIN-Protected Actions
 
-These privileged capabilities require PIN authentication:
-- `/exec` — run shell commands
-- `/read` — read files
-- `/index` — index documents
+The PIN guards **destructive actions** by *what they do*, not by which command name you typed. An action is classified when it runs:
+- **Benign** — reads (`/read`), `/index`, `/remember`, `/status`, non-`off` mode changes, and benign shell (e.g. `ls`, `cat`) — run free.
+- **Destructive** — a destructive shell command (`rm`, `mv`, `chmod`…), clearing a chat's memory (`/forget`), or turning a chat **off** (`/mode … off`) — require the **PIN**.
+- **Catastrophic** — machine-wreckers (`rm -rf` of a root-ish target, `dd` to a device, `mkfs`, shutdown…) — require the **PIN + a typed CONFIRM**.
 
-When you use one, the bot asks for your PIN. After entering the correct PIN, your session is active for 24 hours (configurable).
+When an action needs it, the bot asks for your PIN. After entering the correct PIN, your session is active for 24 hours (configurable).
 
-**The PIN also guards the natural-language path.** If you ask in plain language ("delete the logs in ~/tmp") and the assistant goes to run a shell command or read a file while your PIN session is stale, it prompts `🔒 That action needs your PIN. Reply with your PIN:` and continues the same action once you reply. So rephrasing a command as a sentence can't sidestep the PIN. (`pin_prompt_timeout` in config bounds how long it waits.)
+**This applies to the natural-language path too.** If you ask in plain language ("delete the logs in ~/tmp") and the assistant resolves it to a destructive action while your PIN session is stale, it prompts `🔒 That action needs your PIN.` — echoing the **exact resolved command** — and continues the same action once you reply. So rephrasing a command as a sentence can't sidestep the PIN, and you approve what will *actually* run. (`pin_prompt_timeout` in config bounds how long it waits.)
 
 ### Changing Your PIN
 
@@ -959,7 +958,7 @@ From then on, messages from that chat are treated as a command channel: that per
 | | Super-admin (owner) | Limited admin |
 |---|---|---|
 | `/mode`, `/index`, `/ask`, monitoring | ✅ | ✅ |
-| `/exec`, `/read` (host shell) | ✅ (PIN) | ❌ |
+| `/exec` (PIN if destructive), `/read` (host shell) | ✅ | ❌ |
 | `/admin`, `/pin` | ✅ | ❌ |
 
 All admins share the **one** PIN (the super-admin's), set at setup or with `/pin`.
