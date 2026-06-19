@@ -92,10 +92,11 @@ const mapDocHit = (h) => ({ name: h.path, content: h.body || '', chunkId: h.path
 const mapMemHit = (h) => ({ name: h.path, content: h.body || '', createdAt: h.meta?.createdAt || null, score: h.score });
 
 /**
- * A scope-bound context handle over litectx's `scoped()` view. Scope is fixed once,
- * so no operation can be reached without it: `search` recalls `scope ∪ GLOBAL`,
- * `indexBuffer`/`rememberMemory` write to exactly the bound scope, `get` is fenced
- * to it. Use `forScope('kb')`/`forScope('public')` for the shared KB (GLOBAL).
+ * A scope-bound context handle over litectx's `scoped()` view (module-internal —
+ * the public API is the per-call delegators below, which each obtain one of these).
+ * Scope is fixed once, so no operation can be reached without it: `search` recalls
+ * `scope ∪ GLOBAL`, `indexBuffer`/`rememberMemory` write to exactly the bound scope,
+ * `get` is fenced to it. `'kb'`/`'public'` bind the shared KB (GLOBAL).
  * @param {string} scope  'admin' | 'user:<chatId>' | 'public' | 'kb'
  */
 function forScope(scope) {
@@ -181,6 +182,6 @@ function stats() {
 function raw() { return ctx(); }
 
 module.exports = {
-  init, setBounds, raw, forScope,
+  init, setBounds, raw,
   indexFile, indexBuffer, rememberMemory, search, searchMemory, get, purge, stats,
 };
