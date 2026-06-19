@@ -6,7 +6,7 @@ const path = require('path');
 const readline = require('readline');
 const crypto = require('crypto');
 
-const { PATHS, getMultisDir } = require('../src/config');
+const { PATHS, getMultisDir, saveConfig } = require('../src/config');
 const MULTIS_DIR = getMultisDir();
 const PID_PATH = PATHS.pid();
 const CONFIG_PATH = PATHS.config();
@@ -133,10 +133,12 @@ async function runInit() {
     fs.mkdirSync(MULTIS_DIR, { recursive: true });
   }
 
-  // Load existing or create fresh config
+  // Load existing or create fresh config. Track whether a *saved* config existed
+  // (vs. template defaults) so a true first run doesn't offer "Enter to keep".
+  const hadSavedConfig = fs.existsSync(CONFIG_PATH);
   let config = {};
   const templatePath = path.join(__dirname, '..', '.multis-template', 'config.json');
-  if (fs.existsSync(CONFIG_PATH)) {
+  if (hadSavedConfig) {
     config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
     const profile = config.bot_mode === 'business' ? 'Business chatbot' : 'Personal assistant';
     const plats = [
@@ -158,7 +160,7 @@ async function runInit() {
   let useBeeper = false;
 
   // Check if we have a valid existing setup to offer Enter-to-keep
-  const hasExistingSetup = config.bot_mode &&
+  const hasExistingSetup = hadSavedConfig && config.bot_mode &&
     (config.platforms?.telegram?.enabled || config.platforms?.beeper?.enabled);
 
   if (hasExistingSetup) {
@@ -171,46 +173,49 @@ async function runInit() {
     console.log('');
   }
 
-  console.log('  1) Personal assistant (Telegram)');
-  console.log('     ' + c.dim('Your private AI. Commands, docs, search.'));
-  console.log('');
-  console.log('  2) Personal assistant (Beeper) ' + c.dim('— recommended'));
-  console.log('     ' + c.dim('Same, plus all your messengers archived and searchable.'));
-  console.log('');
-  console.log('  3) Business chatbot (Beeper)');
-  console.log('     ' + c.dim('Auto-respond to customers across all channels.'));
+  console.log('  1) Personal assistant   ' + c.dim('— your private AI: commands, your docs, search'));
+  console.log('  2) Business chatbot      ' + c.dim('— auto-responds to customers, escalates to you'));
 
-  const step1Default = hasExistingSetup ? '' : '2';
-  const step1Hint = hasExistingSetup ? 'Enter to keep, or choose 1/2/3' : '1/2/3';
-  const setupChoice = (await ask(`\nChoose (${step1Hint}) [${step1Default || 'keep'}]: `)).trim() || step1Default;
+  const modeDefault = hasExistingSetup ? '' : '1';
+  const modeHint = hasExistingSetup ? 'Enter to keep current, or 1/2' : '1/2';
+  const modeChoice = (await ask(`\nChoose (${modeHint}) [${modeDefault || 'keep'}]: `)).trim() || modeDefault;
 
-  if (!setupChoice && hasExistingSetup) {
-    // Keep existing setup
+  if (!modeChoice && hasExistingSetup) {
+    // Keep existing setup entirely
     useTelegram = !!config.platforms?.telegram?.enabled;
     useBeeper = !!config.platforms?.beeper?.enabled;
     const profile = config.bot_mode === 'business' ? 'Business chatbot' : 'Personal assistant';
     const plats = [useTelegram && 'Telegram', useBeeper && 'Beeper'].filter(Boolean).join(' + ');
-    console.log(c.ok(`Keeping: ${plats}, ${config.bot_mode} mode`));
+    console.log(c.ok(`Keeping: ${profile} (${plats})`));
   } else {
-    switch (setupChoice || '2') {
-      case '1':
-        useTelegram = true;
-        config.bot_mode = 'personal';
-        break;
-      case '3': {
-        useBeeper = true;
-        config.bot_mode = 'business';
-        const addTg = (await ask('\nAlso use Telegram as a second admin channel? (y/n) [n]: ')).trim().toLowerCase();
-        if (addTg === 'y' || addTg === 'yes') useTelegram = true;
-        break;
-      }
-      default: // '2' or anything else
-        useBeeper = true;
-        config.bot_mode = 'personal';
-        break;
+    config.bot_mode = modeChoice === '2' ? 'business' : 'personal';
+
+    if (config.bot_mode === 'personal') {
+      // Branch: Telegram-only bot, or Telegram + Beeper (messenger reach)
+      console.log(`\n${c.bold('Personal')} — how do you want to run it?`);
+      console.log('  1) Your personal bot');
+      console.log('     ' + c.dim('Just a Telegram bot. Nothing else to install.'));
+      console.log('  2) Personal bot + messenger assistant');
+      console.log('     ' + c.dim('Telegram + Beeper — connects all your messengers:'));
+      console.log('     ' + c.dim('WhatsApp · Signal · Telegram · Messenger + 50 more.'));
+      console.log('     ' + c.dim('Command it from Telegram or your Beeper Note-to-self.'));
+      const pChoice = (await ask('\nChoose (1/2) [1]: ')).trim() || '1';
+      useTelegram = true;            // both personal paths include the Telegram bot
+      useBeeper = pChoice === '2';   // option 2 adds Beeper for messenger reach
+    } else {
+      // Business runs through Beeper — a Telegram bot can't see your real contacts,
+      // so reaching customers on their own channels requires the Beeper bridge.
+      console.log(`\n${c.bold('Business')} — runs through Beeper`);
+      console.log('  ' + c.dim('Reaches customers across every channel you\'ve bridged:'));
+      console.log('  ' + c.dim('WhatsApp · Signal · Telegram · Messenger + 50 more.'));
+      console.log('  ' + c.dim('You control it from your Beeper Note-to-self.'));
+      useBeeper = true;
+      const addTg = (await ask('\nAlso add Telegram as a backup admin channel? (y/n) [n]: ')).trim().toLowerCase();
+      if (addTg === 'y' || addTg === 'yes') useTelegram = true;
     }
+
     const platformNames = [useTelegram && 'Telegram', useBeeper && 'Beeper'].filter(Boolean).join(' + ');
-    console.log(c.ok(`${platformNames}, ${config.bot_mode} mode`));
+    console.log(c.ok(`${config.bot_mode} mode — ${platformNames}`));
   }
 
   if (!config.platforms) config.platforms = {};
@@ -337,7 +342,7 @@ async function runInit() {
     let skipBeeper = false;
 
     if (existingBeeperEnabled) {
-      const beeperUrl = config.platforms.beeper.url || 'localhost:23373';
+      const beeperUrl = config.platforms.beeper.mcp_url || config.platforms.beeper.url || 'localhost:23375';
       console.log(`  Beeper: configured (${beeperUrl}) ${c.green('✓')}`);
       const beeperInput = (await ask('  [Enter to keep, or type "r" to reconfigure]: ')).trim().toLowerCase();
       if (!beeperInput) {
@@ -350,81 +355,88 @@ async function runInit() {
     if (!skipBeeper) try {
       const beeper = require('../src/cli/setup-beeper');
 
-      console.log('Checking Beeper Desktop API...');
-      let reachable = await beeper.checkDesktop();
+      console.log(c.dim('Beeper runs through beeperbox (container / lite / remote).'));
+      console.log(c.dim('  See https://github.com/hamr0/beeperbox\n'));
 
-      if (!reachable) {
-        console.log(c.warn('Not reachable at localhost:23373'));
-        console.log(c.dim('  Make sure Beeper Desktop is open'));
-        console.log(c.dim('  Settings > Developers > toggle on\n'));
-        await ask('Press Enter to retry...');
-        reachable = await beeper.checkDesktop();
+      let mcpUrl = beeper.DEFAULT_MCP_URL;
+      let mcpToken = null;
+      let client = null;
+      let list = null;
+
+      // Probe the default loopback endpoint first. A beeperbox on localhost is
+      // open (no auth) by design, so if one is already running we can adopt it
+      // and skip the URL + token prompts entirely.
+      console.log(c.dim(`Looking for a running beeperbox at ${beeper.DEFAULT_MCP_URL} ...`));
+      const probeClient = beeper.makeClient({ url: beeper.DEFAULT_MCP_URL, token: null });
+      try {
+        list = await beeper.listAccounts(probeClient);
+        client = probeClient;
+      } catch { /* none on loopback (or it needs a token) — fall through to manual entry */ }
+
+      if (list) {
+        const accts = list.map(beeper.accountLabel).join(', ') || 'no accounts linked yet';
+        console.log(c.ok(`Found beeperbox — ${list.length} account${list.length !== 1 ? 's' : ''} (${accts})`));
+        const ans = (await ask(`Use this one? ${c.dim('[Enter = yes · or paste a different URL]')} `)).trim();
+        if (/^https?:\/\//i.test(ans)) {
+          mcpUrl = ans;          // a different endpoint — re-resolve below
+          list = null; client = null;
+        }
+        // otherwise (blank / "yes") keep the probed beeperbox: mcpUrl stays default, client/list reused
+      } else {
+        console.log(c.dim('  None on loopback.'));
+        const urlInput = (await ask(`beeperbox MCP URL [${beeper.DEFAULT_MCP_URL}]: `)).trim();
+        mcpUrl = urlInput || beeper.DEFAULT_MCP_URL;
       }
 
-      if (reachable) {
-        console.log(c.ok('Desktop API reachable'));
+      // Only ask for a token when we don't already have a working client — i.e. a
+      // remote/exposed beeperbox, the one case that actually requires MCP_AUTH_TOKEN.
+      if (!list) {
+        console.log(c.dim('\n  MCP token — a bearer guard on the beeperbox endpoint (its MCP_AUTH_TOKEN env var).'));
+        console.log(c.dim('  • Local/loopback beeperbox: leave blank — it is open to your machine only.'));
+        console.log(c.dim('  • Remote/exposed beeperbox: paste the MCP_AUTH_TOKEN you set when launching it.'));
+        console.log(c.dim('  Not your Beeper Desktop token — that one lives in beeperbox as BEEPER_TOKEN, never here.'));
+        mcpToken = (await ask('  MCP token [blank]: ')).trim() || null;
 
-        // OAuth
-        let token = null;
-        const saved = beeper.loadToken();
-        if (saved?.access_token) {
-          try {
-            await beeper.api(saved.access_token, 'GET', '/v1/accounts');
-            token = saved.access_token;
-          } catch {
-            console.log(c.dim('Saved token expired, re-authenticating...'));
-          }
+        console.log('Checking beeperbox MCP...');
+        client = beeper.makeClient({ url: mcpUrl, token: mcpToken });
+        try {
+          list = await beeper.listAccounts(client);
+        } catch (err) {
+          const hint = (err.code === 401 || err.code === 403)
+            ? 'auth failed — check the MCP token'
+            : 'unreachable — is beeperbox running at that URL?';
+          console.log(c.warn(hint));
+          await ask('Press Enter to retry...');
+          try { list = await beeper.listAccounts(client); } catch { /* handled below */ }
         }
+      }
 
-        if (!token) {
-          console.log('Starting OAuth PKCE flow...');
-          token = await beeper.oauthPKCE();
-        }
-        console.log(c.ok('Authenticated'));
-
-        // List accounts
-        const accounts = await beeper.api(token, 'GET', '/v1/accounts');
-        const list = Array.isArray(accounts) ? accounts : accounts.items || [];
-        for (const acc of list) {
-          const name = acc.user?.displayText || acc.user?.id || acc.accountID || '?';
-          const network = acc.network || '?';
-          summary.beeperAccounts.push(`${network}: ${name}`);
-        }
+      if (list) {
+        console.log(c.ok(`beeperbox reachable — ${list.length} account${list.length !== 1 ? 's' : ''}`));
+        for (const acc of list) summary.beeperAccounts.push(beeper.accountLabel(acc));
 
         if (!config.platforms) config.platforms = {};
         if (!config.platforms.beeper) config.platforms.beeper = {};
         config.platforms.beeper.enabled = true;
-        config.platforms.beeper.url = config.platforms.beeper.url || 'http://localhost:23373';
+        config.platforms.beeper.mcp_url = mcpUrl;
+        if (mcpToken) config.platforms.beeper.mcp_token = mcpToken;
         config.platforms.beeper.command_prefix = config.platforms.beeper.command_prefix || '/';
         config.platforms.beeper.poll_interval = config.platforms.beeper.poll_interval || 3000;
 
-        // Auto-detect Telegram bot chat in Beeper (to exclude from polling)
-        if (useTelegram && token) {
-          try {
-            const chatsData = await beeper.api(token, 'GET', '/v1/chats?limit=30');
-            const beeperChats = chatsData.items || [];
-            // Match by bot username (without @) in chat title
-            const botName = (summary.telegram?.bot || '').replace('@', '').toLowerCase();
-            if (botName) {
-              const botChat = beeperChats.find(c =>
-                (c.title || c.name || '').toLowerCase() === botName ||
-                (c.title || c.name || '').toLowerCase() === botName.replace('bot', '')
-              );
-              if (botChat) {
-                const botChatId = botChat.id || botChat.chatID;
-                config.platforms.beeper.bot_chat_id = botChatId;
-                console.log(c.ok(`Bot chat detected in Beeper: "${botChat.title || botChat.name}" — will be excluded from polling`));
-              }
-            }
-          } catch { /* non-critical */ }
+        // Auto-detect the Telegram bot chat in Beeper (exclude it from polling),
+        // via the list_inbox verb so this works against a remote beeperbox too.
+        if (useTelegram) {
+          const botChatId = await beeper.findBotChat(client, summary.telegram?.bot || '');
+          if (botChatId) {
+            config.platforms.beeper.bot_chat_id = botChatId;
+            console.log(c.ok('Bot chat detected in Beeper — will be excluded from polling'));
+          }
         }
 
         summary.beeper = 'connected';
-
-        console.log(c.ok(`${list.length} account${list.length !== 1 ? 's' : ''} connected`));
-        console.log(c.dim('  Note: Beeper Desktop must be running for multis to work'));
+        console.log(c.dim('  Note: beeperbox must be running for multis to reach Beeper'));
       } else {
-        console.log(c.fail('Still not reachable. Skipping Beeper.'));
+        console.log(c.fail('beeperbox not reachable. Skipping Beeper.'));
         summary.beeper = 'skipped';
       }
     } catch (err) {
@@ -634,8 +646,10 @@ async function runInit() {
   }
   if (!config.allowed_users) config.allowed_users = [];
 
-  // Save
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
+  // Save — route through saveConfig so the config lands 0600 and ~/.multis 0700
+  // (it holds the PIN hash, LLM API key, and bot/MCP tokens). A raw writeFileSync
+  // here left them world-readable (0644) until some later save repaired the mode.
+  saveConfig(config);
 
   // Copy governance template if not present
   const govPath = PATHS.governance();
@@ -700,9 +714,17 @@ async function runInit() {
     }
   }
 
-  if (!config.owner_id) {
+  // Owner setup differs per platform: Telegram pairs via /start (owner_id);
+  // Beeper's owner is your Note-to-self channel (isSelf), so it needs no pairing.
+  const tgEnabled = !!config.platforms?.telegram?.enabled;
+  const beeperEnabled = !!config.platforms?.beeper?.enabled;
+  if (tgEnabled && !config.owner_id) {
     console.log(`\n  Pairing code: ${c.bold(config.pairing_code)}`);
-    console.log('  Send /start <code> to your bot to pair as owner.');
+    console.log(`  Send ${c.bold('/start ' + config.pairing_code)} to your Telegram bot to pair as owner.`);
+  }
+  if (beeperEnabled) {
+    console.log(`\n  Beeper: you're the owner via your ${c.bold('Note-to-self')} chat.`);
+    console.log('  Open it and send /help to get started.');
   }
 
   console.log(`\nRun ${c.bold('multis')} to launch.`);
@@ -756,12 +778,12 @@ async function runStart() {
   // Check Beeper connectivity if enabled
   const config = fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')) : null;
   if (config?.platforms?.beeper?.enabled) {
-    const url = config.platforms.beeper.url || 'http://localhost:23373';
-    const fullUrl = url.startsWith('http') ? url : `http://${url}`;
+    const { makeClient, listAccounts } = require('../src/cli/setup-beeper');
+    const mcpUrl = config.platforms.beeper.mcp_url || 'http://localhost:23375';
     try {
-      await fetch(`${fullUrl}/v1/spec`, { signal: AbortSignal.timeout(2000) });
+      await listAccounts(makeClient({ url: mcpUrl, token: config.platforms.beeper.mcp_token }));
     } catch {
-      console.log('\x1b[31m✗\x1b[0m  Beeper API  Desktop not reachable — start Beeper Desktop');
+      console.log(`\x1b[31m✗\x1b[0m  Beeper  beeperbox MCP not reachable at ${mcpUrl} — is beeperbox running?`);
     }
   }
 }
@@ -884,7 +906,7 @@ async function runDoctor() {
 
   // Beeper — detect networks from chat_modes or _pendingMode
   if (config?.platforms?.beeper?.enabled) {
-    const url = config.platforms.beeper.url || 'localhost:23373';
+    const url = config.platforms.beeper.mcp_url || config.platforms.beeper.url || 'localhost:23375';
     const host = url.replace(/^https?:\/\//, '');
     // Detect networks from _pendingMode matches
     const networks = new Set();
@@ -898,10 +920,11 @@ async function runDoctor() {
     const netStr = networks.size > 0 ? ` (${[...networks].join(', ')})` : '';
     let beeperReachable = false;
     try {
+      const { makeClient, listAccounts } = require('../src/cli/setup-beeper');
       const fullUrl = url.startsWith('http') ? url : `http://${url}`;
-      await fetch(`${fullUrl}/v1/spec`, { signal: AbortSignal.timeout(2000) });
+      await listAccounts(makeClient({ url: fullUrl, token: config.platforms.beeper.mcp_token }));
       beeperReachable = true;
-    } catch { /* Desktop not reachable */ }
+    } catch { /* beeperbox not reachable */ }
     const beeperStatus = beeperReachable ? ok : fail;
     profileRows.push(['Beeper', `${host}${netStr} ${beeperStatus}`]);
   } else {
@@ -1061,17 +1084,19 @@ async function runDoctor() {
 
   // Beeper API (async check — can't use sync check() helper)
   if (config?.platforms?.beeper?.enabled) {
-    const url = config.platforms.beeper.url || 'http://localhost:23373';
-    const fullUrl = url.startsWith('http') ? url : `http://${url}`;
+    const { makeClient, listAccounts } = require('../src/cli/setup-beeper');
+    const mcpUrl = config.platforms.beeper.mcp_url || 'http://localhost:23375';
     let beeperOk = false;
+    let beeperDetail = `beeperbox not reachable at ${mcpUrl} — is beeperbox running?`;
     try {
-      await fetch(`${fullUrl}/v1/spec`, { signal: AbortSignal.timeout(2000) });
+      const accounts = await listAccounts(makeClient({ url: mcpUrl, token: config.platforms.beeper.mcp_token }));
       beeperOk = true;
-    } catch { /* Desktop not reachable */ }
+      beeperDetail = `beeperbox reachable (${accounts.length} account${accounts.length !== 1 ? 's' : ''})`;
+    } catch { /* beeperbox not reachable */ }
     checks.push({
-      name: 'Beeper API',
+      name: 'Beeper (beeperbox MCP)',
       ok: beeperOk,
-      detail: beeperOk ? 'Desktop reachable' : 'Desktop not reachable — start Beeper Desktop'
+      detail: beeperDetail,
     });
   }
 

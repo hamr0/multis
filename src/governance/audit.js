@@ -1,6 +1,35 @@
 const fs = require('fs');
 const path = require('path');
-const { PATHS } = require('../config');
+const { PATHS, SECRET_ENV_KEYS } = require('../config');
+
+// Audit entries can carry raw command/stderr strings (e.g. an /exec command the
+// owner typed with an inline secret). Replace any KNOWN secret value — the bot's
+// own credentials from the environment (single source: config.SECRET_ENV_KEYS) —
+// with *** before it's persisted. Known values only: precise, no false
+// positives, never mangles a legitimate command.
+function knownSecrets() {
+  return SECRET_ENV_KEYS
+    .map(k => process.env[k])
+    .filter(v => typeof v === 'string' && v.length >= 8);
+}
+
+function redactSecrets(value, secrets) {
+  if (!secrets.length) return value;
+  if (typeof value === 'string') {
+    let s = value;
+    for (const sec of secrets) {
+      if (s.includes(sec)) s = s.split(sec).join('***');
+    }
+    return s;
+  }
+  if (Array.isArray(value)) return value.map(v => redactSecrets(v, secrets));
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const k of Object.keys(value)) out[k] = redactSecrets(value[k], secrets);
+    return out;
+  }
+  return value;
+}
 
 /**
  * Log an action to the audit log (append-only, newline-delimited JSON)
@@ -10,10 +39,10 @@ function logAudit(entry) {
   const auditPath = PATHS.auditLog();
   fs.mkdirSync(path.dirname(auditPath), { recursive: true });
 
-  const logEntry = {
+  const logEntry = redactSecrets({
     timestamp: new Date().toISOString(),
     ...entry
-  };
+  }, knownSecrets());
 
   const line = JSON.stringify(logEntry) + '\n';
 

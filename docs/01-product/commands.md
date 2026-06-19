@@ -2,7 +2,7 @@
 
 ## Chat Commands
 
-Commands are sent via chat. Telegram uses `/` prefix, Beeper uses `//`.
+Commands are sent via chat with a `/` prefix on every platform (Telegram and Beeper alike). On Beeper, commands only work from your personal / Note-to-self chats.
 
 ### Everyone
 
@@ -17,24 +17,27 @@ Commands are sent via chat. Telegram uses `/` prefix, Beeper uses `//`.
 | `/forget` | Clear conversation memory |
 | `/skills` | List available skills |
 | `/unpair` | Remove pairing |
-| `/help` | Show command list |
+| `/help` | Show commands, grouped by intent (Ask / Remember / Schedule / Run / Manage) and filtered to your role; `/help <command>` for one command's details |
 
 Plain text messages are treated as implicit `/ask`.
 
-### Owner Only
+### Owner / Admin
 
-| Command | Description |
-|---------|-------------|
-| `/exec <cmd>` | Run a shell command (PIN protected) |
-| `/read <path>` | Read a file or directory (PIN protected) |
-| `/index <path> <kb\|admin>` | Index a document with scope (PIN protected) |
-| `/pin` | Change or set PIN |
-| `/mode <personal\|business\|silent> [agent]` | Set chat mode, optionally assign agent (PIN protected). `/mode business` (no target) opens business persona menu |
-| `/agent [name]` | Show current agent (no args) or assign agent to this chat |
-| `/agents` | List all configured agents |
-| `/start <code>` | Pair with the bot using pairing code |
-| Send a file | Auto-index uploaded documents (Telegram only) |
-| `@agentname <message>` | Invoke a specific agent for one message |
+The **owner** (super-admin, set at setup) can run everything below. A **limited admin** — a chat the owner designates with `/admin` — gets the staff commands (`/index`, `/mode`, `/ask`) but **not** host shell (`/exec`, `/read`), `/pin`, or `/admin` itself.
+
+| Command | Who | Description |
+|---------|-----|-------------|
+| `/exec <cmd>` | Owner | Run a shell command (PIN protected) |
+| `/read <path>` | Owner | Read a file or directory (PIN protected) |
+| `/index <path> <kb\|admin>` | Admin | Index a document with scope (PIN protected) |
+| `/pin` | Owner | Change or set PIN |
+| `/admin` | Owner | Designate / list / remove limited admins (`/admin`, `/admin list`, `/admin remove <n>`) |
+| `/mode <personal\|business\|silent> [agent]` | Admin | Set chat mode, optionally assign agent (PIN protected). `/mode business` (no target) opens business persona menu |
+| `/agent [name]` | Owner | Show current agent (no args) or assign agent to this chat |
+| `/agents` | Owner | List all configured agents |
+| `/start <code>` | — | Pair with the bot using pairing code |
+| Send a file | Admin | Auto-index uploaded documents (Telegram only) |
+| `@agentname <message>` | Owner | Invoke a specific agent for one message |
 
 ### Chat Modes
 

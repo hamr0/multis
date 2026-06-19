@@ -4,9 +4,158 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-06-19
+
+Baresuite migration milestone — M-B (beeperbox MCP swap) + M3 (litectx 0.18.0 doc index) + security overhaul + init rewrite. Merged behind a reduced `/security` + `/diff-review` gate; full LIVE‡ pass follows M9.
+
+### Security — pre-merge gate: shell-injection class closed in the agent tools
+
+A `/security` + `/diff-review` pass before merging the migration branch found and fixed a **command-injection / gate-bypass** class in the LLM agent tools:
+
+- **`find_files` / `grep_files` (HIGH, proven RCE).** Both built a `bash` string by interpolating LLM-supplied args via `JSON.stringify`, which escapes `"`/`\` but **not** `$` or backticks — so `name: "$(…)"` or a `;`-laden `options` executed arbitrary shell. Because these tools translate to a `read` action at the gate, the dangerous string never reached bareguard's shell-metachar deny — a full bypass of command governance, reachable via prompt injection on the owner/agent path. Proven live (red), fixed, re-proven (green). **Fix:** a new no-shell `execArgv(file, args)` (argv via `execFile`) in `src/skills/executor.js`; `find`/`grep` now pass argv, so `$()`/`;`/backticks are inert literals. `--` terminates grep flags.
+- **Desktop tools hardened (`open_url`, `notify`, `wifi`, `clipboard`, `screenshot`).** Same `JSON.stringify`-into-shell pattern. Single-command tools moved to `execArgv` (no shell); the two that genuinely need a shell (clipboard pipe, screenshot `||` fallback) use a single-quote escaper `shq()`. Regression tests assert `$()` stays inert across all of them.
+- **PIN-resume dependency fix.** After a correct PIN, the resumed command was handed the `memoryManagers` Map in the `getMem` slot and dropped `platformRegistry` — a latent crash for PIN-gated `/ask`/`/remember`. Now matches the normal dispatch path.
+
+### Removed — Termux / Android device-control tools
+
+The 11 Android-only Termux tools (`phone_call`, `sms_send`, `sms_list`, `contacts`, `location`, `camera`, `tts`, `torch`, `vibrate`, `volume`, `battery`) are removed, along with Android platform detection, the `android-setup.md` guide, and `scripts/setup-termux.sh`. They were a deferred aspiration (phone control from a Termux-hosted bot) that never shipped in practice; multi-platform reach is delivered by beeperbox instead. The cross-platform tools (`open_url`/`notify`/`clipboard`/`system_info`) drop their `termux-*` branches; `getPlatform()` now returns `linux`/`macos` only.
+
+### Changed — `/help` redesigned (grouped by intent, role-aware, progressive disclosure)
+
+`/help` was a flat ~25-line wall built by splicing owner commands into a base list — alphabetical-ish, with the same `/mode` listed twice (once as the mode setter, once as the business menu). Replaced with a single command catalogue (`HELP_COMMANDS`) rendered **grouped by intent** — **ASK** (find answers) · **REMEMBER** (build memory & knowledge) · **SCHEDULE** (do things later) · **RUN** (act on this machine) · **MANAGE** (configure the bot) — and **filtered to the viewer's role** (`all` / `admin` / `owner`), so a customer sees only Ask + personal memory + status, a limited admin adds `/index` + `/mode`, and the owner sees everything. `/mode` now appears **once**. Adds **progressive disclosure**: `/help <command>` returns that one command's usage + detail (e.g. `/help mode` explains the business menu and silent/off semantics); an unknown or not-permitted topic falls back to the full menu with a nudge (and an owner-only command's detail is never disclosed to a non-owner). One metadata table now drives both views — no more splice-wall drift. 519/519 green; grouping, the `/mode` dedup, role-filtering, and the detail/fallback paths are covered by tests.
+
+### Changed — router pending-state de-tangle (unified PendingRegistry)
+
+The router's "the next message is special" handling had grown into **three parallel, drifting subsystems** — `pinManager.pendingCommands` (PIN entry), human-channel's `pendingHumanResponses` (gate approval/PIN/CONFIRM), and five `config._pending*` objects (admin/index/mode/business-menu/wizard) — each with a different key (a mix of `senderId` and `chatId`), a different TTL (or none), and its own dispatch check at the top of the router. Two real bugs fell out: a PIN reply arriving **after the prompt lapsed** fell through to the RAG pipeline as a *search query* (or was silently dropped), and a reply could be consumed by the wrong pending challenge. Replaced with one store — `src/bot/pending.js` `PendingRegistry`: keyed by the `chatId:senderId` tuple, uniform TTL, **announce-on-expiry**, payload-agnostic so both stored-continuations and parked-promise challenges share it. All four phases now complete:
+
+- **PIN command-entry + pin-change** onto the registry; the dead `PinManager` pending methods removed. A late PIN reply now gets *"PIN entry expired — please re-send the command."* instead of becoming a query. The `chatId:senderId` key also removes the cross-chat / Beeper senderId-drift collisions of the old `senderId`-only mix.
+- **The three gate challenges** (approval / PIN / CONFIRM) onto the registry; `pendingHumanResponses` + `handleHumanReply`/`hasPendingHumanReply` + the separate dispatch path deleted. The router top is now a single `pending.get()` + `switch(entry.kind)`.
+- **Two concurrency hazards fixed** while here (both pre-existed in the old code): a displaced parked challenge was silently *orphaned* (hung to its own timer) — `set()` now resolves it `null` on overwrite; and two near-simultaneous correct PINs could *double-run* the command (the get→clear window spanned an `await`) — the entry is now claimed synchronously before the first await, with wrong-PIN retry preserved.
+- **The five `config._pending*` pickers** (admin / index / mode / business-menu / business-wizard) onto the registry as `switch` cases, and the old per-picker dispatch blocks + `config._pending*` scaffolding deleted. Each picker keeps its own cancel contract: a `/command` cancels the picker and falls through to normal routing; a mode picker's non-numeric reply still re-prompts; an index picker's non-`[123]` reply still drops silently. Pickers now also get **announce-on-expiry** (a late numeric reply is announced as expired, not forwarded to RAG) and a TTL — single-sourced from a new `config.interaction` block (`picker_ttl_minutes: 5`, `wizard_ttl_minutes: 30`, the longer window for the multi-step wizard). Pending pickers are **in-memory only** — a half-finished picker is intentionally dropped on restart. One latent hazard closed for free: with a single entry per `(chat,sender)` the latest prompt is authoritative, so a numeric reply meant for the mode picker can no longer be swallowed by a still-open index prompt.
+
+Behavior-neutral for the live flows (the full picker suite stayed green across the migration); the orphaned-reply, double-execute, displaced-waiter, and picker announce-on-expiry behaviors are each red→green mutation-proven. 514/514 green.
+
+### Changed — dispatch/agent rewrite (obedient-bot-first)
+
+Live dogfooding ("find me X on my laptop") kept failing. Temporary timestamped instrumentation (`src/debug/instr.js`, an event-loop-lag monitor + phase marks, on by default, `MULTIS_INSTR=0` to silence) **pinned the cause** — and it was *not* the intermittent beeperbox 15 s timeout (that never reproduced across the dogfood; the earlier `execSync`→async-`exec` fix appears to have cleared the common case, and the instrumentation stays armed for the rest). The real cause was the prompt/governance wiring. Fixes, all behind 493/493 green:
+
+- **Persona no longer shadows the tool-use prompt.** `buildMemorySystemPrompt` composed the system prompt as `persona || SYSTEM_PROMPT`, so a configured agent persona (e.g. *"You are a helpful personal assistant."*) **replaced** the base prompt that tells the model it has tools — the model then deflected ("I don't have access to a database") and guessed out-of-scope paths that the gate denied, surfaced to the user as a false "I don't have permission". The owner/natural path now always runs the obedient base prompt; persona/constitution is **deferred** to the memory/litectx module (business mode keeps its customer-facing persona). The base prompt is rewritten to be an *obedient* bot: the owner's messages are orders, USE the tools immediately, never claim a lack of access before trying, search instead of guessing a path, and report the real tool error.
+- **Owner has full machine access.** `governance.paths` is now `allowed:["/"]`, `denied:[]` — the owner can read/find/grep anywhere (single-owner model: customers never get host tools, gated at `ownerCheck`). Previously a narrow `~/Documents,~/Downloads,…` read scope denied `~/Music`, `/stuff`, etc., which is what broke "find my music".
+- **Pasted paths are no longer mis-parsed as commands.** A new `looksLikeCommand` (`/help`, `/ask x`) distinguishes a command from a pasted path (`/home/hamr/resumes/`); a path now routes to the agent as natural language instead of parsing as an unknown command and being silently dropped.
+- **Unknown commands reply** (`Unknown command: /x — try /help`) instead of silently no-opping.
+- **Halt prompt clarity.** A tool-round-cap halt now renders as a plain *"⚠️ Stopped — I took too many tool steps … try rephrasing"* and **terminates immediately** instead of waiting 60 s on a meaningless "yes to terminate / no to deny" (the old shape also caused a needless `humanChannel` 60 s timeout on every cap halt).
+
+**Still in flight (next passes):** the router pending-state-machine de-tangle is now complete (all four phases — see the *unified PendingRegistry* entry above). Persona/constitution/facts return with the litectx memory module.
+
+### Changed — command governance (3-tier: benign / destructive→PIN / catastrophic→PIN+CONFIRM)
+
+Live dogfooding ("find my music folder and list the subdirs") demanded a PIN for a benign `ls`, then the prompt expired (120 s) and the reply got treated as a new question. The old model PIN-gated **every** `exec`/`read_file` and **hard-denied** the whole denylist. Replaced with an obedient, tiered model (owner-authorized; single-owner — customers still never get host tools, gated at `ownerCheck`):
+
+- **Benign** (allowlisted commands, all reads/finds) → **just run**, no PIN, no prompt. `ls ~/Music` works.
+- **Destructive** (the denylist: `rm`, `mv`, `chmod`, `chown`, `kill`, `sudo`, `dd`, …) → **PIN**, then runs. No longer hard-denied — the owner can do it with a PIN.
+- **Catastrophic** (a tiny explicit set: `rm -rf` of `/` `~` `/*`, `dd` to a device, `mkfs`/`wipefs`, redirect to a block device, fork bomb, `shutdown`/`reboot`) → **PIN + a typed `CONFIRM`**, then runs. A deliberate speed bump against a fat-fingered disaster; never a hard wall.
+- The blanket always-ask on `exec` (`checkpoint_tools`) is now **opt-in** (default `[]`); the PIN prompt **timeout is 5 minutes** (was 2); reads are no longer PIN-gated now that the owner's fs scope is open.
+
+New `createConfirmChallenge` (typed-CONFIRM tier) in `human-channel.js`; tier detection (`isCatastrophic`/`makeDestructiveCheck`) in `gate.js`, unit-tested per pattern. 500/500 green.
+
+### Fixed — `find_files` missed name+extension
+
+`find_files` ran `find -name <exact>`, so "amr-hassan-resume" never matched `amr-hassan-resume.txt`. Now case-insensitive substring by default (`-iname "*<name>*"`), explicit globs honored as-is, depth 5→6. Proven red→green against the real file.
+
+### Changed — `multis init` wizard
+
+- **Branched setup flow.** Step 1 now asks the two real questions separately instead of a flat 3-item list: first **what** (Personal assistant / Business chatbot), then **how to run it**, branched by that choice. Personal → *Your personal bot* (Telegram only) or *Personal bot + messenger assistant* (Telegram + Beeper, all messengers). Business → runs through Beeper (a Telegram bot can't see your real contacts), with an opt-in "also add Telegram as a backup admin channel?".
+- **Owner guidance now matches the path — fixes a stray pairing code.** The end screen previously printed "Pairing code … send /start to your bot" whenever `owner_id` was unset, including Beeper-only setups that have no bot to pair with. Now: Telegram paths show the pairing code; Beeper paths show *"you're the owner via your Note-to-self chat"* (per the `isSelf && isPersonalChat` model); both can show when both are enabled.
+- **beeperbox auto-detect.** The Beeper step probes `localhost:23375` first; if a beeperbox is already running it shows the account count + labels and offers to adopt it (Enter = yes, or paste a different URL), skipping the URL **and** token prompts. The MCP-token prompt now appears only for a remote/manual endpoint and explains what the token is (its `MCP_AUTH_TOKEN`), that loopback needs none, and that it is **not** the Beeper Desktop `BEEPER_TOKEN`.
+- **Config written with secure perms.** `init` now saves `config.json` via `saveConfig`, so it lands `0600` and `~/.multis` `0700` immediately (it holds the PIN hash, LLM API key, and bot/MCP tokens). Previously the wizard's raw `writeFileSync` left a secrets-bearing config world-readable (`0644`) until some later save repaired the mode.
+- **No false "keep current" on first run.** The Enter-to-keep prompt now appears only when a real saved `config.json` existed — a true first run (template defaults only) no longer offers to "keep" a setup that was never saved.
+
+### Docs
+
+- **LIVE‡ verification run-sheet** (`docs/01-product/baresuite-migration-live-verification.md`) — the PRD §10 merge gate (the `LIVE‡` security rows: C1, A1–A3, SEC1–SEC6, SEC9–SEC10, plus SEC11–SEC12 spot-checks) turned into an ordered, copy-paste checklist with exact commands, grounded expected output (real reject strings, config knobs, audit signals), and a sign-off table. Makes the manual pre-merge pass mechanical.
+- **README rewrite** — reframed to the product's actual scope (a local-first chatbot/assistant for **personal *and* small-business** use), marked **`[WIP]`** with a `Status` section, and added a *Connects to* (today / planned) list. **Connection modes simplified to three** — Telegram, beeperbox-local, beeperbox-remote (the old lite/container/remote split was one component with a different `mcp_url`); self-hosting Matrix is demoted to a *"No Beeper?"* bottom note. Folded the redundant *How the chats get in* into Connection modes (keeping only the MCP-token config), and moved the architecture diagram and source map out to `system-state.md` (now pointers). 177 → 131 lines.
+- **Connection-modes clarification** — the modes table's *Best for* column no longer conflates bridge placement with use-case; it now describes only where beeperbox runs. A new note makes explicit that **personal assistant vs. always-on chatbot is set by where `multis` runs** (a machine you own → personal assistant with `/exec`/`/read`; a VPS → chatbot), independent of the connection mode — a GUI home server gives both at once.
+
+## [0.16.0] - 2026-06-16
+
+Milestone state of the `baresuite-migration-m3` branch: multis becomes the first baresuite customer (bare-agent + bareguard as the agent/governance core), Beeper is rewired to a pure beeperbox-MCP client across all three deploy shapes, and two `/security` passes harden the assistant. **489/489 green.** Awaiting the live LIVE‡ verification pass (PRD §10) before merge to `main`.
+
+### Security — full `/security` audit (8 findings) + limited-admin model
+
+A standalone security pass over the whole branch. Each fix is red→green-proven (a regression test that fails without the fix, passes with it); the agent-path PIN fix (#5) was POC-validated first. Findings recorded in `docs/01-product/baresuite-migration-prd.md` §8.
+
+- **Owner/admin model clarified.** The **super-admin** is the owner set at setup. `/admin` designates *limited* admins — staff who get knowledge-base commands (`/mode`, `/index`, `/ask`) but **never** host shell (`/exec`, `/read`) or `/admin`/`/pin` themselves. A single shared PIN gates the privileged surface.
+- **#2/#3 — host tools are owner-only at the floor.** A `FORCE_OWNER_ONLY` floor in the tool registry plus `send_file` gated at the capability layer close the host-access surface; `~/.multis` is locked to `0700` and `config.json` to `0600` (it holds the PIN hash and tokens — previously world-readable).
+- **#4 — parser input is bounded.** PDF/DOCX ingest now honours size / page / timeout knobs, so a hostile or pathological document can't hang or exhaust the indexer.
+- **#8 — the agent loop is bounded.** `max_tool_rounds` carries a default cap, so a runaway tool-calling loop terminates cleanly via the gate.
+- **#6 — owner RAG is scoped and fenced.** Owner queries retrieve only `admin`+`kb` scopes, and retrieved document content is fenced as untrusted (it can't smuggle instructions into the prompt).
+- **#1 — per-customer rate limit on business-mode inbound.** An abusive customer chat **degrades to escalation** (notify the owner) rather than refusing service — bounded without going dark.
+- **#5 — PIN enforced at the capability layer on the agent path.** Privileged tools invoked by the LLM now prompt for the PIN through the single `humanChannel`, closing the gap where the agent path skipped the auth the slash path enforced. POC-validated before build.
+- **#7 — approvals route to the owner, not the requester.** A gate `ask` for a privileged action is sent to the owner's chat for approval, so a customer can never approve an action on their own behalf.
+- **Path-traversal in the indexing sink** (attacker-named attachment filenames) was fixed earlier in the branch — see the beeperbox v0.7.0 entry below.
+
+### Security — second `/security` pass (defense-in-depth)
+
+An independent 3-agent audit of the branch code surface; every finding grounded at `file:line` before action, red→green where behavioral. Residuals, accepted-as-designed, and verified-clean items are catalogued in PRD §11.
+
+- **Owner-only `admin` index scope.** A *limited admin* could `/index <file> admin` and plant content into the owner's trusted RAG/agent context; `admin` scope is now owner-only (limited admins manage the public KB only).
+- **Owner identity tightened (Beeper).** `isOwner` now requires `isSelf` **and** `isPersonalChat` (the note-to-self channel), not bare `isSelf` — a self-message in a random/silent chat, or in a designated limited-admin chat, no longer confers owner. *Behavior change:* the owner dropping a file **into a business chat** now silent-indexes instead of prompting (the scope prompt no longer leaks into a customer-facing chat); note-to-self still prompts.
+- **Exec env scrub.** The bot's own credentials (`ANTHROPIC`/`OPENAI`/`GEMINI`/`TELEGRAM`/`MCP_AUTH`) are stripped from the `/exec` child environment, so a command — including one driven by the LLM agent path — can't `echo $ANTHROPIC_API_KEY` and exfiltrate them.
+- **Audit-log redaction.** Known secret values are replaced with `***` in the audit log (an `/exec` command or stderr could otherwise persist an inline secret in plaintext). The secret-key list is single-sourced in `config.js` so the scrub and redaction can't drift.
+- **Attachment size ceiling.** `download_asset` caps the base64 decode (~25 MB) and `indexBuffer` rejects an oversized buffer **before** writing it to disk — the size cap previously ran only after the attachment was buffered in memory and written out.
+- **Rate-limiter eviction.** The per-sender map now sweeps fully-aged senders, so business mode (where any stranger can open a chat) can't grow it unbounded.
+- **Smaller hardening.** `config.json.bak` is `chmod 0600` (parity with `config.json`); the parallel `buildRAGPrompt` builder now nonce-fences retrieved chunks like the memory builder.
+
+### Added — `/admin` limited-admin designation
+
+- **`/admin`** (owner-only) designates, lists, and revokes limited-admin chats: `/admin` (pick a chat to promote), `/admin list`, `/admin remove <n>`. Limited admins get `/mode`, `/index`, `/ask`; host shell and admin management stay owner-only. Revocation takes effect immediately. `/help` is role-aware — owner, limited admin, and customer each see their own command block.
+
 ### Changed
 - **CI:** the publish workflow now polls the npm registry for ~2 min (was ~15s; `--prefer-online` skips npm's view cache) and accepts an `exit 0` publish even if the registry hasn't reflected it yet, so a successful-but-slow-to-reflect publish no longer reports a false failure.
 - **`publish.yml` is now manual-only (`workflow_dispatch`) — npm OIDC trusted publishing with provenance, idempotent, and verifies the registry end-state.**
+
+### Baresuite migration — M-B step 3, Beeper attachments consumption (beeperbox v0.7.0)
+
+**Beeper-sourced document indexing is un-paused** — the gap noted in Phase 2 ("owner sends a PDF → KB") is closed by consuming beeperbox **v0.7.0**'s attachment verbs (no shim — the lib grew the capability, multis consumes its public API).
+
+- **`attachments[]` → `_attachments`.** `BeeperPlatform._handleMessage` now maps beeperbox's normalized `attachments[]` (`{type,file_name,mime_type,src_url,size,is_voice_note}`) onto the message's `_attachments` (`{fileName,srcURL,mimeType,size,isVoiceNote}`) that the `handlers.js` indexing pipeline already consumed. The dormant owner-`/index`, scope-prompt, and silent-capture paths re-light.
+- **`downloadAsset()` → the `download_asset` MCP verb.** Replaces the raw `:23373` `/v1/assets/download` call; returns the attachment **bytes as a Buffer** (base64 over the MCP line). This is what makes attachment indexing work against a **remote `:23375`-only beeperbox**, not just a local one. The three `handlers.js` call sites drop the old path→`readFileSync` hop.
+- **Verified live against the v0.7.0 container:** a real 706112-byte PDF round-trips byte-exact (valid `%PDF-` header) via both `download_asset` reference paths *and* through `BeeperPlatform.downloadAsset`. **442/442 green** (+4 adapter tests: attachment mapping, no-attachments case, verb call + args, no-data throw — mutation-proven).
+- **Raw-`:23373` plumbing removed — Beeper is now a pure MCP client end-to-end.** With `downloadAsset` on the verb, the adapter's last raw-Desktop-API code is gone: deleted `_api`, `baseUrl`/`DEFAULT_URL`, `this.token`, and `_loadToken` (plus the `PATHS.beeperToken` path and the `_loadToken` tests). multis no longer reads a Beeper token at all — only the beeperbox MCP URL/token. The config template's stale `platforms.beeper.url` (`:23373`) is replaced with `mcp_url` (`:23375`). Verified live: `start()` + `download_asset` work with **no** Beeper token configured.
+- **🔒 Security — path-traversal hardening in the indexing sink (`indexer/index.js`).** Attachment filenames are attacker-controlled (a chat sender names the file), and `indexBuffer` joined the raw name into a temp path — so a name like `../../../…` could escape and overwrite/delete arbitrary files (newly reachable via Beeper business-mode/silent indexing; also closed the pre-existing Telegram-silent path). Now `path.basename`-confined with degenerate names (`''`/`.`/`..`) rejected. Regression test is failability-proven (without the fix it deletes a sentinel outside the temp dir). Found by a `/security` pass on this diff.
+- **Full ingest pipeline validated live (v0.8.0 container):** a real Beeper PDF → `download_asset` verb → real `pdfjs` parse → 4 FTS chunks at `scope=admin` → searchable on 6 terms, with a negative control (`zzqq…` → 0 hits) so the check can fail. End-to-end, no mock in the critical path.
+
+### Baresuite migration — M-B step 3, Phase 3 (backend validation, MCP chat discovery, onboarding reframe)
+
+- **3a — startup validation/logging:** `BeeperPlatform.start()` distinguishes an auth failure (401/403 → check `mcp_token`) from an unreachable endpoint, warns (without aborting) when beeperbox is reachable but reports 0 accounts, and logs the connected networks.
+- **3b — chat discovery off raw `:23373`:** new `BeeperPlatform.listInbox()` over the `list_inbox` MCP verb; `findBeeperChat()` and `/mode`'s chat listing now use it, so a remote `:23375`-only beeperbox works end-to-end. (`downloadAsset` still uses raw `:23373` until beeperbox ships an attachments verb.)
+- **3e — onboarding reframe (guide + wizard):**
+  - **Wizard (`setup-beeper.js`) retired the OAuth-PKCE-against-`:23373` flow.** multis no longer logs itself into Beeper Desktop — the Beeper token lives in beeperbox. The wizard now prompts for the beeperbox MCP URL (+ optional token), verifies via `listAccounts`, lists accounts, and detects the Telegram bot chat via `list_inbox`. `multis doctor` / post-start / status now probe the MCP endpoint instead of `:23373/v1/spec`.
+  - **Customer guide** reframed to the three deploy shapes (full container / lite / remote) with a topology diagram and an honest limitations matrix; the old "Beeper can't run on a VPS" guidance is reversed (the container runs headless).
+- **Tests:** +`listInbox`, +`start` zero-accounts/auth-failure cases. 438/438 green; echo-guard and drain-cap mechanism tests mutation-proven; both the adapter and the wizard helpers live-smoked against a running container.
+
+### Baresuite migration — M-B step 3, Phase 2 (rewire beeper.js onto beeperbox MCP)
+
+**`src/platforms/beeper.js` now consumes beeperbox's MCP verbs** instead of walking the raw `/v1/chats` API — multis is a pure MCP client for watch/send (only `downloadAsset` still touches raw `:23373`, pending an attachments verb). **Bare Beeper Desktop is still supported**, not dropped: beeperbox's `mcp/server.js` is zero-dep vanilla Node and takes `BEEPER_API`, so it runs standalone against an existing local Desktop ("lite mode") and presents the same verbs as the full container. multis talks MCP to whichever shape is deployed — container, local-lite, or remote.
+
+- **Watch → `poll_messages` cursor.** One cursor-advancing poll per tick, drained across `has_more` pages (capped at 10/tick). The cursor persists to `~/.multis/run/beeper-cursor.json` and resumes across restart — no missed or duplicated messages. **Removed:** `_seedLastSeen`, the `/v1/chats?limit=20` walk, the `_seen`/`_processing` dedup sets, and the 30s-gap re-seed (the cursor makes all of it redundant). Also fixes the old recent-25-chats blindness — `poll_messages` is a global feed.
+- **Echo-guard → `source:"api"`.** The adapter skips messages beeperbox tagged as its own sends (exact-id matched upstream). **Removed:** the `[multis]` text prefix, `_isLooping`, and `selfIds`/`_isSelf` (routing now reads `sender.is_self` straight off the message).
+- **Send → `send_message` with a unique `client_tag`** (no more `[multis]` prefix).
+- **Chat metadata** (`title`, `is_note_to_self`) resolved via `get_chat`, cached per chat on first sighting.
+- **Policy unchanged** — modes (`off`/`silent`/`business`), personal-chat command gating, natural-language routing, owner model, `_personalChats`/`getAdminChatIds`.
+- **Tests:** `test/beeper.test.js` rebuilt on an injected MCP-client seam (cursor seed/resume, `has_more` drain + cap, `source:"api"` skip, bot-chat exclusion, `get_chat` caching, all routing modes). **434/434 green**; the echo-guard and drain-cap mechanism tests are mutation-proven.
+- **Known gap — attachments paused.** `poll_messages` doesn't carry attachments yet, so Beeper-sourced document indexing (owner sends a PDF → KB) is paused pending a beeperbox verb (PRD §7, 2026-06-16). No shim in multis (customer contract); the `downloadAsset` seam relights the moment beeperbox surfaces `attachments[]`.
+
+### Baresuite migration — M-B step 3, Phase 1 (beeperbox MCP client)
+
+**Added `src/platforms/beeperbox-mcp.js`** — a vanilla JSON-RPC 2.0 client for beeperbox's MCP HTTP transport (**no new dependency** — global `fetch`; the transport is a plain stateless POST). Exposes the verbs multis composes (`poll_messages`, `send_message`, `note_to_self`, `list_accounts`) with explicit failure paths: HTTP status, JSON-RPC error+code, network failure, timeout (AbortController), non-JSON body, and MCP `isError`. **17 unit tests** (injected-fetch DI seam; the abort-mechanism and `isError` tests are mutation-proven) + a live smoke against the container. **Phase 2** — rewiring `src/platforms/beeper.js` onto this client (dropping the `[multis]` prefix, `_isLooping`, and the hand-rolled seed/dedup/wake-reseed machinery) — is next.
+
+Foundation validated end-to-end against a live container (the basis for Phase 2):
+
+- **`poll_messages`** (beeperbox PR #11) — cursor-based passive watch; proven **exactly-once within a single cursor chain** (4 sequential sends, 0 dup / 0 loss) — the property the old NaN-dedup / wake-flood bugs broke.
+- **Exact-id echo-guard** (beeperbox PR #13) — `source:"api"` now resolves `pendingMessageID` → final bridge id and matches by **exact id, not text**. Verified with the discriminating test: two identical-text sends each tagged with their own `client_tag`, no crossing — closes beeperbox's CI-unverifiable limit. Lets multis drop both the `[multis]` prefix **and** `_isLooping`.
+- **Container stability** (beeperbox PR #12/#13) — `docker restart` no longer segfaults (stale Xvfb-lock fix); `beepertexts` is supervised (real crash → relaunch in ~10s, verified).
+- Upstream asks filed → resolved → verified in `docs/01-product/baresuite-migration-prd.md` §7.
 
 ## [0.15.0] - 2026-06-15
 

@@ -22,14 +22,14 @@ Current state of the multis codebase as of POC4.
 │  └───────┼─────────────┼────────────────────────┼─────────┘  │
 │          │             │                        │             │
 │  ┌───────▼──────┐ ┌────▼─────────┐  ┌──────────▼──────────┐ │
-│  │  Governance  │ │  LLM Layer   │  │  Indexer             │ │
-│  │  (bareguard  │ │  (Anthropic, │  │  (PDF, DOCX, MD, TXT │ │
-│  │  Gate, audit)│ │   OpenAI,    │  │   → chunks → SQLite) │ │
+│  │  Governance  │ │  LLM Layer   │  │  Context (src/context│ │
+│  │  (bareguard  │ │  (Anthropic, │  │   → litectx: PDF,    │ │
+│  │  Gate, audit)│ │   OpenAI,    │  │   DOCX, MD + memory) │ │
 │  └──────────────┘ │   Ollama)    │  └──────────────────────┘ │
 │                   └──────────────┘                            │
 │                                                               │
 │  ┌────────────────────────────────────────────────────────┐  │
-│  │              SQLite (FTS5) — ~/.multis/multis.db        │  │
+│  │       litectx (FTS5) — ~/.multis/data/litectx.db       │  │
 │  └────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -49,25 +49,24 @@ src/
 │   ├── base.js           # Platform abstract class
 │   ├── message.js        # Normalized Message class (routeAs, isCommand, parseCommand)
 │   ├── telegram.js       # Telegram platform adapter
-│   └── beeper.js         # Beeper Desktop API adapter (polling, mode routing)
+│   ├── beeper.js         # Beeper adapter — pure beeperbox MCP client (poll_messages cursor, source:"api" echo-guard, mode routing); raw :23373 only for downloadAsset. Backend = container / local-lite / remote, same verbs
+│   └── beeperbox-mcp.js  # Vanilla JSON-RPC client for beeperbox MCP verbs (poll_messages, send) — M-B step 3, no new dep
 ├── governance/
 │   ├── gate.js           # bareguard Gate factory (ESM dynamic import) + action translation
 │   ├── human-channel.js  # humanPrompt closure — single callback for every ask/halt event
 │   └── audit.js          # Append-only JSONL app-event log (distinct from bareguard's gate.jsonl)
 ├── tools/
-│   ├── definitions.js    # 25+ tool definitions across desktop, Android, universal
+│   ├── definitions.js    # desktop + universal tool definitions (no-shell execArgv / shq-quoted)
 │   ├── registry.js       # Platform filtering, owner-only gating, config overrides
 │   ├── adapter.js        # Converts multis tools to bare-agent format with ctx closure
-│   └── platform.js       # Runtime platform detection (linux/macos/android)
-├── indexer/
-│   ├── chunk.js          # DocChunk data class
-│   ├── chunker.js        # Hierarchical text chunking (2000ch, 200 overlap)
-│   ├── parsers.js        # PDF (pdfjs-dist), DOCX (mammoth), MD, TXT parsers
-│   ├── store.js          # SQLite store with FTS5 + activation columns
-│   └── index.js          # DocumentIndexer facade (indexFile, search, getStats)
+│   └── platform.js       # Runtime platform detection (linux/macos)
+├── context/
+│   └── index.js          # Thin litectx policy wrapper — indexFile/indexBuffer, rememberMemory,
+│                         #   search/searchMemory (per-call scope), get (fenced), purge, stats.
+│                         #   litectx (ESM, dyn-imported) owns parse/chunk/store/rank; src/indexer deleted (M3)
 ├── llm/
 │   ├── provider-adapter.js # Maps multis config to bare-agent providers
-│   └── prompts.js        # buildRAGPrompt — formats chunks into LLM prompts
+│   └── prompts.js        # buildRAGPrompt/buildMemorySystemPrompt — format recall hits into LLM prompts
 ├── memory/
 │   ├── manager.js        # ChatMemoryManager — per-chat file I/O
 │   └── capture.js        # LLM-summarized durable notes on window overflow
@@ -95,7 +94,7 @@ All config lives in `~/.multis/`:
 |------|---------|
 | `config.json` | Main config (platforms, LLM, users, pairing code) |
 | `auth/governance.json` | Command allowlist/denylist, path restrictions — mapped to bareguard Gate config |
-| `data/documents.db` | SQLite database (document chunks, FTS5 index) |
+| `data/litectx.db` | litectx store — documents + memory rows, FTS5, per-call scope (owned via `src/context`) |
 | `logs/audit.log` | Append-only app-event log (pairing, mode, capture, ...) |
 | `logs/gate.jsonl` | Bareguard structured audit (phases: gate, record, approval, halt, topup, terminate) |
 | `run/budget.json` | Shared budget file across all chats (`proper-lockfile`) |

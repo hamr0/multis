@@ -15,20 +15,9 @@ const { setMultisDir } = require('../src/config');
 // ---------------------------------------------------------------------------
 
 describe('getPlatform', () => {
-  it('returns linux, macos, or android (never crashes)', () => {
+  it('returns linux, macos, or unknown (never crashes)', () => {
     const result = getPlatform();
-    assert.ok(['linux', 'macos', 'android', 'unknown'].includes(result));
-  });
-
-  it('detects android when PREFIX contains com.termux', () => {
-    const orig = process.env.PREFIX;
-    process.env.PREFIX = '/data/data/com.termux/files/usr';
-    // Only works on linux platform
-    if (process.platform === 'linux') {
-      assert.strictEqual(getPlatform(), 'android');
-    }
-    if (orig === undefined) delete process.env.PREFIX;
-    else process.env.PREFIX = orig;
+    assert.ok(['linux', 'macos', 'unknown'].includes(result));
   });
 });
 
@@ -55,7 +44,7 @@ describe('Tool definitions', () => {
   });
 
   it('all platforms are valid', () => {
-    const valid = new Set(['linux', 'macos', 'android']);
+    const valid = new Set(['linux', 'macos']);
     for (const tool of TOOLS) {
       for (const p of tool.platforms) {
         assert.ok(valid.has(p), `${tool.name} has invalid platform: ${p}`);
@@ -63,22 +52,85 @@ describe('Tool definitions', () => {
     }
   });
 
-  it('android-only tools exist', () => {
-    const androidOnly = TOOLS.filter(t => t.platforms.length === 1 && t.platforms[0] === 'android');
-    assert.ok(androidOnly.length > 0, 'Should have android-only tools');
-    const names = androidOnly.map(t => t.name);
-    assert.ok(names.includes('phone_call'));
-    assert.ok(names.includes('sms_send'));
-    assert.ok(names.includes('contacts'));
+  it('no android-only tools remain (Termux support removed)', () => {
+    const androidOnly = TOOLS.filter(t => t.platforms.includes('android'));
+    assert.strictEqual(androidOnly.length, 0, `unexpected android tools: ${androidOnly.map(t => t.name)}`);
   });
 
-  it('universal tools support all platforms', () => {
+  it('universal tools support linux and macos', () => {
     const universal = TOOLS.filter(t => t.name === 'exec' || t.name === 'search_docs' || t.name === 'remember');
     for (const t of universal) {
       assert.ok(t.platforms.includes('linux'), `${t.name} missing linux`);
       assert.ok(t.platforms.includes('macos'), `${t.name} missing macos`);
-      assert.ok(t.platforms.includes('android'), `${t.name} missing android`);
     }
+  });
+
+  it('find_files matches by case-insensitive substring (finds name+extension)', async () => {
+    // Regression: a `name` without the extension used to miss (exact `-name`).
+    // "my-resume-doc" must now locate "My-Resume-Doc.txt".
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-find-'));
+    fs.writeFileSync(path.join(dir, 'My-Resume-Doc.txt'), 'x');
+    const findFiles = TOOLS.find(t => t.name === 'find_files');
+    const out = await findFiles.execute({ name: 'my-resume-doc', path: dir }, { senderId: 'u' });
+    assert.match(out, /My-Resume-Doc\.txt/, 'substring + case-insensitive match should find the file');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('find_files honors an explicit glob as-is', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-find-'));
+    fs.writeFileSync(path.join(dir, 'a.pdf'), 'x');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'x');
+    const findFiles = TOOLS.find(t => t.name === 'find_files');
+    const out = await findFiles.execute({ name: '*.pdf', path: dir }, { senderId: 'u' });
+    assert.match(out, /a\.pdf/);
+    assert.doesNotMatch(out, /b\.txt/);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('find_files does not execute shell substitution in the name arg', async () => {
+    // Security regression: name was interpolated into a bash string via
+    // JSON.stringify (which does NOT escape $ or backticks), so `$(...)` ran.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-find-'));
+    const sentinel = path.join(dir, 'pwned_find');
+    const findFiles = TOOLS.find(t => t.name === 'find_files');
+    await findFiles.execute({ name: `$(touch ${sentinel})`, path: dir }, { senderId: 'u' });
+    assert.ok(!fs.existsSync(sentinel), 'shell substitution in name must NOT execute');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('grep_files does not execute shell injection in pattern/options', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-grep-'));
+    fs.writeFileSync(path.join(dir, 'f.txt'), 'hello');
+    const sentinelP = path.join(dir, 'pwned_grep_pattern');
+    const sentinelO = path.join(dir, 'pwned_grep_opts');
+    const grepFiles = TOOLS.find(t => t.name === 'grep_files');
+    // injection via pattern ($()) and via the free-form options string (`;`)
+    await grepFiles.execute({ pattern: `x$(touch ${sentinelP})`, path: dir }, { senderId: 'u' });
+    await grepFiles.execute({ pattern: 'x', path: dir, options: `; touch ${sentinelO} #` }, { senderId: 'u' });
+    assert.ok(!fs.existsSync(sentinelP), 'shell substitution in pattern must NOT execute');
+    assert.ok(!fs.existsSync(sentinelO), 'shell metachar in options must NOT execute');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('desktop tools do not execute shell injection in their string args', async () => {
+    // open_url/wifi go through execArgv (no shell); clipboard/screenshot use a
+    // shell but shq()-quote the user value. Either way `$()` must stay inert.
+    // The underlying binaries may be absent — that is fine; we assert only that
+    // the injected sentinel never gets created.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-desk-'));
+    const mk = (n) => path.join(dir, n);
+    const ctx = { senderId: 'u', runtimePlatform: 'linux' };
+    const get = (n) => TOOLS.find(t => t.name === n);
+
+    await get('open_url').execute({ url: `$(touch ${mk('pwned_url')})` }, ctx);
+    await get('clipboard').execute({ action: 'set', text: `$(touch ${mk('pwned_clip')})` }, ctx);
+    await get('screenshot').execute({ output: `/tmp/x$(touch ${mk('pwned_shot')}).png` }, ctx);
+    await get('wifi').execute({ action: 'connect', ssid: `$(touch ${mk('pwned_wifi')})` }, ctx);
+
+    for (const n of ['pwned_url', 'pwned_clip', 'pwned_shot', 'pwned_wifi']) {
+      assert.ok(!fs.existsSync(mk(n)), `injection via ${n} must NOT execute`);
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });
 
@@ -89,15 +141,14 @@ describe('Tool definitions', () => {
 describe('buildToolRegistry', () => {
   it('filters by platform', () => {
     const linuxTools = buildToolRegistry({}, 'linux');
-    const androidTools = buildToolRegistry({}, 'android');
+    const macosTools = buildToolRegistry({}, 'macos');
 
-    // Linux should not have phone_call
-    assert.ok(!linuxTools.find(t => t.name === 'phone_call'), 'phone_call should not be on linux');
-    // Android should have phone_call
-    assert.ok(androidTools.find(t => t.name === 'phone_call'), 'phone_call should be on android');
-    // Both should have exec
+    // Both desktop platforms get exec; an unknown platform gets nothing.
     assert.ok(linuxTools.find(t => t.name === 'exec'));
-    assert.ok(androidTools.find(t => t.name === 'exec'));
+    assert.ok(macosTools.find(t => t.name === 'exec'));
+    // wifi/brightness are desktop-only (linux+macos); no android remains.
+    assert.ok(linuxTools.find(t => t.name === 'wifi'));
+    assert.strictEqual(buildToolRegistry({}, 'android').length, 0, 'android is no longer a target platform');
   });
 
   it('filters by enabled config', () => {
@@ -133,8 +184,8 @@ describe('getToolsForUser', () => {
     const userTools = getToolsForUser(allTools, false, {});
     // exec is owner_only by default
     assert.ok(!userTools.find(t => t.name === 'exec'), 'non-owner should not see exec');
-    // open_url is not owner_only
-    assert.ok(userTools.find(t => t.name === 'open_url'), 'non-owner should see open_url');
+    // customer-safe tools remain visible
+    assert.ok(userTools.find(t => t.name === 'search_docs'), 'non-owner should see search_docs');
   });
 
   it('respects config override for owner_only', () => {
@@ -142,6 +193,22 @@ describe('getToolsForUser', () => {
     const config = { tools: { exec: { enabled: true, owner_only: false } } };
     const userTools = getToolsForUser(allTools, false, config);
     assert.ok(userTools.find(t => t.name === 'exec'), 'exec with owner_only:false should be visible');
+  });
+
+  it('FORCE_OWNER_ONLY host tools cannot be re-exposed to non-owners via config', () => {
+    const allTools = buildToolRegistry({}, 'linux');
+    // A stale tools.json trying to grant host tools to customers must not win.
+    const config = { tools: {
+      send_file: { enabled: true, owner_only: false },
+      open_url: { enabled: true, owner_only: false },
+      system_info: { enabled: true, owner_only: false },
+      notify: { enabled: true, owner_only: false },
+      media_control: { enabled: true, owner_only: false },
+    } };
+    const userTools = getToolsForUser(allTools, false, config);
+    for (const name of ['send_file', 'open_url', 'system_info', 'notify', 'media_control']) {
+      assert.ok(!userTools.find(t => t.name === name), `non-owner must not see ${name}`);
+    }
   });
 });
 

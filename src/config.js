@@ -18,11 +18,11 @@ const PATHS = {
   memory:       () => path.join(getMultisDir(), 'data', 'memory', 'chats'),
   governance:   () => path.join(getMultisDir(), 'auth', 'governance.json'),
   pinSessions:  () => path.join(getMultisDir(), 'auth', 'pin_sessions.json'),
-  beeperToken:  () => path.join(getMultisDir(), 'auth', 'beeper-token.json'),
   auditLog:     () => path.join(getMultisDir(), 'logs', 'audit.log'),
   injectionLog: () => path.join(getMultisDir(), 'logs', 'injection.log'),
   daemonLog:    () => path.join(getMultisDir(), 'logs', 'daemon.log'),
   pid:          () => path.join(getMultisDir(), 'run', 'multis.pid'),
+  beeperCursor: () => path.join(getMultisDir(), 'run', 'beeper-cursor.json'),
 };
 
 // Legacy constants — point to default location. Prefer PATHS for new code.
@@ -80,6 +80,11 @@ function ensureMultisDir() {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
+  // ~/.multis holds secrets — config.json (PIN hash + LLM API key + bot/MCP
+  // tokens), auth/, and logs/. Lock the tree to the owner (0700) so other local
+  // users can't traverse in and read them. Idempotent repair of an existing
+  // world-readable dir; best-effort (e.g. Windows).
+  try { fs.chmodSync(dir, 0o700); } catch { /* best-effort */ }
 
   // Migrate flat layout to subdirs (idempotent)
   migrateLegacy();
@@ -109,6 +114,14 @@ function ensureMultisDir() {
     }
   }
 }
+
+/**
+ * The bot's own secret env vars — the single authority for "which environment
+ * keys hold credentials". Consumers that must not leak them (exec child-env
+ * scrub, audit-log redaction) import this list so the two enforcement points
+ * can never drift. Add a new provider/token key here and both inherit it.
+ */
+const SECRET_ENV_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'TELEGRAM_BOT_TOKEN', 'MCP_AUTH_TOKEN'];
 
 /**
  * Load .env file into process.env (simple key=value parser)
@@ -185,6 +198,7 @@ function loadConfig() {
     pin_timeout_hours: 24,
     pin_lockout_minutes: 60,
     prompt_injection_detection: true,
+    rate_limit: { enabled: true, burst_per_min: 10, daily_per_sender: 100 },
     ...config.security
   };
 
@@ -213,6 +227,9 @@ function loadConfig() {
   // Ensure config.chats block exists (single source of truth for chat metadata)
   if (!config.chats) config.chats = {};
 
+  // Limited-admin windows (designated via /admin). Distinct from owner_id.
+  if (!Array.isArray(config.admins)) config.admins = [];
+
   // Migrate chat_modes → config.chats (one-time, backward compatible)
   const oldModes = config.platforms?.beeper?.chat_modes;
   if (oldModes && typeof oldModes === 'object') {
@@ -237,6 +254,36 @@ function loadConfig() {
     admin_retention_days: 365,
     log_retention_days: 30,
     ...config.memory
+  };
+
+  // Ensure a tool-round cap is always set so the bareguard gate bounds the
+  // agent loop even for configs created before this knob existed (unbounded =
+  // a runaway loop / cost amplifier).
+  if (!config.llm) config.llm = {};
+  if (config.llm.max_tool_rounds == null) config.llm.max_tool_rounds = 5;
+
+  // Document parser limits — bound untrusted attachment input (file size, PDF
+  // page count, parse wall-clock) to prevent OOM / decompression bombs.
+  if (!config.documents) config.documents = {};
+  config.documents = {
+    maxSize: 10485760,
+    maxPdfPages: 2000,
+    parseTimeoutMs: 30000,
+    allowedTypes: ['pdf', 'docx', 'txt', 'md'],
+    ...config.documents
+  };
+
+  // Interactive picker / wizard lifetimes. These bound how long an open prompt
+  // (mode/index/admin picker, business menu, business setup wizard) stays live
+  // before it expires and the router announces "re-send the command" instead of
+  // letting a late numeric reply fall through to RAG. In-memory only — a pending
+  // picker is intentionally dropped on restart. Quick numeric pickers get a short
+  // window; the multi-step business wizard gets longer so a slow fill isn't lost.
+  if (!config.interaction) config.interaction = {};
+  config.interaction = {
+    picker_ttl_minutes: 5,
+    wizard_ttl_minutes: 30,
+    ...config.interaction
   };
 
   // Migrate: set first allowed user as owner if owner_id missing
@@ -266,6 +313,10 @@ function saveConfig(config) {
   ensureMultisDir();
   const configPath = PATHS.config();
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8');
+  // Holds the PIN hash, LLM API key, and bot/MCP tokens — owner-only. mode on
+  // writeFileSync only applies on create, so chmod every save to repair an
+  // existing 0644 file too. Best-effort (non-POSIX FS).
+  try { fs.chmodSync(configPath, 0o600); } catch { /* best-effort */ }
 }
 
 /**
@@ -275,7 +326,12 @@ function saveConfig(config) {
 function backupConfig() {
   const configPath = PATHS.config();
   if (fs.existsSync(configPath)) {
-    fs.copyFileSync(configPath, configPath + '.bak');
+    const backupPath = configPath + '.bak';
+    fs.copyFileSync(configPath, backupPath);
+    // The backup holds the same secrets (PIN hash, API key, tokens). copyFileSync
+    // carries the source mode, but assert 0600 like saveConfig so the .bak can
+    // never lag behind on perms. Best-effort (non-POSIX FS).
+    try { fs.chmodSync(backupPath, 0o600); } catch { /* best-effort */ }
   }
 }
 
@@ -315,8 +371,47 @@ function addAllowedUser(userId) {
  * (senderId is platform-specific, won't match Telegram owner_id).
  */
 function isOwner(userId, config, msg) {
-  if (msg && msg.isSelf) return true;
+  // On Beeper the owner is identified by the account's own note-to-self chat —
+  // `isSelf` AND `isPersonalChat`. Requiring the personal-chat signal (not bare
+  // `isSelf`) keeps the owner grant from leaning solely on the transport flag:
+  // a self-message in a random/silent chat, or in a designated limited-admin
+  // chat, no longer confers owner. Defense-in-depth over the platform's own
+  // routing gate (PRD §11.1). Telegram never sets isSelf → uses owner_id below.
+  if (msg && msg.isSelf && msg.isPersonalChat) return true;
   return String(config.owner_id) === String(userId);
+}
+
+/**
+ * Check if a message comes from a privileged window — the super-admin (owner)
+ * OR a chat designated a LIMITED admin via /admin. Limited admins get staff
+ * commands (mode/index/ask) but NOT host shell (exec/read) — those stay
+ * owner-only. Designation is per-chat ("anything from this window is admin").
+ */
+function isAdmin(userId, config, msg) {
+  if (isOwner(userId, config, msg)) return true;
+  const chatId = msg?.chatId;
+  return Array.isArray(config.admins)
+    && chatId != null
+    && config.admins.map(String).includes(String(chatId));
+}
+
+/** Designate a chat as a limited admin window (idempotent). */
+function addAdmin(config, chatId) {
+  if (!Array.isArray(config.admins)) config.admins = [];
+  const id = String(chatId);
+  if (!config.admins.map(String).includes(id)) config.admins.push(id);
+  saveConfig(config);
+  return config;
+}
+
+/** Revoke a chat's limited-admin status. Returns true if it was an admin. */
+function removeAdmin(config, chatId) {
+  if (!Array.isArray(config.admins)) { config.admins = []; return false; }
+  const id = String(chatId);
+  const before = config.admins.length;
+  config.admins = config.admins.filter(c => String(c) !== id);
+  saveConfig(config);
+  return config.admins.length < before;
 }
 
 module.exports = {
@@ -326,10 +421,14 @@ module.exports = {
   updateChatMeta,
   addAllowedUser,
   isOwner,
+  isAdmin,
+  addAdmin,
+  removeAdmin,
   generatePairingCode,
   ensureMultisDir,
   getMultisDir,
   setMultisDir,
+  SECRET_ENV_KEYS,
   PATHS,
   MULTIS_DIR,
   CONFIG_PATH

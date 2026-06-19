@@ -3,6 +3,7 @@
   "pairing_code": "",
   "owner_id": null,
   "allowed_users": [],
+  "admins": [],
   "bot_mode": "personal",
   "platforms": {
     "telegram": {
@@ -11,7 +12,7 @@
     },
     "beeper": {
       "enabled": false,
-      "url": "http://localhost:23373",
+      "mcp_url": "http://localhost:23375",
       "command_prefix": "/",
       "poll_interval": 3000
     }
@@ -22,13 +23,15 @@
     "baseUrl": "",
     "model": "claude-haiku-4-5-20251001",
     "temperature": 0.7,
-    "maxTokens": 2048
+    "maxTokens": 2048,
+    "max_tool_rounds": 5
   },
   "security": {
     "pin_hash": null,
     "pin_timeout_hours": 24,
     "pin_lockout_minutes": 60,
-    "prompt_injection_detection": true
+    "prompt_injection_detection": true,
+    "rate_limit": { "enabled": true, "burst_per_min": 10, "daily_per_sender": 100 }
   },
   "business": {
     "name": null,
@@ -53,7 +56,13 @@
   },
   "documents": {
     "maxSize": 10485760,
+    "maxPdfPages": 2000,
+    "parseTimeoutMs": 30000,
     "allowedTypes": ["pdf", "docx", "txt", "md"]
+  },
+  "interaction": {
+    "picker_ttl_minutes": 5,
+    "wizard_ttl_minutes": 30
   },
   "governance": {
     "enabled": true,

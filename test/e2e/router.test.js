@@ -195,15 +195,16 @@ describe('M0 e2e — governance via slash-command path', () => {
   });
 });
 
-describe('M0 e2e — always-ask before exec (flags, F2 cutover)', () => {
-  // Confirm-before-every-exec now rides bareguard's flags primitive through the
-  // shared gate (default checkpoint_tools ['exec']), so /exec — previously the
-  // un-checkpointed slash path — also asks. Replaces the bare-agent Checkpoint.
+describe('M0 e2e — opt-in always-ask before exec (flags)', () => {
+  // Confirm-before-every-exec rides bareguard's flags primitive. It is now OPT-IN
+  // (checkpoint_tools:['exec']); when enabled, /exec asks through the single
+  // humanChannel — uniform with the LLM tool path. (Default is no blanket ask;
+  // friction is per-tier in policy — destructive→PIN.)
   let env;
   afterEach(() => env?.cleanup());
 
   function buildRouter(humanPrompt) {
-    env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1', llm: { provider: 'mock', apiKey: 'x' } });
+    env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1', security: { checkpoint_tools: ['exec'] }, llm: { provider: 'mock', apiKey: 'x' } });
     const platform = mockPlatform();
     return realGov(env.config, GOVERNANCE, humanPrompt).then(({ carrier }) => ({
       platform,
@@ -228,6 +229,42 @@ describe('M0 e2e — always-ask before exec (flags, F2 cutover)', () => {
     const { platform, router } = await buildRouter(async () => ({ decision: 'deny' }));
     await router(msg('/exec echo hello'), platform);
     assert.doesNotMatch(platform.lastTo('chat1').text, /hello/, 'denied exec did not run');
+  });
+
+  // End-to-end proof of the unified gate_reply dispatch: a REAL createHumanPrompt
+  // (not an injected autoResponder) parks its waiter on the shared PendingRegistry,
+  // and a second router('yes') message resolves it via the router's gate_reply
+  // case — the seam that replaced handleHumanReply/pendingHumanResponses.
+  it('a real humanChannel ask parks a waiter and a router reply resolves it (gate_reply round-trip)', async () => {
+    // Owner DM on Telegram: chatId === senderId === owner_id, so the ask routes
+    // back to the same conversation the reply will come from.
+    env = createTestEnv({ allowed_users: ['owner1'], owner_id: 'owner1', security: { checkpoint_tools: ['exec'] }, llm: { provider: 'mock', apiKey: 'x' } });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, {
+      provider: mockToolProvider([]), indexer: stubIndexer(),
+      tools: buildToolRegistry({}, 'linux'), toolsConfig: {}, runtimePlatform: 'linux',
+      // No injected gov / humanPrompt → the router builds the real createHumanPrompt
+      // wired to its own PendingRegistry.
+      fileless: true, governanceFile: GOVERNANCE,
+    });
+    router.registerPlatform('telegram', platform);
+
+    const ownerMsg = (text) => msg(text, { chatId: 'owner1', senderId: 'owner1' });
+
+    // Fire /exec but DON'T await — it suspends inside waitForReply until a reply
+    // arrives (just like the bot in production).
+    const pending = router(ownerMsg('/exec echo hello'), platform);
+    await new Promise((r) => setTimeout(r, 10)); // let the ask prompt park its waiter
+
+    const prompt = platform.lastTo('owner1');
+    assert.ok(prompt && /Approval needed|approve|allow/i.test(prompt.text), 'the ask prompted the owner');
+
+    // The reply flows through the router's single pending dispatch → gate_reply →
+    // entry.resolve('yes') → the parked challenge returns allow → exec proceeds.
+    await router(ownerMsg('yes'), platform);
+    await pending;
+
+    assert.match(platform.lastTo('owner1').text, /hello/, 'approved exec ran after the routed reply');
   });
 });
 

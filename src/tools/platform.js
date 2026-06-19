@@ -1,13 +1,10 @@
 /**
- * Platform detection — linux, macos, or android (Termux).
+ * Platform detection — linux or macos.
  */
 
 function getPlatform() {
   if (process.platform === 'darwin') return 'macos';
-  if (process.platform === 'linux') {
-    if (process.env.PREFIX?.includes('com.termux')) return 'android';
-    return 'linux';
-  }
+  if (process.platform === 'linux') return 'linux';
   return 'unknown';
 }
 

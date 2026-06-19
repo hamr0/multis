@@ -86,10 +86,10 @@ Everything stays on your machine. Your documents are indexed locally in SQLite. 
 
 ### For Beeper users
 
-Beeper Desktop must be:
-- Installed and logged in
-- Running with the **Developer API enabled** (Settings > Developers > toggle on)
-- Open whenever you want multis to respond to messages
+Beeper is reached through **beeperbox** (see [Platforms → Beeper](#beeper) for the three deploy shapes). You need:
+- A **beeperbox** endpoint reachable by multis — either the Docker container (headless Beeper inside) or beeperbox's lite server pointed at a local Beeper Desktop.
+- A Beeper account logged in to whichever Beeper Desktop beeperbox fronts, with the **Developer API enabled** (Settings > Developers > toggle on).
+- Whatever runs beeperbox (your computer or an always-on box) must be up whenever you want multis to respond.
 
 ### For fully local (no cloud) setup
 
@@ -127,35 +127,36 @@ multis init
 
 Run `multis init` to set everything up interactively. The wizard walks through four steps and can be re-run at any time to change settings.
 
-### Step 1: Choose Your Mode
+### Step 1: What do you want?
+
+First, pick what the bot is *for*:
 
 ```
 What do you need?
-  1. Personal assistant (Telegram only)
-  2. Personal assistant (Beeper) — recommended
-  3. Business chatbot (Beeper) — with optional Telegram admin channel
+  1) Personal assistant   — your private AI: commands, your docs, search
+  2) Business chatbot     — auto-responds to customers, escalates to you
 ```
 
-- **Option 1** sets up Telegram only. Simple, works anywhere.
-- **Option 2** connects Beeper, giving you access to WhatsApp, Signal, and other bridges through a single bot.
-- **Option 3** enables business mode where the bot auto-responds to customer messages on Beeper, while you manage it from Telegram.
+Then the wizard branches on that choice:
+
+**Personal — how do you want to run it?**
+- **1) Your personal bot** — just a Telegram bot. Nothing else to install.
+- **2) Personal bot + messenger assistant** — Telegram **+** Beeper, connecting all your messengers (WhatsApp · Signal · Telegram · Messenger + 50 more). Command it from Telegram or your Beeper Note-to-self.
+
+**Business — runs through Beeper.** A Telegram *bot* only sees people who message the bot directly — it can't reach your real contacts. To answer customers on their own channels you bridge them through Beeper, so business always uses Beeper, controlled from your Beeper Note-to-self. The wizard offers to also add Telegram as a backup admin channel.
 
 ### Step 2: Connect Platforms
 
-**Telegram:**
+**Telegram** (your personal bot, or a business admin channel):
 1. Open Telegram, search for `@BotFather`
 2. Send `/newbot`, pick a name and username
-3. Copy the bot token (looks like `123456:ABC-DEF...`)
-4. Paste it into the wizard
-5. The wizard verifies the token, then waits up to 60 seconds for you to open the bot in Telegram and send `/start` to pair as owner
+3. Copy the bot token (looks like `123456:ABC-DEF...`) and paste it in
+4. The wizard verifies the token, then waits up to 60 seconds for you to open the bot and send `/start` — that pairs you as **owner** (`owner_id`).
 
-**Beeper:**
-1. Open Beeper Desktop
-2. Go to Settings > Developers > enable the API toggle
-3. The wizard detects Beeper on `localhost:23373`
-4. A browser window opens for authorization
-5. Approve access and the wizard saves your token
-6. Your connected accounts (WhatsApp, Signal, etc.) are listed for confirmation
+**Beeper** (via beeperbox):
+1. Get beeperbox running first — the Docker container, or its lite server against your local Beeper Desktop (see [Platforms → Beeper](#beeper) for the shapes and [beeperbox](https://github.com/hamr0/beeperbox) for setup + the Beeper token).
+2. The wizard **probes `http://localhost:23375` automatically**: if a beeperbox is already running it shows your connected accounts (WhatsApp, Signal, etc.) and you press Enter to use it — no URL or token to type. Otherwise it asks for the MCP URL, plus an MCP token *only* if you exposed beeperbox over a network. A local/loopback box needs no token — and this MCP token is **not** your Beeper Desktop `BEEPER_TOKEN`.
+3. With Beeper you're the **owner via your Note-to-self chat** (no pairing code) — just open Note-to-self and send `/help`.
 
 ### Step 3: Choose an LLM Provider
 
@@ -238,7 +239,7 @@ Changes made via bot commands (`/mode business`, `/mode`, `/agent`, `/pin`) are 
 
 **How it works:** multis uses the Telegram Bot API via long polling. Your bot receives messages in real time as long as multis is running.
 
-**Pairing:** The first person to send `/start <pairing_code>` becomes the owner. The pairing code is printed when multis starts. Additional users can pair with the same code.
+**Pairing:** The first person to send `/start <pairing_code>` becomes the owner. The pairing code is printed when multis starts. Additional users can pair with the same code. *(Pairing is Telegram-only — on Beeper there's no code: you're the owner via your Note-to-self chat, detected automatically. See [Beeper](#beeper).)*
 
 **Commands:** All commands use the `/` prefix (`/ask`, `/exec`, `/help`, etc.). Plain text messages are treated as questions.
 
@@ -248,18 +249,40 @@ Changes made via bot commands (`/mode business`, `/mode`, `/agent`, `/pin`) are 
 
 ### Beeper
 
-**How it works:** multis polls the Beeper Desktop API on `localhost:23373` every 3 seconds. This gives you access to all your Beeper-bridged chats (WhatsApp, Signal, Instagram, etc.) through one bot.
+**How it works:** multis reaches Beeper through **[beeperbox](https://github.com/hamr0/beeperbox)** — a small server that exposes Beeper's watch/send capabilities as MCP verbs (cursor-based new-message polling, a reliable echo-guard so the bot never answers itself, send). multis is a **pure MCP client** — it does not poll Beeper's raw API itself. This reaches all your Beeper-bridged chats (WhatsApp, Signal, Instagram, etc.) through one bot.
+
+```
+  multis  ──MCP(:23375)──▶  beeperbox  ──raw HTTP(:23373)──▶  Beeper Desktop ──▶ bridges
+  (policy: modes,           (verbs: cursor watch,            (your account)     WhatsApp
+   owner, routing)           echo-guard, send, normalize)                       Telegram
+                                                                                 Signal …
+
+  ── the :23375 line is the split: ABOVE = multis decides; BELOW = beeperbox does ──
+```
+
+**beeperbox runs three ways — the verbs are identical, so multis is the same in all three (only `mcp_url` changes):**
+
+| Shape | What runs | Best for |
+|---|---|---|
+| **Full container** | one Docker container = headless Beeper + beeperbox | an always-on box (Pi/VPS), or a laptop without Beeper installed |
+| **Lite** | `node mcp/server.js` pointed at your *existing* local Beeper Desktop (`BEEPER_API=http://localhost:23373`) — no Docker, no Electron | a laptop where Beeper is already running |
+| **Remote** | the container on a VPS; multis talks to it over the network | a light client (laptop/phone) with the server doing the work |
 
 **Requirements:**
-- Beeper Desktop must be open and logged in
-- Developer API must be enabled (Settings > Developers)
-- Your computer must be awake and connected
+- A reachable beeperbox MCP endpoint (default `localhost:23375`) — pick a shape above.
+- A Beeper account logged into whichever Beeper Desktop beeperbox fronts (the container's headless one, or your local app with Settings > Developers > API enabled).
+- For **remote**, set an MCP token and use a tunnel/VPN — never expose `:23375` to the open internet.
+
+**Honest limitations:**
+- **~25 recent chats.** Beeper's live-sync keeps only the most-recent chats hot, so very idle chats may not surface in the watch feed. This is a Beeper-API limit, not multis's.
+- **Attachments work over local and remote** (requires beeperbox ≥ 0.8.0). Receiving a file (PDF/doc) for indexing works on any deploy shape — the bytes come through beeperbox's `download_asset` MCP verb on `:23375`, so a remote MCP-only connection works too (no raw Beeper API needed).
+- **Echo-guard is reliable** — beeperbox tags the bot's own sends by exact message id, so multis never responds to itself (no fragile text-matching).
 
 **Commands:** Use the `/` prefix in your personal (Note to Self) chat. Commands are only accepted from messages you send yourself — not from contacts.
 
 **Business mode:** In chats set to business mode, incoming messages from contacts trigger automatic LLM responses. Your self-sent messages in those chats are treated as commands.
 
-**File uploads:** Send a document in Beeper. The bot asks for the scope (public/admin/skip) before indexing.
+**File uploads:** Send a document in Beeper; the bot asks for the scope (public/admin/skip) before indexing. (Requires beeperbox ≥ 0.8.0 — works on local and remote deploys.)
 
 ### Using Both Together
 
@@ -286,27 +309,32 @@ Set this up with `multis init` option 3 (Business chatbot).
 | `/forget` | Clear all memory for this chat |
 | `/skills` | List available skills |
 | `/unpair` | Remove your pairing (you'll need the code to pair again) |
-| `/help` | Show available commands |
-| *(plain text)* | Treated as `/ask <your text>` |
+| `/help` | Show available commands — grouped by intent (Ask / Remember / Schedule / Run / Manage) and filtered to your role; send `/help <command>` (e.g. `/help mode`) for one command's details |
+| *(plain text)* | Drives the full tool-using agent (`/ask`): searches your documents and, on your machine, will find/read files and run things directly rather than telling you to do it yourself |
 
-### Owner-Only Commands
+> A message that starts with `/` but isn't a known command (e.g. a pasted path like `/home/you/file.txt`) is treated as plain text, not a command. A genuinely unknown command (e.g. `/frobnicate`) replies with *"Unknown command — try /help"* rather than being silently ignored.
 
-| Command | Description |
-|---------|-------------|
-| `/exec <command>` | Run a shell command on your machine (PIN required) |
-| `/read <path>` | Read a file or list a directory (PIN required) |
-| `/index <path> <public\|admin>` | Index a document or directory (PIN required) |
-| `/pin` | Change or set your PIN |
-| `/mode [mode] [target]` | View or set chat modes (business/silent/off) |
-| `/agent [name]` | View or assign an agent to this chat |
-| `/agents` | List all configured agents |
-| `/remind <duration> <action>` | Set a one-shot reminder (e.g. `/remind 30m call dentist`) |
-| `/cron <expr> <action>` | Set a recurring task (e.g. `/cron 0 9 * * 1-5 morning briefing`) |
-| `/jobs` | List all active reminders and cron jobs |
-| `/cancel <job-id>` | Cancel a scheduled job |
-| `/plan <goal>` | Break a goal into steps and execute them |
-| `/mode business` | Business persona menu (setup, show, clear, global default, assign chats) |
-| `@agentname <message>` | Route one message to a specific agent |
+### Owner / Admin Commands
+
+The **owner** (super-admin, set at setup) can do everything below. A **limited admin** (a chat you designate with `/admin`) gets the staff commands — `/mode`, `/index`, `/ask` — but **not** host shell (`/exec`, `/read`) or `/admin` itself.
+
+| Command | Who | Description |
+|---------|-----|-------------|
+| `/exec <command>` | Owner | Run a shell command on your machine (PIN required) |
+| `/read <path>` | Owner | Read a file or list a directory (PIN required) |
+| `/index <path> <public\|admin>` | Admin | Index a document or directory |
+| `/pin` | Owner | Change or set your PIN |
+| `/admin` | Owner | Designate / list / remove limited admins (`/admin`, `/admin list`, `/admin remove <n>`) |
+| `/mode [mode] [target]` | Admin | View or set chat modes (business/silent/off) |
+| `/agent [name]` | Owner | View or assign an agent to this chat |
+| `/agents` | Owner | List all configured agents |
+| `/remind <duration> <action>` | Owner | Set a one-shot reminder (e.g. `/remind 30m call dentist`) |
+| `/cron <expr> <action>` | Owner | Set a recurring task (e.g. `/cron 0 9 * * 1-5 morning briefing`) |
+| `/jobs` | Owner | List all active reminders and cron jobs |
+| `/cancel <job-id>` | Owner | Cancel a scheduled job |
+| `/plan <goal>` | Owner | Break a goal into steps and execute them |
+| `/mode business` | Owner | Business persona menu (setup, show, clear, global default, assign chats) |
+| `@agentname <message>` | Owner | Route one message to a specific agent |
 
 ---
 
@@ -382,6 +410,8 @@ The wizard walks through 5 steps. Re-running shows current values — send "skip
 
 Type "cancel" at any step to abort. Any `/command` typed during the wizard cancels it and routes the command normally.
 
+Interactive prompts don't wait forever: a numbered picker (mode/index/admin/business menu) lapses after a few minutes and the setup wizard after a longer window, after which the bot tells you the prompt expired and to re-run the command rather than treating a late reply as a question. Tune the windows under `interaction` in `~/.multis/config.json` (`picker_ttl_minutes`, `wizard_ttl_minutes`). Pending prompts are in-memory only, so restarting multis cancels any half-finished picker.
+
 Escalation notifications are sent automatically to all admin channels (Telegram + Beeper Note-to-self) — no manual configuration needed.
 
 ### How It Works
@@ -412,7 +442,7 @@ Index your documents so the bot can answer questions about them.
 | Markdown | `.md` | Splits on `#` headings |
 | Plain text | `.txt` | Indexed as a single chunk |
 
-**Max file size:** 10 MB
+**Max file size:** 10 MB (enforced before parsing). PDFs are also capped at 2000 pages and parsing is bounded by a wall-clock timeout, so an oversized or malformed document can't exhaust memory. All three are configurable under `documents` in `~/.multis/config.json` (`maxSize`, `maxPdfPages`, `parseTimeoutMs`).
 
 ### Indexing from Chat
 
@@ -444,9 +474,9 @@ The scope is required — the bot asks for it if you forget.
 | Scope | Who can search | Use for |
 |-------|---------------|---------|
 | `public` (or `kb`) | Everyone (customers in business mode, paired users) | Product manuals, FAQs, public knowledge |
-| `admin` | Owner only | Private notes, internal docs, sensitive info |
+| `admin` | Owner / staff | Private notes, internal docs, sensitive info |
 
-Customer messages in business mode only search `public` documents. The owner always searches everything.
+Customer messages in business mode search `public` documents plus that customer's own captured chat memory. The owner searches `public` + `admin` — but **not** other customers' captured memory by default. This is deliberate: it stops text a customer planted in their chat from later surfacing in your tool-enabled assistant as if it were a trusted instruction. (Retrieved document and memory text is also fenced as untrusted reference data for the same reason.)
 
 ### Checking Your Index
 
@@ -520,6 +550,8 @@ This means the bot remembers key facts from past conversations without you manua
 
 ## 13. Agents
 
+> **Personas are currently deferred (as of 2026-06-17).** The owner/personal path now always runs an *obedient* base prompt — the assistant follows your orders and uses its tools directly — and a configured `persona` is **not** applied there (it used to *replace* the base prompt, which made the model deflect file/command requests). Agent **routing** (`@mention`, per-chat assignment, the `[name]` prefix) and **business-mode** personas still work; the personal-persona/constitution layer returns with the upcoming memory module. The config below is still read for routing and business mode.
+
 Agents are named personas with different system prompts. You can configure multiple agents and route chats to specific ones.
 
 ### Default Setup
@@ -562,12 +594,14 @@ Restart after editing config: `multis restart`
 
 ### PIN-Protected Commands
 
-These commands require PIN authentication:
+These privileged capabilities require PIN authentication:
 - `/exec` — run shell commands
 - `/read` — read files
 - `/index` — index documents
 
-When you send a protected command, the bot asks for your PIN. After entering the correct PIN, your session is active for 24 hours (configurable).
+When you use one, the bot asks for your PIN. After entering the correct PIN, your session is active for 24 hours (configurable).
+
+**The PIN also guards the natural-language path.** If you ask in plain language ("delete the logs in ~/tmp") and the assistant goes to run a shell command or read a file while your PIN session is stale, it prompts `🔒 That action needs your PIN. Reply with your PIN:` and continues the same action once you reply. So rephrasing a command as a sentence can't sidestep the PIN. (`pin_prompt_timeout` in config bounds how long it waits.)
 
 ### Changing Your PIN
 
@@ -583,16 +617,26 @@ After 3 wrong PIN attempts, your account is locked for 60 minutes. The bot tells
 
 ### Governance
 
-All tool calls (shell commands, file reads, etc.) flow through a **bareguard Gate** (multis is bareguard's first production adopter, v0.13.0+; v0.14.0 closed the integration seam):
+All tool calls (shell commands, file reads, etc.) flow through a **bareguard Gate** (multis is bareguard's first production adopter, pinned to v0.7.0):
 - **Allowlist:** Safe commands like `ls`, `cat`, `grep`, `git`, `python`
 - **Denylist:** Dangerous commands like `rm`, `sudo`, `chmod`, `shutdown` (matched as regex patterns)
 - **Path restrictions:** Only allowed directories (like `~/Documents`) can be read or written
 - **Cost cap:** Optional per-run spending limit (set `max_cost_per_run` in config) — covers BOTH LLM tokens and tool execution. On halt, the bot pings you with current spend and asks whether to terminate
-- **Secrets redaction:** API keys (`ANTHROPIC_API_KEY`, etc.) are stripped from the audit log automatically
-- **Owner-only tools:** Shell exec and file read require owner privileges
-- **Audit:** Every gate decision is logged at `~/.multis/logs/gate.jsonl` (structured by phase: gate, record, approval, halt). App-level events (pairing, mode change, etc.) stay at `~/.multis/logs/audit.log`
+- **Secrets redaction:** the bot's own API keys/tokens (`ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, etc.) are stripped from **both** logs automatically — the gate decision log (`gate.jsonl`) and the app audit log (`audit.log`) — so an `/exec` command that happens to contain a secret never persists it in plaintext
+- **Exec isolation:** commands run via `/exec` run in a child shell with the bot's own credentials **removed from the environment** — a command (or an LLM-driven action) can't read `$ANTHROPIC_API_KEY` and leak it
+- **Owner-only tools:** All host-reaching tools (shell exec, file read/send, system info, opening URLs, notifications, media control) are owner-only and cannot be granted to a customer, even by editing `tools.json` — a customer is never a privileged principal. The `admin` document scope is owner-only too: a limited admin manages only the public knowledge base
+- **Approvals go to you:** confirmation/halt prompts route to the owner's channel, never to the chat that triggered them — no one can self-approve a privileged action
+- **Audit:** Every gate decision is logged at `~/.multis/logs/gate.jsonl` (structured by phase: gate, record, approval, halt, denied-owner, denied-pin). App-level events (pairing, mode change, etc.) stay at `~/.multis/logs/audit.log`
 
 Edit `~/.multis/auth/governance.json` to customize allowed/denied commands and paths.
+
+### Business-mode rate limiting
+
+In business mode each customer is rate-limited so a contact stuck in a loop can't run up your LLM bill or overload the process. Defaults: ~10 messages/minute (burst) and 100/day per customer. When a customer hits the cap, the bot **doesn't go silent** — it sends one short "I've flagged a human to follow up" message and escalates to you, so a genuinely busy customer reaches a person instead of a wall. Tune under `security.rate_limit` in `~/.multis/config.json` (`enabled`, `burst_per_min`, `daily_per_sender`); the message is `business.rate_limit_message`.
+
+### Bounding the agent loop
+
+`llm.max_tool_rounds` (default 5) caps how many tool calls the assistant can chain in a single reply, so it can't run away. Adjust in config.
 
 ---
 
@@ -648,21 +692,21 @@ multis only responds when it's running. If your computer is off or asleep, the b
 | Device | Cost | Notes |
 |--------|------|-------|
 | **VPS** (RackNerd, Hetzner, Oracle) | $0-20/year | Best option. Headless, always on. Oracle free tier = $0. |
-| **Android** (spare phone + Termux) | $0 | Runs Node.js. Bonus: SMS, calls, camera via termux-api. Must stay on and charged. |
+| **Android** | $0 | Telegram only — runs the Node.js bot under Termux, no host/device control. Must stay on and charged. |
 | **Laptop** | $0 | Works but sleeps. Fine for daytime use. |
 
 **Business use (Beeper bridges — WhatsApp, Signal, etc.):**
 
 | Device | Cost | Works? |
 |--------|------|--------|
-| **Raspberry Pi** | $35-60 one-time | Best option. Runs Beeper Desktop + multis. Silent, low power, always on. |
-| **Laptop / mini PC** | $0-80 | Works but must stay open and awake. |
-| **VPS** | $10-20/year | No — Beeper Desktop needs a display. No headless mode. |
-| **Android** | $0 | No — Beeper mobile doesn't expose the Desktop API (localhost:23373). |
+| **VPS** (RackNerd, Hetzner, Oracle) | $5-20/year | **Yes — now the easy option.** Run the beeperbox container (headless Beeper inside, ~600 MB RAM) + multis. Always on. |
+| **Raspberry Pi 4/5** | $35-60 one-time | Yes. beeperbox container (arm64 image) + multis. Silent, low power. |
+| **Laptop / mini PC** | $0-80 | Yes — beeperbox container, or lite mode against your local Beeper Desktop. Must stay awake. |
+| **Android** | $0 | Telegram only — no Docker / Beeper Desktop. |
 
-**Why can't Beeper run on a VPS?** Beeper Desktop is an Electron app (GUI). It needs a display to run. While you could hack around this with a virtual display (Xvfb), it's fragile and unsupported. Beeper's cloud connections sync your chats across their app — they don't expose an API for third-party bots.
+**Can Beeper run on a VPS now?** Yes — that's exactly what **beeperbox** is for: it containerizes a headless Beeper Desktop (virtual display + supervised Electron) and exposes the MCP verbs multis uses. The old "Beeper needs a GUI display, so no VPS" limitation is gone. Run beeperbox on the VPS and point multis at it (locally, or over a tunnel from a lighter client).
 
-**Bottom line:** For business mode with Beeper bridges, the Raspberry Pi is the cheapest and most reliable always-on option.
+**Bottom line:** For business mode with Beeper bridges, a small VPS or a Raspberry Pi running the beeperbox container is the cheapest, most reliable always-on option.
 
 ### Raspberry Pi Setup
 
@@ -698,32 +742,19 @@ node --version    # should show v20.x.x
 npm --version
 ```
 
-#### Step 3: Install Beeper Desktop
+#### Step 3: Run beeperbox (headless Beeper)
 
-Beeper provides an ARM64 AppImage for Linux:
-
-```bash
-# Download the ARM64 AppImage
-curl -L -o ~/Beeper.AppImage \
-  "https://api.beeper.com/desktop/download/linux/arm64/stable/com.automattic.beeper.desktop"
-
-# Make it executable
-chmod +x ~/Beeper.AppImage
-
-# Install FUSE (required for AppImages)
-sudo apt-get install -y fuse libfuse2
-```
-
-Launch Beeper:
+Instead of installing Beeper Desktop directly, run the **beeperbox** container — it bundles a headless Beeper Desktop and exposes the MCP verbs multis talks to. It ships an arm64 image for the Pi. Follow [beeperbox's quick start](https://github.com/hamr0/beeperbox):
 
 ```bash
-~/Beeper.AppImage
+# Needs Docker + the compose plugin (sudo apt-get install -y docker.io docker-compose-plugin)
+curl -LO https://raw.githubusercontent.com/hamr0/beeperbox/master/docker-compose.yml
+docker compose up -d
 ```
 
-1. Sign in to your Beeper account
-2. Connect your messaging accounts (WhatsApp, Signal, etc.) through the Beeper UI
-3. Go to **Settings > Developers** and enable the **Desktop API** toggle
-4. Keep Beeper running
+Then open `http://<pi-ip>:6080/vnc.html` once to sign into Beeper, connect your messaging accounts (WhatsApp, Signal, etc.), enable **Settings > Developers > API**, and save the token to beeperbox's `.env` (`echo "BEEPER_TOKEN=…" > .env && docker compose up -d`). beeperbox persists login across reboots and restarts cleanly.
+
+> No Docker? Use beeperbox **lite mode** instead — `node mcp/server.js` pointed at a local Beeper Desktop. See [beeperbox's docs](https://github.com/hamr0/beeperbox).
 
 #### Step 4: Install and configure multis
 
@@ -735,7 +766,7 @@ npm install -g multis
 multis init
 ```
 
-The wizard will detect Beeper on `localhost:23373` and walk you through connecting Telegram, choosing an LLM provider, and setting a PIN.
+The wizard asks for your beeperbox MCP URL (default `http://localhost:23375`) and an MCP token if you set one, then walks you through Telegram, an LLM provider, and a PIN.
 
 #### Step 5: Start multis and auto-start on boot
 
@@ -747,32 +778,15 @@ multis start
 multis status
 ```
 
-To auto-start multis and Beeper on boot, create a systemd user service:
+beeperbox already auto-restarts via its Docker `restart: unless-stopped` policy (and survives reboots if the Docker service is enabled: `sudo systemctl enable docker`). So you only need a systemd user service for multis:
 
 ```bash
 mkdir -p ~/.config/systemd/user
 
-# Beeper auto-start
-cat > ~/.config/systemd/user/beeper.service << 'EOF'
-[Unit]
-Description=Beeper Desktop
-After=graphical-session.target
-
-[Service]
-ExecStart=/home/pi/Beeper.AppImage
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=default.target
-EOF
-
-# multis auto-start (after Beeper)
 cat > ~/.config/systemd/user/multis.service << 'EOF'
 [Unit]
 Description=multis AI assistant
-After=beeper.service
-Wants=beeper.service
+After=network-online.target
 
 [Service]
 ExecStart=/usr/bin/node /usr/lib/node_modules/multis/src/index.js
@@ -784,9 +798,8 @@ Environment=HOME=/home/pi
 WantedBy=default.target
 EOF
 
-# Enable both
-systemctl --user enable beeper multis
-systemctl --user start beeper multis
+systemctl --user enable multis
+systemctl --user start multis
 
 # Allow user services to run without a login session
 sudo loginctl enable-linger pi
@@ -807,11 +820,11 @@ multis doctor
 tail -f ~/.multis/logs/daemon.log
 ```
 
-The Pi sits on your network, always on, running Beeper + multis. Customers message on WhatsApp, the bot responds automatically.
+The Pi sits on your network, always on, running the beeperbox container + multis. Customers message on WhatsApp, the bot responds automatically.
 
 ### VPS Setup
 
-For Telegram-only (personal use), a cheap VPS works perfectly.
+A cheap VPS works perfectly for Telegram-only — and now for **Beeper too**: run the beeperbox container on the same VPS (see [Step 3 above](#step-3-run-beeperbox-headless-beeper)) and point multis at `http://localhost:23375`. The steps below cover the Telegram-only base; add beeperbox if you want bridges.
 
 **Cheapest options:**
 - **Oracle Cloud Always Free** — 4 ARM cores, 24GB RAM, free forever (if you can get a slot)
@@ -830,7 +843,7 @@ apt-get install -y nodejs
 # Install multis
 npm install -g multis
 
-# Setup (choose Telegram only, no Beeper)
+# Setup (Telegram only here; add Beeper by running the beeperbox container first)
 multis init
 
 # Start as daemon
@@ -905,17 +918,51 @@ Restart after changing: `multis restart`
 
 ## 18. Adding a Second Admin
 
-Currently, multis has a single owner model — the first person to pair becomes the owner. Other paired users can use basic commands (`/ask`, `/search`, `/memory`) but not owner commands.
+There is one **super-admin** (the owner) — the first person to pair, set at setup. The super-admin is fixed and is the only one who can run host shell (`/exec`, `/read`), change the PIN, or designate other admins.
 
-To pair a second user:
+You can promote another chat to a **limited admin** — staff who help run the bot (manage chat modes, update the knowledge base) without access to your machine.
 
-1. Run `multis status` or check the startup logs for the pairing code
-2. Have the user send `/start <pairing_code>` to the bot on Telegram
-3. They'll be paired as a regular user (not owner)
+### Designate a limited admin
 
-To make someone the owner, edit `~/.multis/config.json` and set `owner_id` to their user ID, then restart.
+From an admin window, send:
 
-**Note:** There can only be one owner. Owner-only commands (`/exec`, `/read`, `/index`, `/mode`, `/pin`, etc.) are restricted to the owner.
+```
+/admin
+```
+
+The bot lists your active chats, numbered. Reply with a number, confirm, then enter your PIN:
+
+```
+Pick a chat to make a LIMITED admin (mode/index/ask — NOT shell):
+  1) Acme Support
+  2) Jordan
+Reply with a number.
+> 1
+Make "Acme Support" a limited admin (mode/index/ask, no shell)? Reply "yes" to confirm.
+> yes
+Enter your PIN to confirm:
+> ••••
+Done. "Acme Support" is now a limited admin.
+```
+
+From then on, messages from that chat are treated as a command channel: that person can use `/mode`, `/index`, `/ask` and the bot's natural-language help. They **cannot** use `/exec`, `/read`, or `/admin`.
+
+### Manage limited admins
+
+```
+/admin list            # show current limited admins
+/admin remove 1        # revoke by number
+```
+
+**What a limited admin can and can't do:**
+
+| | Super-admin (owner) | Limited admin |
+|---|---|---|
+| `/mode`, `/index`, `/ask`, monitoring | ✅ | ✅ |
+| `/exec`, `/read` (host shell) | ✅ (PIN) | ❌ |
+| `/admin`, `/pin` | ✅ | ❌ |
+
+All admins share the **one** PIN (the super-admin's), set at setup or with `/pin`.
 
 ---
 
@@ -930,10 +977,10 @@ To make someone the owner, edit `~/.multis/config.json` and set `owner_id` to th
 
 ### Beeper not working
 
-1. Is Beeper Desktop open? It must be running.
-2. Is the Developer API enabled? Settings > Developers > toggle on
-3. Can you reach it? `curl http://localhost:23373/v1/spec` should return JSON
-4. Re-authorize: `multis init` and redo the Beeper step
+1. Is beeperbox running? (the Docker container, or `node mcp/server.js` in lite mode)
+2. Can multis reach the MCP endpoint? `curl -X POST http://localhost:23375 -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'` should return JSON.
+3. Does beeperbox see your account? The startup log shows `connected via beeperbox MCP … (N accounts)`. `0 accounts` means Beeper isn't logged in / bridges aren't linked inside beeperbox — fix that in beeperbox (its noVNC login or your local Beeper Desktop).
+4. Wrong endpoint/token? Check `platforms.beeper.mcp_url` / `mcp_token` in `~/.multis/config.json`, or re-run `multis init` and redo the Beeper step.
 
 ### LLM errors
 

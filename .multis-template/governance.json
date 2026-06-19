@@ -36,17 +36,9 @@
       "shutdown", "reboot", "halt"
     ]
   },
+  "_paths_note": "Single-owner model: the owner has full machine access; customers never get host tools (gated at ownerCheck in gate.js). allowed=['/'] lets the owner read/find/grep anywhere; denied=[] = no path fencing. Destructive *commands* (the denylist above) are PIN-gated, not the filesystem.",
   "paths": {
-    "allowed": [
-      "~/Documents",
-      "~/Downloads",
-      "~/Projects",
-      "~/PycharmProjects",
-      "~/Desktop"
-    ],
-    "denied": [
-      "/etc", "/var", "/usr", "/System", "/bin", "/sbin",
-      "C:\\Windows", "C:\\Program Files"
-    ]
+    "allowed": ["/"],
+    "denied": []
   }
 }

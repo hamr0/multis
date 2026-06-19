@@ -2,7 +2,6 @@ const { Telegraf } = require('telegraf');
 const { Platform } = require('./base');
 const { Message } = require('./message');
 const { logAudit } = require('../governance/audit');
-const { DocumentIndexer } = require('../indexer/index');
 
 /**
  * Telegram platform adapter.
@@ -16,7 +15,6 @@ class TelegramPlatform extends Platform {
       throw new Error('Telegram bot token is required');
     }
     this.bot = new Telegraf(token);
-    this.indexer = new DocumentIndexer();
   }
 
   async start() {
@@ -96,7 +94,6 @@ class TelegramPlatform extends Platform {
       raw: ctx,
     });
     msg._document = ctx.message.document;
-    msg._indexer = this.indexer;
     msg._telegram = ctx.telegram;
 
     this._messageCallback(msg, this);

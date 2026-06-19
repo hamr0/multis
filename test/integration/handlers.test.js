@@ -1,19 +1,11 @@
 const fs = require('fs');
-const os = require('os');
-const path = require('path');
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const { createMessageRouter, buildAgentRegistry, resolveAgent, clearAdminPauses } = require('../../src/bot/handlers');
 const { updateChatMeta, backupConfig } = require('../../src/config');
 const { PinManager, hashPin } = require('../../src/security/pin');
+const { PendingRegistry } = require('../../src/bot/pending');
 const { createTestEnv, mockPlatform, mockLLM, msg } = require('../helpers/setup');
-
-/** Create a real temp file that downloadAsset can "return" so fs.readFileSync works */
-function tmpFile(content = 'test content') {
-  const p = path.join(os.tmpdir(), `multis-test-${Date.now()}`);
-  fs.writeFileSync(p, content);
-  return p;
-}
 
 // ---------------------------------------------------------------------------
 // Pairing
@@ -80,7 +72,7 @@ describe('Command routing', () => {
 
   it('/help returns command list', async () => {
     await router(msg('/help'), platform);
-    assert.match(platform.sent[0].text, /multis commands/);
+    assert.match(platform.sent[0].text, /what can I do/);
   });
 
   it('/search with no results says so', async () => {
@@ -141,12 +133,12 @@ describe('RAG pipeline', () => {
 
     await router(msg('/ask test question', { senderId: 'user2', chatId: 'chat2' }), platform);
 
-    // Verify search was called with roles
+    // Verify search was called with the customer's scope (own ∪ global-KB via litectx).
     const call = indexer.searchCalls[0];
-    assert.deepStrictEqual(call.opts.roles, ['public', 'user:chat2']);
+    assert.strictEqual(call.opts.scope, 'user:chat2');
   });
 
-  it('admin search has no scope restriction', async () => {
+  it('admin search is scoped to public + admin (not customer scopes)', async () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();
     const llm = mockLLM('admin answer');
@@ -155,8 +147,10 @@ describe('RAG pipeline', () => {
 
     await router(msg('/ask admin question'), platform);
 
+    // #6: the owner recalls 'admin' (∪ global-KB via litectx), NOT customer (user:*)
+    // scopes — prevents customer-planted content from entering the tool-enabled loop.
     const call = indexer.searchCalls[0];
-    assert.strictEqual(call.opts.roles, undefined);
+    assert.strictEqual(call.opts.scope, 'admin');
   });
 });
 
@@ -232,6 +226,112 @@ describe('PIN auth', () => {
     await router(msg('/exec ls'), platform);
     assert.match(platform.sent[0].text, /locked/i);
   });
+
+  it('two concurrent PIN replies execute the stored command exactly once (no double-run race)', async () => {
+    // The race: the get→clear window spans an `await platform.send('PIN accepted')`,
+    // so two near-simultaneous correct PINs could both reach executeCommand. The
+    // fix claims the entry synchronously before the first await.
+    const pinHash = hashPin('1234');
+    const env = createTestEnv({
+      allowed_users: ['user1'],
+      owner_id: 'user1',
+      governance: { commands: { allowlist: ['echo'], denylist: [] }, paths: { allowed: ['.*'], denied: [] } },
+      security: { pin_hash: pinHash, pin_timeout_hours: 24, checkpoint_tools: [] },
+    });
+    const platform = mockPlatform();
+    const pinManager = new PinManager(env.config);
+    pinManager.sessions = {};
+    const router = createMessageRouter(env.config, {
+      llm: mockLLM(),
+      indexer: stubIndexer(),
+      pinManager,
+      fileless: true,
+      governanceFile: { commands: { allowlist: ['echo'], denylist: [] }, paths: { allowed: ['.*'], denied: [] } },
+    });
+    router.registerPlatform('telegram', platform);
+
+    await router(msg('/exec echo hello'), platform);
+    assert.match(platform.sent[0].text, /Enter your PIN/);
+
+    // Fire the two replies WITHOUT awaiting the first — they interleave the way
+    // two inbound messages would. (On Telegram the loser becomes an implicit
+    // /ask once the PIN entry is gone; only the winner runs the exec.)
+    await Promise.all([router(msg('1234'), platform), router(msg('1234'), platform)]);
+
+    const ran = platform.sent.filter((s) => /hello/.test(s.text));
+    assert.strictEqual(ran.length, 1, 'the PIN-gated command executed exactly once');
+  });
+
+  it('a non-digit message while a PIN is pending does not consume or disturb the pending command', async () => {
+    const pinHash = hashPin('1234');
+    const env = createTestEnv({
+      allowed_users: ['user1'],
+      owner_id: 'user1',
+      security: { pin_hash: pinHash, pin_timeout_hours: 24, checkpoint_tools: [] },
+    });
+    const platform = mockPlatform();
+    const pinManager = new PinManager(env.config);
+    pinManager.sessions = {};
+    const pending = new PendingRegistry();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer(), pinManager, pending });
+
+    await router(msg('/exec ls'), platform);
+    assert.match(platform.sent[0].text, /Enter your PIN/);
+
+    // A non-digit reply must NOT be read as a PIN — no "Wrong PIN", no "accepted",
+    // and the pending command survives for the real PIN that follows.
+    await router(msg('hello there'), platform);
+    assert.ok(pending.peek('chat1', 'user1'), 'pending PIN command still parked after a non-digit');
+    assert.ok(!platform.sent.some((s) => /Wrong PIN|accepted/i.test(s.text)), 'non-digit was not treated as a PIN attempt');
+
+    // The real PIN still works afterwards.
+    await router(msg('1234'), platform);
+    assert.ok(platform.sent.some((s) => /accepted/i.test(s.text)), 'correct PIN still accepted after the non-digit');
+  });
+
+  it('a PIN reply that arrives after the prompt EXPIRES is announced, not routed to /ask (orphaned-reply bug)', async () => {
+    // The bug: once the PIN prompt's pending state lapses, the user's late PIN
+    // digits fell through the dispatch and, in a natural/business chat, landed
+    // in the RAG pipeline as a search query (or were silently dropped). The
+    // registry's announce-on-expiry must intercept it instead.
+    const pinHash = hashPin('1234');
+    const env = createTestEnv({
+      allowed_users: ['user1'],
+      owner_id: 'user1',
+      security: { pin_hash: pinHash, pin_timeout_hours: 24 },
+    });
+    const platform = mockPlatform();
+    const pinManager = new PinManager(env.config);
+    pinManager.sessions = {};
+
+    // Injected clock so we can age the pending entry past its TTL deterministically.
+    let clock = 1_000_000;
+    const pending = new PendingRegistry({ now: () => clock });
+
+    const llm = mockLLM('RAG answer — should never be produced for a PIN reply');
+    const router = createMessageRouter(env.config, {
+      llm,
+      indexer: stubIndexer(),
+      pinManager,
+      pending,
+    });
+
+    // Owner issues a protected command → PIN prompt; entry stamped at t0.
+    await router(msg('/exec ls'), platform);
+    assert.match(platform.sent[0].text, /Enter your PIN/);
+
+    // Time passes beyond the 5-minute TTL, then the owner finally types the PIN
+    // in a natural-routed chat (the exact path the old code sent to routeAsk).
+    clock += 6 * 60 * 1000;
+    await router(msg('1234', { routeAs: 'natural' }), platform);
+
+    // It is intercepted as an expiry announcement…
+    assert.match(platform.sent[1].text, /expired/i);
+    // …NOT handed to the LLM/RAG pipeline as a query…
+    assert.strictEqual(llm.calls.length, 0, 'late PIN digits must not reach the LLM');
+    // …and the stale entry is gone (announce-once).
+    assert.strictEqual(pending.get('chat1', 'user1'), null);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -260,6 +360,53 @@ describe('Business escalation', () => {
     assert.strictEqual(llm.calls.length, 1);
     const custMsg = platform.lastTo('cust_chat');
     assert.match(custMsg.text, /refund/i);
+  });
+
+  it('rate-limits a customer past the burst cap: canned reply + escalation, no LLM (#1)', async () => {
+    const env = createTestEnv({
+      allowed_users: ['user1'],
+      owner_id: 'user1',
+      security: { rate_limit: { enabled: true, burst_per_min: 2, daily_per_sender: 100 } },
+      business: { escalation: { escalate_keywords: [], admin_chat: 'admin_chat' } }
+    });
+    const platform = mockPlatform();
+    const llm = mockLLM('answer');
+    const router = createMessageRouter(env.config, { llm, indexer: stubIndexer([], { totalChunks: 1 }) });
+    router.registerPlatform('beeper', platform); // so escalation can route
+
+    const send = () => router(
+      msg('hello', { senderId: 'cust1', chatId: 'cust_chat', routeAs: 'business' }), platform);
+
+    await send(); await send();            // both under the cap → LLM answers
+    assert.strictEqual(llm.calls.length, 2, 'first two messages reach the LLM');
+
+    await send();                          // third trips the burst cap
+    assert.strictEqual(llm.calls.length, 2, 'blocked message must NOT reach the LLM');
+    assert.match(platform.lastTo('cust_chat').text, /flagged a human|limit/i, 'customer gets a handoff message');
+    assert.match(platform.lastTo('admin_chat').text, /Rate limit/i, 'admin is escalated to');
+
+    await send();                          // still blocked, but no repeat canned spam
+    assert.strictEqual(llm.calls.length, 2);
+  });
+
+  it('owner is never rate-limited in their own business chat', async () => {
+    const env = createTestEnv({
+      allowed_users: ['user1'],
+      owner_id: 'user1',
+      security: { rate_limit: { enabled: true, burst_per_min: 1, daily_per_sender: 100 } },
+      business: { escalation: { escalate_keywords: [] } }
+    });
+    const platform = mockPlatform();
+    const llm = mockLLM('answer');
+    const router = createMessageRouter(env.config, { llm, indexer: stubIndexer() });
+    // Owner messages in a business chat pause the bot (no LLM) but must never be
+    // counted/blocked as a customer — send several, none should hit the limiter.
+    for (let i = 0; i < 3; i++) {
+      await router(msg('note to self', { senderId: 'user1', chatId: 'c', routeAs: 'business' }), platform);
+    }
+    // No canned rate-limit message ever sent to the owner.
+    const last = platform.lastTo('c');
+    assert.ok(!last || !/flagged a human/i.test(last.text), 'owner must not see a rate-limit handoff');
   });
 
   it('0 chunks still calls LLM (no canned escalation)', async () => {
@@ -468,6 +615,49 @@ describe('Owner commands', () => {
     await router(msg('/index'), platform);
     assert.match(platform.sent[0].text, /Usage/);
   });
+
+  // Security regression: `/index <path>` reads from the HOST filesystem
+  // (indexFile -> fs.readFileSync), so it is an owner-only capability — same trust
+  // boundary as /exec and /read. A limited admin must not be able to point it at an
+  // arbitrary host path (`/index /etc/passwd public` would be a host-file read that
+  // also lands the bytes in the world-readable KB), in ANY scope.
+  it('limited admin CANNOT /index a host path (admin scope)', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1', admins: ['staffchat'] });
+    const platform = mockPlatform();
+    let called = false;
+    const indexer = stubIndexer();
+    indexer.indexFile = async () => { called = true; return 5; };
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
+
+    await router(msg('/index /tmp/x.pdf admin', { senderId: 'staff', chatId: 'staffchat' }), platform);
+    assert.strictEqual(called, false, 'host-path index must not run for a limited admin');
+    assert.match(platform.lastTo('staffchat').text, /owner only/i);
+  });
+
+  it('limited admin CANNOT /index a host path (public scope)', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1', admins: ['staffchat'] });
+    const platform = mockPlatform();
+    let called = false;
+    const indexer = stubIndexer();
+    indexer.indexFile = async () => { called = true; return 5; };
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
+
+    await router(msg('/index /tmp/x.pdf public', { senderId: 'staff', chatId: 'staffchat' }), platform);
+    assert.strictEqual(called, false, 'host-path index must not run for a limited admin');
+    assert.match(platform.lastTo('staffchat').text, /owner only/i);
+  });
+
+  it('owner CAN /index to the admin scope', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    let indexedRole = null;
+    const indexer = stubIndexer();
+    indexer.indexFile = async (p, role) => { indexedRole = role; return 5; };
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
+
+    await router(msg('/index /tmp/x.pdf admin'), platform);
+    assert.strictEqual(indexedRole, 'admin');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -479,14 +669,14 @@ describe('Search with results', () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();
     const chunks = [
-      { chunkId: 1, content: 'Relevant content about widgets', name: 'manual.pdf', documentType: 'pdf', sectionPath: ['Chapter 1', 'Widgets'], score: 1.0 }
+      { name: 'manual.pdf', content: 'Relevant content about widgets', score: 1.0 }
     ];
     const indexer = stubIndexer(chunks);
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
     await router(msg('/search widgets'), platform);
     const reply = platform.sent[0].text;
-    assert.match(reply, /Chapter 1 > Widgets/);
+    assert.match(reply, /manual\.pdf/);
     assert.match(reply, /Relevant content about widgets/);
   });
 
@@ -498,7 +688,7 @@ describe('Search with results', () => {
 
     await router(msg('/search test', { senderId: 'user2', chatId: 'chat2' }), platform);
     const call = indexer.searchCalls[0];
-    assert.deepStrictEqual(call.opts.roles, ['public', 'user:chat2']);
+    assert.strictEqual(call.opts.scope, 'user:chat2');
   });
 });
 
@@ -511,13 +701,11 @@ describe('Info commands', () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();
     const indexer = stubIndexer();
-    indexer.getStats = () => ({ indexedFiles: 3, totalChunks: 42, byType: { pdf: 30, docx: 12 } });
+    indexer.stats = () => ({ total: 42 });
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
     await router(msg('/docs'), platform);
-    assert.match(platform.sent[0].text, /Indexed documents: 3/);
-    assert.match(platform.sent[0].text, /Total chunks: 42/);
-    assert.match(platform.sent[0].text, /pdf: 30/);
+    assert.match(platform.sent[0].text, /Indexed items: 42/);
   });
 
   it('/skills lists available skills', async () => {
@@ -609,6 +797,70 @@ describe('Help visibility', () => {
     const text = platform.sent[0].text;
     assert.ok(!text.includes('/exec'), 'non-owner should not see /exec');
     assert.ok(!text.includes('/read'), 'non-owner should not see /read');
+  });
+
+  it('help is grouped by intent and lists /mode exactly once (dedup)', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/help'), platform);
+    const text = platform.sent[0].text;
+    // Intent group headers present (the wall is now organized).
+    for (const g of ['ASK', 'REMEMBER', 'SCHEDULE', 'RUN', 'MANAGE']) {
+      assert.match(text, new RegExp(`\\n${g} `), `group ${g} header present`);
+    }
+    // The old double-/mode is gone: exactly one /mode line.
+    const modeLines = text.split('\n').filter(l => /^\s*\/mode\b/.test(l));
+    assert.strictEqual(modeLines.length, 1, 'exactly one /mode entry');
+  });
+
+  it('non-owner help omits the RUN and SCHEDULE groups entirely', async () => {
+    const env = createTestEnv({ allowed_users: ['user1', 'user2'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/help', { senderId: 'user2' }), platform);
+    const text = platform.sent[0].text;
+    assert.ok(!/\nRUN /.test(text), 'no RUN group for a non-owner');
+    assert.ok(!/\nSCHEDULE /.test(text), 'no SCHEDULE group for a non-owner');
+    assert.match(text, /\nASK /, 'ASK group still shown');
+  });
+
+  it('/help <command> shows that command\'s detail (progressive disclosure)', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/help mode'), platform);
+    const text = platform.sent[0].text;
+    assert.match(text, /\/mode \[business\|silent\|off\]/, 'shows the usage line');
+    assert.match(text, /business-persona menu/, 'shows the detail blurb');
+    assert.ok(!/\nASK /.test(text), 'detail view is not the full menu');
+  });
+
+  it('/help <unknown> falls back to the full menu with a nudge', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/help nonsense'), platform);
+    const text = platform.sent[0].text;
+    assert.match(text, /No command "\/nonsense"/, 'nudges on unknown topic');
+    assert.match(text, /\nASK /, 'still shows the full menu');
+  });
+
+  it('a non-owner cannot read owner-command detail via /help <command>', async () => {
+    const env = createTestEnv({ allowed_users: ['user1', 'user2'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/help exec', { senderId: 'user2' }), platform);
+    const text = platform.sent[0].text;
+    // exec is owner-only; a non-owner topic lookup must not reveal it — falls
+    // back to their (exec-free) menu.
+    assert.match(text, /No command "\/exec"/, 'owner-only topic not disclosed');
+    assert.ok(!text.includes('run a shell command'), 'no exec detail leaked');
   });
 });
 
@@ -834,13 +1086,17 @@ describe('Agent routing in /ask', () => {
     const router = createMessageRouter(env.config, { llm, indexer: stubIndexer() });
 
     await router(msg('/ask @coder how do I parse JSON?'), platform);
-    // Should have [coder] prefix since multiple agents
+    // @mention still routes (name prefix shown since multiple agents exist) and
+    // the @mention is stripped from the question.
     assert.match(platform.lastTo('chat1').text, /\[coder\] code answer/);
-    // System prompt should use coder persona (bareagent prepends system message)
+    // Persona is DEFERRED (obedient-bot-first; see dispatch-rewrite-decision):
+    // a configured persona must NOT replace the base prompt, or the model loses
+    // "use your tools" and deflects. Owner path always runs the obedient base.
     const call = llm.calls[0];
     const systemMsg = call.messages.find(m => m.role === 'system');
     assert.ok(systemMsg, 'should have system message');
-    assert.match(systemMsg.content, /senior developer/i);
+    assert.doesNotMatch(systemMsg.content, /senior developer/i, 'persona must not replace base prompt');
+    assert.match(systemMsg.content, /USE YOUR TOOLS/i, 'obedient base prompt is used');
   });
 
   it('single agent does not prefix response', async () => {
@@ -865,6 +1121,26 @@ describe('Agent routing in /ask', () => {
     await router(msg('/ask hello'), platform);
     assert.strictEqual(platform.lastTo('chat1').text, 'classic answer');
   });
+
+  it('unknown command replies instead of silently dropping (#4)', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM('x'), indexer: stubIndexer() });
+
+    await router(msg('/frobnicate the widget'), platform);
+    assert.match(platform.lastTo('chat1').text, /unknown command: \/frobnicate/i);
+  });
+
+  it('a pasted path routes to the agent loop, not an unknown-command drop (#4)', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const llm = mockLLM('searching for that');
+    const router = createMessageRouter(env.config, { llm, indexer: stubIndexer() });
+
+    await router(msg('/home/hamr/Documents/resumes/'), platform);
+    // Reaches the agent loop (mock answer) rather than "unknown command".
+    assert.strictEqual(platform.lastTo('chat1').text, 'searching for that');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -878,7 +1154,7 @@ describe('Beeper file indexing', () => {
     let indexedName = null, indexedRole = null;
     const indexer = stubIndexer();
     indexer.indexBuffer = async (buf, name, role) => { indexedName = name; indexedRole = role; return 3; };
-    platform.downloadAsset = async (url) => tmpFile();
+    platform.downloadAsset = async (url) => Buffer.from('test content');
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
     const m = msg('/index kb', {
@@ -901,7 +1177,8 @@ describe('Beeper file indexing', () => {
     const env = createTestEnv({ allowed_users: ['self1'], owner_id: 'self1' });
     const platform = mockPlatform();
     const indexer = stubIndexer();
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
+    const pending = new PendingRegistry();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer, pending });
 
     const m = msg('here is a doc', {
       platform: 'beeper', senderId: 'self1', isSelf: true
@@ -916,7 +1193,8 @@ describe('Beeper file indexing', () => {
     await router(m, platform);
     assert.match(platform.lastTo('chat1').text, /Index as/);
     assert.match(platform.lastTo('chat1').text, /3\. Skip/);
-    assert.ok(env.config._pendingIndex?.self1, 'should store pending index');
+    const entry = pending.peek('chat1', 'self1');
+    assert.ok(entry && entry.kind === 'index', 'should store pending index in registry');
   });
 
   it('scope reply 1 indexes as public', async () => {
@@ -925,12 +1203,13 @@ describe('Beeper file indexing', () => {
     let indexedRole = null;
     const indexer = stubIndexer();
     indexer.indexBuffer = async (buf, name, role) => { indexedRole = role; return 5; };
-    platform.downloadAsset = async () => tmpFile();
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
+    platform.downloadAsset = async () => Buffer.from('test content');
+    const pending = new PendingRegistry();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer, pending });
 
-    env.config._pendingIndex = {
-      self1: { fileName: 'report.pdf', srcURL: 'mxc://beeper.local/abc123' }
-    };
+    pending.set('chat1', 'self1', 'index', {
+      data: { fileName: 'report.pdf', srcURL: 'mxc://beeper.local/abc123' }
+    });
 
     const m = msg('1', {
       platform: 'beeper', senderId: 'self1', isSelf: true
@@ -946,12 +1225,13 @@ describe('Beeper file indexing', () => {
     let indexedRole = null;
     const indexer = stubIndexer();
     indexer.indexBuffer = async (buf, name, role) => { indexedRole = role; return 2; };
-    platform.downloadAsset = async () => tmpFile();
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
+    platform.downloadAsset = async () => Buffer.from('test content');
+    const pending = new PendingRegistry();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer, pending });
 
-    env.config._pendingIndex = {
-      self1: { fileName: 'notes.md', srcURL: 'mxc://beeper.local/def456' }
-    };
+    pending.set('chat1', 'self1', 'index', {
+      data: { fileName: 'notes.md', srcURL: 'mxc://beeper.local/def456' }
+    });
 
     const m = msg('2', {
       platform: 'beeper', senderId: 'self1', isSelf: true
@@ -965,18 +1245,47 @@ describe('Beeper file indexing', () => {
     const env = createTestEnv({ allowed_users: ['self1'], owner_id: 'self1' });
     const platform = mockPlatform();
     const indexer = stubIndexer();
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
+    const pending = new PendingRegistry();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer, pending });
 
-    env.config._pendingIndex = {
-      self1: { fileName: 'report.pdf', srcURL: 'mxc://beeper.local/abc123' }
-    };
+    pending.set('chat1', 'self1', 'index', {
+      data: { fileName: 'report.pdf', srcURL: 'mxc://beeper.local/abc123' }
+    });
 
     const m = msg('3', {
       platform: 'beeper', senderId: 'self1', isSelf: true
     });
     await router(m, platform);
     assert.match(platform.lastTo('chat1').text, /Skipped/);
-    assert.strictEqual(env.config._pendingIndex?.self1, undefined);
+    assert.strictEqual(pending.peek('chat1', 'self1'), null, 'pending cleared after skip');
+  });
+
+  // The whole point of routing pickers through the registry: a reply that
+  // arrives after the picker's TTL is announced as expired, NOT silently
+  // forwarded to the RAG pipeline as a search query (the orphaned-reply bug).
+  it('an expired picker announces and does not fall through to RAG', async () => {
+    const env = createTestEnv({ allowed_users: ['self1'], owner_id: 'self1' });
+    const platform = mockPlatform();
+    const llm = mockLLM();
+    let clock = 1000;
+    const pending = new PendingRegistry({ now: () => clock });
+    const router = createMessageRouter(env.config, { llm, indexer: stubIndexer(), pending });
+
+    // An open mode picker with the picker-specific expiry message.
+    pending.set('chat1', 'self1', 'mode', {
+      data: { mode: 'business', matches: [{ id: 'x', title: 'X' }], agent: null },
+      ttlMs: 60_000,
+      expireMsg: 'Mode selection expired — re-run /mode.',
+    });
+
+    // Advance past the TTL, then send the numeric reply that WOULD have selected.
+    clock += 61_000;
+    await router(msg('1', { platform: 'beeper', senderId: 'self1', isSelf: true }), platform);
+
+    assert.match(platform.lastTo('chat1').text, /Mode selection expired/, 'uses the picker-specific expiry message');
+    assert.notStrictEqual(env.config.chats?.x?.mode, 'business', 'the late reply did not select a chat');
+    assert.strictEqual(pending.peek('chat1', 'self1'), null, 'expired entry consumed exactly once');
+    assert.strictEqual(llm.calls.length, 0, 'the late reply was not forwarded to RAG');
   });
 
   it('unsupported file type is rejected', async () => {
@@ -1146,7 +1455,7 @@ describe('/mode business menu', () => {
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
     await router(msg('/mode business', { senderId: 'user2' }), platform);
-    assert.match(platform.sent[0].text, /Owner only/);
+    assert.match(platform.sent[0].text, /Admin only/);
   });
 
   it('wizard skip preserves existing values', async () => {
@@ -1462,10 +1771,8 @@ describe('Wizard fixes', () => {
     const messages = platform.sent.filter(m => m.chatId === 'chat1');
     const cancelMsg = messages.find(m => m.text.includes('cancelled'));
     assert.ok(cancelMsg, 'should cancel wizard');
-    const helpMsg = messages.find(m => m.text.includes('multis commands'));
+    const helpMsg = messages.find(m => m.text.includes('what can I do'));
     assert.ok(helpMsg, 'should show help');
-    // Wizard state should be cleared
-    assert.strictEqual(env.config._pendingBusiness?.user1, undefined);
   });
 
   it('wizard validates empty business name', async () => {
@@ -1519,14 +1826,19 @@ describe('Config backup', () => {
 function stubIndexer(chunks = [], stats = {}) {
   const searchCalls = [];
   return {
-    search: (query, limit, opts = {}) => {
-      searchCalls.push({ query, limit, opts });
+    search: async (query, opts = {}) => {
+      searchCalls.push({ query, opts });
+      return chunks;
+    },
+    searchMemory: async (query, opts = {}) => {
+      searchCalls.push({ query, opts, memory: true });
       return chunks;
     },
     searchCalls,
     indexFile: async () => 0,
     indexBuffer: async () => 0,
-    getStats: () => ({ indexedFiles: 0, totalChunks: 0, byType: {}, ...stats }),
-    store: { recordSearchAccess: () => {}, saveChunk: () => {} }
+    rememberMemory: async () => ({ chunks: 1 }),
+    purge: async () => 0,
+    stats: () => ({ total: stats.total ?? stats.totalChunks ?? 0 }),
   };
 }

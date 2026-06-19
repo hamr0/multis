@@ -22,7 +22,6 @@ class PinManager {
   constructor(config) {
     this.config = config;
     this.sessions = this._loadSessions();
-    this.pendingCommands = new Map(); // userId -> { command, args, msg, platform, timestamp }
     this.failCounts = new Map(); // userId -> { count, lockedUntil }
   }
 
@@ -79,28 +78,6 @@ class PinManager {
 
     this.failCounts.set(userId, current);
     return { success: false, reason: `Wrong PIN. ${3 - current.count} attempts remaining.` };
-  }
-
-  hasPending(userId) {
-    return this.pendingCommands.has(userId);
-  }
-
-  setPending(userId, pending) {
-    this.pendingCommands.set(userId, { ...pending, timestamp: Date.now() });
-  }
-
-  getPending(userId) {
-    const p = this.pendingCommands.get(userId);
-    // Expire after 5 minutes
-    if (p && Date.now() - p.timestamp > 300000) {
-      this.pendingCommands.delete(userId);
-      return null;
-    }
-    return p;
-  }
-
-  clearPending(userId) {
-    this.pendingCommands.delete(userId);
   }
 
   _loadSessions() {

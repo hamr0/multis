@@ -6,7 +6,7 @@ const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
 
-const { createGate, buildGateConfig, translateAction, ownerCheck } = require('../src/governance/gate');
+const { createGate, buildGateConfig, translateAction, ownerCheck, isCatastrophic, commandHead, makeDestructiveCheck } = require('../src/governance/gate');
 
 const GOV = {
   commands: {
@@ -25,12 +25,14 @@ describe('buildGateConfig — governance.json → bareguard config mapping', () 
     assert.deepStrictEqual(cfg.bash.allow, ['ls', 'pwd', 'cat', 'grep', 'git']);
   });
 
-  it('maps commands.denylist to bash.denyPatterns regexes', () => {
+  it('denylist is NOT a hard deny — it is the destructive (PIN) tier, so no bash.denyPatterns', () => {
+    // Under the obedient command-governance model the denylist commands are
+    // PIN-gated in policy(), not hard-denied by bareguard. buildGateConfig only
+    // passes the allowlist through; the destructive/catastrophic tiers live in
+    // createGate's policy.
     const cfg = buildGateConfig({ governance: GOV });
-    assert.ok(Array.isArray(cfg.bash.denyPatterns));
-    assert.strictEqual(cfg.bash.denyPatterns.length, 4);
-    assert.ok(cfg.bash.denyPatterns[0].test('rm -rf /'));
-    assert.ok(cfg.bash.denyPatterns[1].test('sudo whoami'));
+    assert.strictEqual(cfg.bash.denyPatterns, undefined);
+    assert.deepStrictEqual(cfg.bash.allow, ['ls', 'pwd', 'cat', 'grep', 'git']);
   });
 
   it('maps paths.allowed to fs.readScope and fs.writeScope', () => {
@@ -135,6 +137,12 @@ describe('ownerCheck — multis owner gate', () => {
     assert.match(r, /owner privileges/);
   });
 
+  it('non-owner denied send_file (no file exfiltration to customers)', () => {
+    const r = ownerCheck('send_file', { isOwner: false });
+    assert.match(r, /owner privileges/);
+    assert.strictEqual(ownerCheck('send_file', { isOwner: true }), null);
+  });
+
   it('non-owner allowed for non-shell tools', () => {
     assert.strictEqual(ownerCheck('search_docs', { isOwner: false }), null);
     assert.strictEqual(ownerCheck('recall_memory', { isOwner: false }), null);
@@ -169,10 +177,13 @@ describe('createGate — end-to-end with fileless audit', () => {
     assert.strictEqual(verdict, true);
   });
 
-  it('policy denies exec rm for owner via bash.denyPatterns', async () => {
-    const verdict = await bundle.policy('exec', { command: 'rm -rf /tmp' }, { isOwner: true });
-    assert.strictEqual(typeof verdict, 'string');
-    assert.match(verdict, /\[deny:/);
+  it('destructive exec (rm a file) runs for owner when no PIN challenge is wired (PIN tier no-ops)', async () => {
+    // This bundle wires no pinChallenge, so the destructive PIN tier no-ops and
+    // the command is allowed (returns null) — destructive is PIN-GATED, not
+    // hard-denied, under the obedient model. (Deny-on-failed-PIN is covered in
+    // the command-governance tiers block below.)
+    const verdict = await bundle.policy('exec', { command: 'rm -rf /tmp/scratch' }, { isOwner: true, senderId: 'u1', chatId: 'c1' });
+    assert.strictEqual(verdict, null);
   });
 
   it('policy denies exec for non-owner regardless of command', async () => {
@@ -226,50 +237,47 @@ describe('createGate — end-to-end with fileless audit', () => {
   });
 });
 
-describe('createGate — always-ask (flags) replaces the Checkpoint bridge', () => {
-  // F2 cutover: confirm-before-every-exec is governed by bareguard's flags
-  // primitive (flags:{type:{bash:'ask'}}), default-on for exec, routed through
-  // the single humanChannel — not a separate bare-agent Checkpoint.
+describe('createGate — always-ask (flags) is now opt-in', () => {
+  // Under the obedient command-governance model, blanket confirm-before-every-exec
+  // is OFF by default (friction is per-tier in policy: destructive→PIN). The flags
+  // primitive (flags:{type:{bash:'ask'}}) is still available via checkpoint_tools.
 
-  it('asks before an exec that is otherwise allowlist-ALLOWED (fires before the allowlist)', async () => {
+  it('by default (no checkpoint_tools) a benign allowlisted exec runs WITHOUT asking', async () => {
     const asked = [];
     const bundle = await createGate({
-      config: {}, // no checkpoint_tools → default ['exec'] → flags ask on bash
+      config: {}, // no checkpoint_tools → default [] → no blanket ask
       governance: GOV,
       fileless: true,
       humanPrompt: async (event) => { asked.push(event); return { decision: 'allow' }; },
     });
-    // `ls` is on the allowlist, yet the always-ask must still fire (step 4b
-    // before the allowlist at step 5). Approving lets it proceed.
     const verdict = await bundle.policy('exec', { command: 'ls' }, { isOwner: true, chatId: 'c1', senderId: 'u1' });
-    assert.strictEqual(asked.length, 1, 'humanChannel asked once for the allowlisted exec');
-    assert.strictEqual(asked[0].action?._ctx?.chatId, 'c1', 'ask event carries originating _ctx');
+    assert.strictEqual(asked.length, 0, 'no blanket ask by default');
+    assert.strictEqual(verdict, true, 'benign exec proceeds silently');
+  });
+
+  it('checkpoint_tools:["exec"] re-enables the always-ask (fires before the allowlist)', async () => {
+    const asked = [];
+    const bundle = await createGate({
+      config: { security: { checkpoint_tools: ['exec'] } },
+      governance: GOV,
+      fileless: true,
+      humanPrompt: async (event) => { asked.push(event); return { decision: 'allow' }; },
+    });
+    const verdict = await bundle.policy('exec', { command: 'ls' }, { isOwner: true, chatId: 'c1', senderId: 'u1' });
+    assert.strictEqual(asked.length, 1, 'opt-in ask fires for the allowlisted exec');
     assert.match(asked[0].rule || '', /flags\.type/, 'ask raised by the flags.type primitive');
     assert.strictEqual(verdict, true, 'approve → exec proceeds');
   });
 
-  it('deny at the ask blocks the exec', async () => {
+  it('deny at the ask blocks the exec (when enabled)', async () => {
     const bundle = await createGate({
-      config: {},
+      config: { security: { checkpoint_tools: ['exec'] } },
       governance: GOV,
       fileless: true,
       humanPrompt: async () => ({ decision: 'deny' }),
     });
     const verdict = await bundle.policy('exec', { command: 'ls' }, { isOwner: true, chatId: 'c1' });
     assert.notStrictEqual(verdict, true, 'deny at the ask → not allowed');
-  });
-
-  it('checkpoint_tools:[] opts out — an allowlisted exec runs without asking', async () => {
-    const asked = [];
-    const bundle = await createGate({
-      config: { security: { checkpoint_tools: [] } },
-      governance: GOV,
-      fileless: true,
-      humanPrompt: async (event) => { asked.push(event); return { decision: 'deny' }; },
-    });
-    const verdict = await bundle.policy('exec', { command: 'ls' }, { isOwner: true, chatId: 'c1' });
-    assert.strictEqual(asked.length, 0, 'no ask when opted out');
-    assert.strictEqual(verdict, true, 'allowlisted exec proceeds silently');
   });
 });
 
@@ -300,5 +308,109 @@ describe('createGate — budget halt via humanChannel', () => {
     assert.strictEqual(captured.kind, 'halt');
     assert.ok(captured.action, 'halt event carries action (v0.4)');
     assert.strictEqual(captured.action._ctx.chatId, 'c1');
+  });
+});
+
+describe('createGate — command-governance tiers (benign / destructive→PIN / catastrophic→PIN+CONFIRM)', () => {
+  let bundle;
+  let pinReturn, confirmReturn;
+  const pinCalls = [];
+  const confirmCalls = [];
+  const ctx = { isOwner: true, senderId: 'u1', chatId: 'c1', platform: 'telegram' };
+
+  before(async () => {
+    bundle = await createGate({
+      config: { security: { checkpoint_tools: [] } },
+      governance: GOV, // denylist: rm, sudo, dd, shutdown
+      fileless: true,
+      humanPrompt: async () => ({ decision: 'deny' }),
+      pinChallenge: async (c) => { pinCalls.push(c); return pinReturn; },
+      confirmChallenge: async (c, cmd) => { confirmCalls.push(cmd); return confirmReturn; },
+    });
+  });
+
+  it('benign exec (ls) runs with NO PIN', async () => {
+    pinCalls.length = 0; confirmCalls.length = 0;
+    const verdict = await bundle.policy('exec', { command: 'ls -la' }, ctx);
+    assert.strictEqual(verdict, true);
+    assert.strictEqual(pinCalls.length, 0, 'benign command must not prompt for a PIN');
+  });
+
+  it('reads are benign — no PIN (full scope)', async () => {
+    pinCalls.length = 0;
+    const verdict = await bundle.policy('read_file', { path: '/home/testuser/Documents/notes.txt' }, ctx);
+    assert.strictEqual(pinCalls.length, 0, 'read_file is no longer PIN-gated');
+    assert.strictEqual(verdict, true, 'an in-scope read is allowed');
+  });
+
+  it('destructive exec (rm a file) → PIN; passes → allowed', async () => {
+    pinCalls.length = 0; pinReturn = true;
+    const verdict = await bundle.policy('exec', { command: 'rm /home/testuser/Documents/old.txt' }, ctx);
+    assert.strictEqual(pinCalls.length, 1, 'destructive command prompts for a PIN');
+    assert.strictEqual(verdict, null, 'correct PIN → command allowed');
+  });
+
+  it('destructive exec with a failed PIN is cancelled (no CONFIRM asked)', async () => {
+    pinCalls.length = 0; confirmCalls.length = 0; pinReturn = false;
+    const verdict = await bundle.policy('exec', { command: 'sudo systemctl restart x' }, ctx);
+    assert.match(verdict, /PIN required/);
+    assert.strictEqual(pinCalls.length, 1);
+    assert.strictEqual(confirmCalls.length, 0, 'destructive tier does not ask for CONFIRM');
+  });
+
+  it('catastrophic exec (rm -rf /) → PIN + typed CONFIRM; both pass → allowed', async () => {
+    pinCalls.length = 0; confirmCalls.length = 0; pinReturn = true; confirmReturn = true;
+    const verdict = await bundle.policy('exec', { command: 'rm -rf /' }, ctx);
+    assert.strictEqual(pinCalls.length, 1, 'PIN asked');
+    assert.strictEqual(confirmCalls.length, 1, 'CONFIRM asked after PIN');
+    assert.strictEqual(verdict, null, 'PIN + CONFIRM → allowed');
+  });
+
+  it('catastrophic exec cancels if CONFIRM is refused even after a correct PIN', async () => {
+    pinCalls.length = 0; confirmCalls.length = 0; pinReturn = true; confirmReturn = false;
+    const verdict = await bundle.policy('exec', { command: 'dd if=/dev/zero of=/dev/sda' }, ctx);
+    assert.strictEqual(pinCalls.length, 1);
+    assert.strictEqual(confirmCalls.length, 1);
+    assert.match(verdict, /Confirmation required/);
+  });
+
+  it('non-owner is denied by ownerCheck before any PIN/CONFIRM', async () => {
+    pinCalls.length = 0; confirmCalls.length = 0; pinReturn = true;
+    const verdict = await bundle.policy('exec', { command: 'ls' }, { isOwner: false, senderId: 'cust', chatId: 'c2', platform: 'beeper' });
+    assert.match(verdict, /owner privileges/);
+    assert.strictEqual(pinCalls.length, 0, 'PIN must not run for non-owners');
+  });
+});
+
+describe('command-governance detection helpers', () => {
+  const isDestructive = makeDestructiveCheck(['rm', 'sudo', 'dd', 'chmod', 'kill', 'shutdown']);
+
+  it('commandHead skips sudo/env and a path prefix', () => {
+    assert.strictEqual(commandHead('sudo rm -rf /'), 'rm');
+    assert.strictEqual(commandHead('/usr/bin/ls -la'), 'ls');
+    assert.strictEqual(commandHead('  git status'), 'git');
+  });
+
+  it('isDestructive flags denylist heads and bare sudo', () => {
+    assert.ok(isDestructive('rm foo.txt'));
+    assert.ok(isDestructive('sudo whoami'), 'bare sudo is destructive');
+    assert.ok(isDestructive('chmod 777 x'));
+    assert.ok(!isDestructive('ls -la'));
+    assert.ok(!isDestructive('git commit'));
+  });
+
+  it('isCatastrophic flags machine-wreckers only', () => {
+    assert.ok(isCatastrophic('rm -rf /'));
+    assert.ok(isCatastrophic('rm -rf /*'));
+    assert.ok(isCatastrophic('rm -rf ~'));
+    assert.ok(isCatastrophic('rm -fr $HOME'));
+    assert.ok(isCatastrophic('dd if=/dev/zero of=/dev/sda'));
+    assert.ok(isCatastrophic('mkfs.ext4 /dev/sdb1'));
+    assert.ok(isCatastrophic('shutdown -h now'));
+    assert.ok(isCatastrophic(':(){ :|:& };:'));
+    // NOT catastrophic — ordinary destructive (PIN tier), not CONFIRM:
+    assert.ok(!isCatastrophic('rm -rf /home/testuser/Projects/build'));
+    assert.ok(!isCatastrophic('rm old.txt'));
+    assert.ok(!isCatastrophic('chmod 644 file'));
   });
 });

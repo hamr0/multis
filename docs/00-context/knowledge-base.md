@@ -5,11 +5,11 @@ Local-first personal chatbot. Node.js vanilla, minimal deps, each POC < 500 line
 -> docs/00-context/vision.md
 
 ## Architecture
-Platform adapters (Telegram, Beeper) -> message router -> skills/indexer/LLM. SQLite FTS5 for persistence.
+Platform adapters (Telegram, Beeper) -> message router -> skills/context/LLM. litectx (FTS5) owns document + memory persistence (via the thin `src/context` policy wrapper).
 -> docs/00-context/system-state.md
 
 ## Source Tree
-Entry: src/index.js. Key modules: bot/, platforms/, governance/, skills/, indexer/, llm/, cli/.
+Entry: src/index.js. Key modules: bot/, platforms/, governance/, skills/, context/, llm/, cli/.
 -> docs/00-context/system-state.md (source tree section)
 
 ## POC Roadmap

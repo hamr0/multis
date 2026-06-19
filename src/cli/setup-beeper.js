@@ -1,25 +1,27 @@
 #!/usr/bin/env node
 /**
- * Beeper Desktop API onboarding.
+ * Beeper (via beeperbox) onboarding.
  *
- * Guides the user through:
- * 1. Installing Beeper Desktop and enabling the API
- * 2. OAuth PKCE authentication
- * 3. Verifying connected accounts
- * 4. Enabling Beeper in multis config
+ * multis is a pure MCP client — it talks to a beeperbox MCP endpoint, never the
+ * raw Beeper Desktop API. So setup just needs the beeperbox MCP URL (+ token if
+ * one is set) and a reachability check; the Beeper account/token lives inside
+ * beeperbox (its own setup), not here.
+ *
+ * beeperbox runs three ways, same verbs: full Docker container, lite
+ * (`node mcp/server.js` against a local Beeper Desktop), or remote. See
+ * https://github.com/hamr0/beeperbox.
+ *
+ * NOTE: the legacy OAuth-PKCE-against-:23373 flow was retired with the MCP
+ * migration (M-B step 3) — recoverable from git history if ever needed.
  *
  * Run: node src/cli/setup-beeper.js
  */
-const crypto = require('crypto');
-const http = require('http');
 const fs = require('fs');
-const path = require('path');
 const readline = require('readline');
-const { execSync } = require('child_process');
+const { PATHS } = require('../config');
+const { BeeperboxMcpClient } = require('../platforms/beeperbox-mcp');
 
-const BASE = 'http://localhost:23373';
-const { PATHS, getMultisDir } = require('../config');
-const TOKEN_FILE = PATHS.beeperToken();
+const DEFAULT_MCP_URL = 'http://localhost:23375';
 const CONFIG_PATH = PATHS.config();
 
 function prompt(question) {
@@ -32,129 +34,58 @@ function prompt(question) {
   });
 }
 
-async function checkDesktop() {
-  try {
-    await fetch(`${BASE}/v1/spec`, { signal: AbortSignal.timeout(2000) });
-    return true;
-  } catch {
-    return false;
-  }
+/** Build the beeperbox MCP client for an endpoint. */
+function makeClient({ url, token } = {}) {
+  return new BeeperboxMcpClient({ url: url || DEFAULT_MCP_URL, token: token || null });
 }
 
-function loadToken() {
+/**
+ * Reachability + account list against beeperbox. Throws if unreachable
+ * (caller decides retry/abort). Returns the normalized accounts array.
+ */
+async function listAccounts(client) {
+  const accounts = await client.listAccounts();
+  return Array.isArray(accounts) ? accounts : accounts?.items || [];
+}
+
+/** Human label for one beeperbox account record. */
+function accountLabel(acc) {
+  const net = acc.network_label || acc.network || '?';
+  const name = acc.user?.display_name || acc.user?.id || acc.account_id || '?';
+  return `${net}: ${name}`;
+}
+
+/**
+ * Find the chat whose title matches a Telegram bot username, via the list_inbox
+ * verb (so it works against a remote beeperbox too). Returns the chat id or null.
+ */
+async function findBotChat(client, botName) {
+  if (!botName) return null;
   try {
-    return JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
+    const chats = await client.callTool('list_inbox', { limit: 30 });
+    const list = Array.isArray(chats) ? chats : chats?.items || [];
+    const n = botName.replace('@', '').toLowerCase();
+    const hit = list.find(c => {
+      const t = (c.title || c.name || '').toLowerCase();
+      return t === n || t === n.replace('bot', '');
+    });
+    return hit ? (hit.id || hit.chatID) : null;
   } catch {
     return null;
   }
 }
 
-function saveToken(tokenData) {
-  const dir = path.dirname(TOKEN_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokenData, null, 2));
-}
-
-async function api(token, method, apiPath) {
-  const res = await fetch(`${BASE}${apiPath}`, {
-    method,
-    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`${res.status}: ${text}`);
-  }
-  return res.json();
-}
-
-async function oauthPKCE() {
-  // Dynamic client registration
-  const regRes = await fetch(`${BASE}/oauth/register`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      client_name: 'multis',
-      redirect_uris: ['http://127.0.0.1:9876/callback'],
-      grant_types: ['authorization_code'],
-      response_types: ['code'],
-      token_endpoint_auth_method: 'none',
-    }),
-  });
-  const client = await regRes.json();
-  const clientId = client.client_id;
-
-  // PKCE
-  const verifier = crypto.randomBytes(32).toString('base64url');
-  const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
-
-  return new Promise((resolve, reject) => {
-    let timeoutId;
-    const server = http.createServer(async (req, res) => {
-      if (!req.url.startsWith('/callback')) return;
-      const url = new URL(req.url, 'http://127.0.0.1:9876');
-      const code = url.searchParams.get('code');
-
-      if (!code) {
-        res.writeHead(400);
-        res.end('No code received');
-        clearTimeout(timeoutId);
-        server.close();
-        reject(new Error('No auth code'));
-        return;
-      }
-
-      const tokenRes = await fetch(`${BASE}/oauth/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          grant_type: 'authorization_code',
-          client_id: clientId,
-          code,
-          redirect_uri: 'http://127.0.0.1:9876/callback',
-          code_verifier: verifier,
-        }),
-      });
-      const tokenData = await tokenRes.json();
-
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end('<h2>Authorized! You can close this tab.</h2>');
-      clearTimeout(timeoutId);
-      server.close();
-
-      saveToken(tokenData);
-      resolve(tokenData.access_token);
-    });
-
-    server.listen(9876, '127.0.0.1', () => {
-      const authUrl = `${BASE}/oauth/authorize?` + new URLSearchParams({
-        response_type: 'code',
-        client_id: clientId,
-        redirect_uri: 'http://127.0.0.1:9876/callback',
-        code_challenge: challenge,
-        code_challenge_method: 'S256',
-        scope: 'read write',
-      });
-      console.log('  Opening browser for authorization...');
-      try {
-        execSync(`xdg-open "${authUrl}"`, { stdio: 'ignore' });
-      } catch {
-        console.log(`  Open manually: ${authUrl}`);
-      }
-    });
-
-    timeoutId = setTimeout(() => { server.close(); reject(new Error('OAuth timeout (60s)')); }, 60000);
-  });
-}
-
-function updateConfig() {
+function updateConfig({ mcpUrl, mcpToken } = {}) {
   try {
     const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
     if (!config.platforms) config.platforms = {};
     if (!config.platforms.beeper) config.platforms.beeper = {};
-    config.platforms.beeper.enabled = true;
-    config.platforms.beeper.url = config.platforms.beeper.url || BASE;
-    config.platforms.beeper.command_prefix = config.platforms.beeper.command_prefix || '//';
-    config.platforms.beeper.poll_interval = config.platforms.beeper.poll_interval || 3000;
+    const b = config.platforms.beeper;
+    b.enabled = true;
+    b.mcp_url = mcpUrl || b.mcp_url || DEFAULT_MCP_URL;
+    if (mcpToken) b.mcp_token = mcpToken;
+    b.command_prefix = b.command_prefix || '/';
+    b.poll_interval = b.poll_interval || 3000;
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
     return true;
   } catch (err) {
@@ -164,81 +95,63 @@ function updateConfig() {
 }
 
 async function main() {
-  console.log('=== multis: Beeper Desktop Setup ===\n');
+  console.log('=== multis: Beeper (via beeperbox) Setup ===\n');
 
-  // Step 1: Instructions
-  console.log('Prerequisites:');
-  console.log('  1. Install Beeper Desktop from https://beeper.com');
-  console.log('  2. Sign in and connect your accounts (WhatsApp, etc.)');
-  console.log('  3. Enable Desktop API: Settings > Developers > toggle on');
+  console.log('Prerequisites — get beeperbox running first:');
+  console.log('  - Docker container (headless Beeper inside), OR');
+  console.log('  - lite mode: `node mcp/server.js` against your local Beeper Desktop, OR');
+  console.log('  - a remote beeperbox you can reach.');
+  console.log('  Sign into Beeper + enable its Developer API inside beeperbox.');
+  console.log('  See https://github.com/hamr0/beeperbox');
   console.log();
 
-  await prompt('Press Enter when ready...');
+  // Step 1: endpoint
+  const urlInput = (await prompt(`beeperbox MCP URL [${DEFAULT_MCP_URL}]: `)).trim();
+  const mcpUrl = urlInput || DEFAULT_MCP_URL;
+  const mcpToken = (await prompt('MCP token (blank if none / loopback): ')).trim() || null;
 
-  // Step 2: Check Desktop is running
-  console.log('\n[1] Checking Beeper Desktop API...');
-  let reachable = await checkDesktop();
-
-  if (!reachable) {
-    console.log('  Not reachable at localhost:23373');
-    console.log('  Make sure Beeper Desktop is open and the API is enabled.');
+  // Step 2: reachability + accounts
+  console.log('\n[1] Checking beeperbox MCP...');
+  const client = makeClient({ url: mcpUrl, token: mcpToken });
+  let list;
+  try {
+    list = await listAccounts(client);
+  } catch (err) {
+    const hint = (err.code === 401 || err.code === 403)
+      ? 'auth failed — check the MCP token'
+      : 'unreachable — is beeperbox running at that URL?';
+    console.error(`  ${hint}\n  ${err.message}`);
     await prompt('Press Enter to retry...');
-    reachable = await checkDesktop();
-    if (!reachable) {
-      console.error('  Still not reachable. Aborting.');
+    try {
+      list = await listAccounts(client);
+    } catch (err2) {
+      console.error(`  Still failing (${err2.message}). Aborting.`);
       process.exit(1);
     }
   }
-  console.log('  Desktop API is reachable.');
+  console.log(`  Reachable. ${list.length} account(s).`);
 
-  // Step 3: OAuth (reuse saved token if valid)
-  console.log('\n[2] Authentication...');
-  let token = null;
-  const saved = loadToken();
-  if (saved?.access_token) {
-    try {
-      await api(saved.access_token, 'GET', '/v1/accounts');
-      token = saved.access_token;
-      console.log('  Using existing token.');
-    } catch {
-      console.log('  Saved token expired, re-authenticating...');
-    }
-  }
-
-  if (!token) {
-    console.log('  Starting OAuth PKCE flow...');
-    token = await oauthPKCE();
-    console.log('  Authenticated!');
-  }
-
-  // Step 4: List accounts
-  console.log('\n[3] Connected accounts:');
-  const accounts = await api(token, 'GET', '/v1/accounts');
-  const list = Array.isArray(accounts) ? accounts : accounts.items || [];
-  for (const acc of list) {
-    const name = acc.user?.displayText || acc.user?.id || acc.accountID || '?';
-    console.log(`  - ${acc.network || '?'}: ${name}`);
-  }
-
+  // Step 3: list accounts
+  console.log('\n[2] Connected accounts:');
+  for (const acc of list) console.log(`  - ${accountLabel(acc)}`);
   if (list.length === 0) {
-    console.log('  No accounts found. Connect accounts in Beeper Desktop first.');
+    console.log('  None yet — connect accounts inside beeperbox (its noVNC login / your Beeper Desktop).');
   }
 
-  // Step 5: Update config
-  console.log('\n[4] Updating multis config...');
-  if (updateConfig()) {
+  // Step 4: write config
+  console.log('\n[3] Updating multis config...');
+  if (updateConfig({ mcpUrl, mcpToken })) {
     console.log('  Beeper enabled in ~/.multis/config.json');
   }
 
-  // Done
   console.log('\n=== Setup complete! ===');
   console.log('Start multis with: node src/index.js');
-  console.log(`Send ${list.length > 0 ? '//' : '//'}status from any Beeper chat to test.`);
-  console.log('Only messages starting with // from your accounts will be processed.');
+  console.log('Send /status from your Beeper Note-to-self chat to test.');
+  console.log('Only / commands from your own account are processed.');
 }
 
-// Named exports for reuse in init wizard
-module.exports = { checkDesktop, oauthPKCE, api, loadToken, saveToken, updateConfig };
+// Named exports for reuse in the init wizard (bin/multis.js)
+module.exports = { makeClient, listAccounts, accountLabel, findBotChat, updateConfig, DEFAULT_MCP_URL };
 
 // Run standalone if called directly
 if (require.main === module) {

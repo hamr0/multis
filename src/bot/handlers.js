@@ -1,13 +1,14 @@
 const path = require('path');
 const { logAudit } = require('../governance/audit');
-const { addAllowedUser, isOwner, saveConfig, backupConfig, updateChatMeta, getMultisDir, PATHS } = require('../config');
+const { addAllowedUser, isOwner, isAdmin, addAdmin, removeAdmin, saveConfig, backupConfig, updateChatMeta, getMultisDir, PATHS } = require('../config');
 const { execCommand, readFile, listSkills } = require('../skills/executor');
-const { DocumentIndexer } = require('../indexer/index');
+const context = require('../context');
 const { createProvider, simpleGenerate } = require('../llm/provider-adapter');
 const { buildRAGPrompt, buildMemorySystemPrompt, buildBusinessPrompt } = require('../llm/prompts');
 const { getMemoryManager } = require('../memory/manager');
 const { runCapture, runCondenseMemory } = require('../memory/capture');
 const { PinManager, hashPin } = require('../security/pin');
+const { RateLimiter } = require('../security/rate-limit');
 const { detectInjection, logInjectionAttempt } = require('../security/injection');
 const { buildToolRegistry, getToolsForUser, loadToolsConfig } = require('../tools/registry');
 const { adaptTools } = require('../tools/adapter');
@@ -15,8 +16,17 @@ const { getPlatform } = require('../tools/platform');
 const { Loop, Retry, CircuitBreaker } = require('bare-agent');
 const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler');
 const { createGate } = require('../governance/gate');
-const { createHumanPrompt, handleHumanReply, hasPendingHumanReply } = require('../governance/human-channel');
+const { createHumanPrompt, createPinChallenge, createConfirmChallenge } = require('../governance/human-channel');
+const { PendingRegistry } = require('./pending');
+
+// Picker / wizard lifetimes, single-sourced from config (see config.js
+// `interaction` block). Quick numeric pickers expire fast; the multi-step
+// business wizard gets a longer window so a slow fill isn't dropped mid-flow.
+const pickerTtlMs = (config) => (config.interaction?.picker_ttl_minutes ?? 5) * 60_000;
+const wizardTtlMs = (config) => (config.interaction?.wizard_ttl_minutes ?? 30) * 60_000;
 const PKG_VERSION = require('../../package.json').version;
+const { looksLikeCommand } = require('../platforms/message');
+const { mark, startClock } = require('../debug/instr'); // TEMP: timeout instrumentation
 
 // ---------------------------------------------------------------------------
 // Admin presence pause — when owner messages in a business chat, bot pauses
@@ -39,6 +49,31 @@ function isAdminPaused(chatId) {
 
 function clearAdminPauses() {
   _adminPaused.clear();
+}
+
+/**
+ * Notify the owner/admin channels. Mirrors the escalate tool's routing so
+ * non-LLM events (e.g. a rate-limit trip) can reach a human. Best-effort.
+ */
+async function notifyAdmins(platformRegistry, config, text) {
+  let sent = 0;
+  const override = config?.business?.escalation?.admin_chat;
+  if (override) {
+    for (const [, plat] of platformRegistry || []) {
+      if (plat?.send) { try { await plat.send(override, text); sent++; break; } catch { /* try next */ } }
+    }
+    return sent;
+  }
+  for (const [name, plat] of platformRegistry || []) {
+    try {
+      if (name === 'telegram' && config?.owner_id) {
+        await plat.send(config.owner_id, text); sent++;
+      } else if (name === 'beeper' && plat.getAdminChatIds) {
+        for (const chatId of plat.getAdminChatIds()) { await plat.send(chatId, text); sent++; }
+      }
+    } catch { /* best-effort notify */ }
+  }
+  return sent;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,11 +105,29 @@ function createGovernanceCarrier(config, opts = {}) {
         const humanPrompt = opts.humanPrompt || createHumanPrompt({
           platformRegistry,
           pinManager: opts.pinManager,
+          config,
+          pending: opts.pending,
           timeoutMs: (config?.security?.checkpoint_timeout || 60) * 1000,
+        });
+        // Capability-layer PIN (#5): privileged tools on the agent path prompt
+        // for PIN via the same reply-wait the approval flow uses.
+        const pinChallenge = opts.pinChallenge || createPinChallenge({
+          platformRegistry,
+          pinManager: opts.pinManager,
+          pending: opts.pending,
+          timeoutMs: (config?.security?.pin_prompt_timeout || 300) * 1000,
+        });
+        // Catastrophic-command confirm tier (typed CONFIRM after the PIN).
+        const confirmChallenge = opts.confirmChallenge || createConfirmChallenge({
+          platformRegistry,
+          pending: opts.pending,
+          timeoutMs: (config?.security?.pin_prompt_timeout || 300) * 1000,
         });
         const built = await createGate({
           config,
           humanPrompt,
+          pinChallenge,
+          confirmChallenge,
           auditPath: opts.auditPath,
           budgetFile: opts.budgetFile,
           fileless: opts.fileless,
@@ -199,10 +252,22 @@ function isPaired(msgOrCtx, config) {
  * Takes a normalized Message and routes to the appropriate handler.
  */
 function createMessageRouter(config, deps = {}) {
-  const indexer = deps.indexer || new DocumentIndexer();
+  // litectx wrapper (process-wide singleton, init()-ed at startup). Tests inject deps.indexer.
+  const indexer = deps.indexer || context;
   const memoryManagers = deps.memoryManagers || new Map();
   const _memBaseDir = deps.memoryBaseDir || PATHS.memory();
   const pinManager = deps.pinManager || new PinManager(config);
+  // Single store for every "next message is special" state (PIN entry,
+  // pin-change, and — as later phases migrate — gate challenges and pickers).
+  // Keyed by chatId:senderId, TTL-expiring, announce-on-expiry.
+  const pending = deps.pending || new PendingRegistry();
+  // Business-mode inbound limiter (per-sender). Disabled only if explicitly off.
+  const rlCfg = config.security?.rate_limit || {};
+  const rateLimiter = deps.rateLimiter
+    || (rlCfg.enabled === false ? null : new RateLimiter({
+      burstPerMin: rlCfg.burst_per_min,
+      dailyPerSender: rlCfg.daily_per_sender,
+    }));
   // gov is a lazy carrier — gov.resolve() returns {gate, policy, onLlmResult,
   // onToolResult, filterTools, HaltError}. Lazy because bareguard is ESM and
   // requires `await import()` on first use. Tests can pass deps.gov to inject
@@ -214,6 +279,7 @@ function createMessageRouter(config, deps = {}) {
     fileless: deps.fileless,
     governance: deps.governanceFile,
     pinManager,
+    pending,
   });
   // Helper: getMemoryManager with baseDir (follows getMultisDir for test isolation)
   const getMem = (chatId, opts = {}) =>
@@ -274,7 +340,7 @@ function createMessageRouter(config, deps = {}) {
         // business mode, non-owner: silently index, no interactive prompt
         await handleSilentAttachment(msg, platform, config, indexer, 'beeper');
       } else if (isOwner(msg.senderId, config, msg)) {
-        await handleBeeperFileIndex(msg, platform, config, indexer);
+        await handleBeeperFileIndex(msg, platform, config, indexer, pending);
       } else {
         await handleSilentAttachment(msg, platform, config, indexer, 'beeper');
       }
@@ -285,133 +351,155 @@ function createMessageRouter(config, deps = {}) {
     // so they aren't swallowed by natural/silent/business routing
     const text = msg.text || '';
 
-    // Check for bareguard humanChannel reply (ask/halt prompts, incl. always-ask
-    // confirms now routed through the gate's flags primitive)
-    if (hasPendingHumanReply(msg.senderId) && handleHumanReply(msg.senderId, text)) {
-      return;
-    }
-
-    // Check for PIN input (4-6 digit text from user with pending command)
-    if (pinManager.hasPending(msg.senderId) && /^\d{4,6}$/.test(text.trim())) {
-      const pending = pinManager.getPending(msg.senderId);
-      if (!pending) {
-        await platform.send(msg.chatId, 'PIN entry expired. Please re-send the command.');
-        return;
-      }
-
-      // Handle PIN change flow
-      if (pending.action === 'pin_change') {
-        await handlePinChangeStep(msg, platform, config, pinManager, text.trim(), pending);
-        return;
-      }
-
-      const result = pinManager.authenticate(msg.senderId, text.trim());
-      if (!result.success) {
-        await platform.send(msg.chatId, result.reason);
-        if (result.locked) pinManager.clearPending(msg.senderId);
-        return;
-      }
-
-      // PIN correct — execute the stored command
-      await platform.send(msg.chatId, 'PIN accepted.');
-      const stored = pending;
-      pinManager.clearPending(msg.senderId);
-      // Re-route the stored command
-      msg = stored.msg;
-      await executeCommand(stored.command, stored.args, msg, platform, config, indexer, provider, memoryManagers, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, gov });
-      return;
-    }
-
-    // Handle pending file index scope reply (1 = public, 2 = admin, 3 = skip)
-    // Must come before pending-mode handler — both match digits, this is more specific
-    if (config._pendingIndex?.[msg.senderId] && /^[123]$/.test(text.trim())) {
-      const pending = config._pendingIndex[msg.senderId];
-      delete config._pendingIndex[msg.senderId];
-      const choice = text.trim();
-      if (choice === '3') {
-        await platform.send(msg.chatId, 'Skipped.');
-        return;
-      }
-      const scope = choice === '1' ? 'public' : 'admin';
-      try {
-        await platform.send(msg.chatId, `Downloading and indexing: ${pending.fileName} (${scope})...`);
-        const localPath = await platform.downloadAsset(pending.srcURL);
-        const buffer = require('fs').readFileSync(localPath);
-        const count = await indexer.indexBuffer(buffer, pending.fileName, scope);
-        await platform.send(msg.chatId, `Indexed ${count} chunks from ${pending.fileName} [${scope}]`);
-        logAudit({ action: 'index_upload', user_id: msg.senderId, filename: pending.fileName, chunks: count, scope, platform: 'beeper' });
-      } catch (err) {
-        await platform.send(msg.chatId, `Index error: ${err.message}`);
-      }
-      return;
-    }
-    // Clear stale pending index if user sends something else
-    if (config._pendingIndex?.[msg.senderId]) {
-      delete config._pendingIndex[msg.senderId];
-    }
-
-    // Handle pending mode selection (interactive picker reply)
-    // Keyed by chatId (not senderId) — Beeper senderId can vary across messages
-    const pendingMode = config._pendingMode?.[msg.chatId];
-    if (pendingMode) {
-      // /commands cancel the picker and fall through to command routing
-      if (text.startsWith('/')) {
-        delete config._pendingMode[msg.chatId];
-        await platform.send(msg.chatId, 'Mode selection cancelled.');
-        // Fall through to command routing below
-      } else if (/^\d+$/.test(text.trim())) {
-        const idx = parseInt(text.trim(), 10) - 1;
-        if (idx >= 0 && idx < pendingMode.matches.length) {
-          const chat = pendingMode.matches[idx];
-          // Block silent/off for personal/note-to-self chats
-          const beeperPlat = platformRegistry?.get('beeper');
-          if ((pendingMode.mode === 'silent' || pendingMode.mode === 'off') && beeperPlat?._personalChats?.has(chat.id)) {
-            delete config._pendingMode[msg.chatId];
-            await platform.send(msg.chatId, 'Personal/note-to-self chats cannot be set to silent or off.');
+    // Pending interaction — the single store for every "next message is special"
+    // state for this conversation: a parked gate challenge (approval/PIN/CONFIRM),
+    // a PIN command entry, the pin-change flow, … One lookup, one TTL. entry.match
+    // decides whether THIS reply belongs to the prompt; a non-matching message (a
+    // /command, an unrelated query) falls through to normal routing below.
+    {
+      const entry = pending.get(msg.chatId, msg.senderId);
+      if (entry && (typeof entry.match !== 'function' || entry.match(text))) {
+        if (entry.expired) {
+          // Announce expiry rather than letting a late reply (PIN digits, a
+          // confirm word) fall through to the RAG pipeline as a search query —
+          // the orphaned-reply bug this de-tangle exists to kill.
+          await platform.send(msg.chatId, entry.expireMsg
+            || 'That prompt expired — please re-send the command.');
+          return;
+        }
+        const t = text.trim();
+        switch (entry.kind) {
+          case 'gate_reply':
+            // A parked bareguard challenge (approval/PIN/CONFIRM) is awaiting this
+            // reply. Hand it the RAW text — the challenge interprets yes/no/PIN/
+            // CONFIRM itself — and it self-clears via the resolver.
+            entry.resolve(text);
+            return;
+          case 'pin_change':
+            await handlePinChangeStep(msg, platform, config, pinManager, pending, t, entry);
+            return;
+          case 'pin_command': {
+            const result = pinManager.authenticate(msg.senderId, t);
+            if (!result.success) {
+              // Wrong PIN keeps the pending command so the owner can retry;
+              // only a lockout clears it.
+              if (result.locked) pending.clear(msg.chatId, msg.senderId);
+              await platform.send(msg.chatId, result.reason);
+              return;
+            }
+            // PIN correct — claim the entry SYNCHRONOUSLY, before the first await,
+            // so a concurrent duplicate reply finds nothing and can't double-run
+            // the stored command (the get→clear window otherwise spans the
+            // platform.send below). authenticate() above is synchronous.
+            const stored = entry.data; // { command, args, msg, platform }
+            pending.clear(msg.chatId, msg.senderId);
+            await platform.send(msg.chatId, 'PIN accepted.');
+            await executeCommand(stored.command, stored.args, stored.msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, gov, pending });
             return;
           }
-          setChatMode(config, chat.id, pendingMode.mode);
-          if (pendingMode.agent) {
-            if (!config.chat_agents) config.chat_agents = {};
-            config.chat_agents[chat.id] = pendingMode.agent;
-            saveConfig(config);
+
+          // --- Interactive pickers / wizards (migrated from config._pending*) ---
+          // None carry a `match` fn, so they always enter here. Each owns its
+          // cancel/fall-through contract: a case that `return`s consumes the
+          // reply; a case that `break`s lets the message fall through to normal
+          // command routing below (used for the /command-cancels-a-picker path).
+          // Only one entry exists per (chat,sender), so the latest prompt is
+          // authoritative — this also kills the old hazard where a numeric reply
+          // meant for the mode picker was swallowed by a still-open index prompt.
+
+          case 'admin':
+            if (t.startsWith('/')) {
+              pending.clear(msg.chatId, msg.senderId);
+              await platform.send(msg.chatId, 'Admin setup cancelled.');
+              break; // /command cancels the picker, then routes normally
+            }
+            await handleAdminFlowReply(msg, platform, config, t, pinManager, entry.data, pending);
+            return;
+
+          case 'index': {
+            if (/^[123]$/.test(t)) {
+              const idx = entry.data; // { fileName, srcURL }
+              pending.clear(msg.chatId, msg.senderId);
+              if (t === '3') {
+                await platform.send(msg.chatId, 'Skipped.');
+                return;
+              }
+              const scope = t === '1' ? 'public' : 'admin';
+              try {
+                await platform.send(msg.chatId, `Downloading and indexing: ${idx.fileName} (${scope})...`);
+                const buffer = await platform.downloadAsset(idx.srcURL);
+                const count = await indexer.indexBuffer(buffer, idx.fileName, scope);
+                await platform.send(msg.chatId, `Indexed ${count} chunks from ${idx.fileName} [${scope}]`);
+                logAudit({ action: 'index_upload', user_id: msg.senderId, filename: idx.fileName, chunks: count, scope, platform: 'beeper' });
+              } catch (err) {
+                await platform.send(msg.chatId, `Index error: ${err.message}`);
+              }
+              return;
+            }
+            // Any non-[123] reply drops the stale prompt and falls through
+            // (mirrors the old clear-on-other-input behavior — no message).
+            pending.clear(msg.chatId, msg.senderId);
+            break;
           }
-          delete config._pendingMode[msg.chatId];
-          const agentNote = pendingMode.agent ? `, agent: ${pendingMode.agent}` : '';
-          await platform.send(msg.chatId, `${chat.title || chat.id} set to: ${pendingMode.mode}${agentNote}`);
-          logAudit({ action: 'mode', user_id: msg.senderId, chatId: chat.id, mode: pendingMode.mode, agent: pendingMode.agent });
-        } else {
-          await platform.send(msg.chatId, `Invalid choice. Pick 1-${pendingMode.matches.length}.`);
+
+          case 'mode': {
+            if (text.startsWith('/')) {
+              pending.clear(msg.chatId, msg.senderId);
+              await platform.send(msg.chatId, 'Mode selection cancelled.');
+              break; // /command cancels the picker, then routes normally
+            }
+            const m = entry.data; // { mode, matches, agent }
+            if (/^\d+$/.test(t)) {
+              const idx = parseInt(t, 10) - 1;
+              if (idx >= 0 && idx < m.matches.length) {
+                const chat = m.matches[idx];
+                // Block silent/off for personal/note-to-self chats
+                const beeperPlat = platformRegistry?.get('beeper');
+                if ((m.mode === 'silent' || m.mode === 'off') && beeperPlat?._personalChats?.has(chat.id)) {
+                  pending.clear(msg.chatId, msg.senderId);
+                  await platform.send(msg.chatId, 'Personal/note-to-self chats cannot be set to silent or off.');
+                  return;
+                }
+                setChatMode(config, chat.id, m.mode);
+                if (m.agent) {
+                  if (!config.chat_agents) config.chat_agents = {};
+                  config.chat_agents[chat.id] = m.agent;
+                  saveConfig(config);
+                }
+                pending.clear(msg.chatId, msg.senderId);
+                const agentNote = m.agent ? `, agent: ${m.agent}` : '';
+                await platform.send(msg.chatId, `${chat.title || chat.id} set to: ${m.mode}${agentNote}`);
+                logAudit({ action: 'mode', user_id: msg.senderId, chatId: chat.id, mode: m.mode, agent: m.agent });
+              } else {
+                await platform.send(msg.chatId, `Invalid choice. Pick 1-${m.matches.length}.`);
+              }
+              return;
+            }
+            // Non-number, non-command reply: remind, keep the picker open.
+            await platform.send(msg.chatId, `Pick a number (1-${m.matches.length}) or send a /command to cancel.`);
+            return;
+          }
+
+          case 'business_menu': {
+            if (text.startsWith('/')) {
+              pending.clear(msg.chatId, msg.senderId);
+              await platform.send(msg.chatId, 'Business menu cancelled.');
+              break; // /command cancels the picker, then routes normally
+            }
+            const handled = await handleBusinessMenuReply(msg, platform, config, t, agentRegistry, platformRegistry, entry.data, pending);
+            if (handled) return;
+            break;
+          }
+
+          case 'business_wizard':
+            if (text.startsWith('/')) {
+              pending.clear(msg.chatId, msg.senderId);
+              await platform.send(msg.chatId, 'Business setup cancelled.');
+              break; // /command cancels the wizard, then routes normally
+            }
+            await handleBusinessWizardStep(msg, platform, config, t, entry.data, pending);
+            return;
         }
-        return;
-      } else {
-        // Non-number, non-command reply while picker is open — remind user
-        await platform.send(msg.chatId, `Pick a number (1-${pendingMode.matches.length}) or send a /command to cancel.`);
-        return;
-      }
-    }
-
-    // Handle pending /mode business menu selection
-    if (config._pendingBusinessMenu?.[msg.chatId]) {
-      if (text.startsWith('/')) {
-        delete config._pendingBusinessMenu[msg.chatId];
-        await platform.send(msg.chatId, 'Business menu cancelled.');
-      } else {
-        const handled = await handleBusinessMenuReply(msg, platform, config, text.trim(), agentRegistry, platformRegistry);
-        if (handled) return;
-      }
-    }
-
-    // Handle pending /business setup wizard
-    if (config._pendingBusiness?.[msg.senderId]) {
-      // /commands during wizard cancel it and fall through to command routing
-      if (text.startsWith('/')) {
-        delete config._pendingBusiness[msg.senderId];
-        await platform.send(msg.chatId, 'Business setup cancelled.');
-        // Fall through — the command will be routed normally below
-      } else {
-        await handleBusinessWizardStep(msg, platform, config, text.trim());
-        return;
       }
     }
 
@@ -441,13 +529,17 @@ function createMessageRouter(config, deps = {}) {
           runCapture(msg.chatId, mem, simpleGenerate(provider), indexer, {
             keepLast: 5,
             role: captureRole,
+            retentionDays: memCfg.retention_days,
+            adminRetentionDays: memCfg.admin_retention_days,
             maxSections: memCfg.memory_max_sections
           }).then(() => {
             // Stage 2: condense if memory.md sections >= cap
             const sectionCap = memCfg.memory_section_cap || 5;
             if (mem.countMemorySections() >= sectionCap) {
               return runCondenseMemory(msg.chatId, mem, simpleGenerate(provider), indexer, {
-                sectionCap, keepRecent: 3, role: captureRole
+                sectionCap, keepRecent: 3, role: captureRole,
+                retentionDays: memCfg.retention_days,
+                adminRetentionDays: memCfg.admin_retention_days
               });
             }
           }).catch(err => {
@@ -460,8 +552,9 @@ function createMessageRouter(config, deps = {}) {
 
     // Natural language / business routing (set by platform adapter)
     if (msg.routeAs === 'natural' || msg.routeAs === 'business') {
-      // Business: anyone can get a response (customers via Beeper)
-      if (msg.routeAs !== 'business' && !isPaired(msg, config)) return;
+      // Business: anyone can get a response (customers via Beeper). Natural:
+      // paired users or designated limited-admin chats.
+      if (msg.routeAs !== 'business' && !isPaired(msg, config) && !isAdmin(msg.senderId, config, msg)) return;
 
       // Silently ignore empty / media-only messages in business chats
       if (msg.routeAs === 'business') {
@@ -486,6 +579,26 @@ function createMessageRouter(config, deps = {}) {
           if (mem) { mem.appendMessage('user', msg.text); mem.appendToLog('user', msg.text); }
           return;
         }
+
+        // Per-customer rate limit. On the cap we archive the message, hand off
+        // to a human, and stop the LLM — degrade, don't refuse (#1).
+        if (rateLimiter) {
+          const verdict = rateLimiter.consume(msg.senderId);
+          if (!verdict.allowed) {
+            const mem = getMem(msg.chatId, { isAdmin: false });
+            if (mem) { mem.appendMessage('user', msg.text); mem.appendToLog('user', msg.text); }
+            if (verdict.notify) {
+              const note = config.business?.rate_limit_message
+                || "Thanks for your patience — I've reached my limit here for now and have flagged a human to follow up with you.";
+              await platform.send(msg.chatId, note);
+              const who = config.chats?.[msg.chatId]?.name || msg.chatId;
+              await notifyAdmins(platformRegistry, config,
+                `[Rate limit] ${who} hit the ${verdict.scope} limit — bot paused for this customer; please follow up.`);
+              logAudit({ action: 'rate_limit', user_id: msg.senderId, chatId: msg.chatId, scope: verdict.scope });
+            }
+            return;
+          }
+        }
       }
 
       await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, gov });
@@ -505,8 +618,9 @@ function createMessageRouter(config, deps = {}) {
       return;
     }
 
-    // Auth check for all other commands
-    if (!isPaired(msg, config)) {
+    // Auth check for all other commands. Designated limited-admin chats may
+    // issue commands even though they aren't in allowed_users.
+    if (!isPaired(msg, config) && !isAdmin(msg.senderId, config, msg)) {
       if (msg.platform === 'telegram') {
         await platform.send(msg.chatId, 'You are not paired. Send /start <pairing_code> to pair.');
       }
@@ -521,13 +635,17 @@ function createMessageRouter(config, deps = {}) {
         return;
       }
       if (authNeeded === true) {
-        pinManager.setPending(msg.senderId, { command, args, msg, platform });
+        pending.set(msg.chatId, msg.senderId, 'pin_command', {
+          data: { command, args, msg, platform },
+          match: (t) => /^\d{4,6}$/.test(t.trim()),
+          expireMsg: 'PIN entry expired — please re-send the command.',
+        });
         await platform.send(msg.chatId, 'Enter your PIN:');
         return;
       }
     }
 
-    await executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, gov });
+    await executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, gov, pending });
   };
 
   router.registerPlatform = (name, instance) => {
@@ -587,7 +705,10 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
         await routeRemember(msg, platform, config, getMem, args);
         break;
       case 'mode':
-        await routeMode(msg, platform, config, args, agentRegistry, toolDeps.platformRegistry);
+        await routeMode(msg, platform, config, args, agentRegistry, toolDeps.platformRegistry, toolDeps.pending);
+        break;
+      case 'admin':
+        await routeAdmin(msg, platform, config, args, toolDeps.platformRegistry, toolDeps.pending);
         break;
       case 'agent':
         await routeAgent(msg, platform, config, args, agentRegistry);
@@ -596,7 +717,7 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
         await routeAgents(msg, platform, agentRegistry);
         break;
       case 'pin':
-        await routePinChange(msg, platform, config, pinManager);
+        await routePinChange(msg, platform, config, pinManager, toolDeps.pending);
         break;
       case 'remind':
         await routeRemind(msg, platform, config, provider, toolDeps);
@@ -614,18 +735,32 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
         await routePlan(msg, platform, config, provider, args, toolDeps);
         break;
       case 'help':
-        await routeHelp(msg, platform, config);
+        await routeHelp(msg, platform, config, args);
         break;
       default:
-        // Telegram plain text (no recognized command) → implicit ask
-        if (msg.platform === 'telegram' && !msg.text.startsWith('/')) {
+        if (!looksLikeCommand(msg.text)) {
+          // Plain text OR a pasted path (e.g. /home/user/file) — not a command.
+          // Route to the agent loop as an implicit ask instead of dropping it.
           await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, agentRegistry, toolDeps);
+        } else {
+          // Command-shaped but unrecognized — reply, never silently no-op (#4).
+          await platform.send(msg.chatId, `Unknown command: /${command} — try /help`);
         }
         break;
     }
 }
 
-async function routePinChange(msg, platform, config, pinManager) {
+// pin_change entries match digit replies and share the registry's announce-on-
+// expiry. The step ('verify' → 'new') lives on the entry itself.
+function setPinChangePending(pending, msg, step) {
+  pending.set(msg.chatId, msg.senderId, 'pin_change', {
+    step,
+    match: (t) => /^\d{4,6}$/.test(t.trim()),
+    expireMsg: 'PIN change timed out — send /pin to start over.',
+  });
+}
+
+async function routePinChange(msg, platform, config, pinManager, pending) {
   if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only command.');
     return;
@@ -633,34 +768,34 @@ async function routePinChange(msg, platform, config, pinManager) {
 
   if (!pinManager.isEnabled()) {
     // No PIN set — go straight to setting new PIN
-    pinManager.setPending(msg.senderId, { action: 'pin_change', step: 'new' });
+    setPinChangePending(pending, msg, 'new');
     await platform.send(msg.chatId, 'No PIN set. Enter a new PIN (4-6 digits):');
     return;
   }
 
   // PIN is set — verify current first
-  pinManager.setPending(msg.senderId, { action: 'pin_change', step: 'verify' });
+  setPinChangePending(pending, msg, 'verify');
   await platform.send(msg.chatId, 'Enter your current PIN:');
 }
 
-async function handlePinChangeStep(msg, platform, config, pinManager, pin, pending) {
-  if (pending.step === 'verify') {
+async function handlePinChangeStep(msg, platform, config, pinManager, pending, pin, entry) {
+  if (entry.step === 'verify') {
     const result = pinManager.authenticate(msg.senderId, pin);
     if (!result.success) {
       await platform.send(msg.chatId, result.reason);
-      if (result.locked) pinManager.clearPending(msg.senderId);
+      if (result.locked) pending.clear(msg.chatId, msg.senderId);
       return;
     }
-    pinManager.setPending(msg.senderId, { action: 'pin_change', step: 'new' });
+    setPinChangePending(pending, msg, 'new');
     await platform.send(msg.chatId, 'Enter your new PIN (4-6 digits):');
-  } else if (pending.step === 'new') {
+  } else if (entry.step === 'new') {
     if (!/^\d{4,6}$/.test(pin)) {
       await platform.send(msg.chatId, 'PIN must be 4-6 digits. Try again:');
       return;
     }
     config.security.pin_hash = hashPin(pin);
     saveConfig(config);
-    pinManager.clearPending(msg.senderId);
+    pending.clear(msg.chatId, msg.senderId);
     await platform.send(msg.chatId, 'PIN updated successfully.');
     logAudit({ action: 'pin_change', user_id: msg.senderId });
   }
@@ -768,7 +903,7 @@ async function routeExec(msg, platform, config, command, toolDeps = {}) {
     return;
   }
 
-  const result = execCommand(command, msg.senderId);
+  const result = await execCommand(command, msg.senderId);
   await platform.send(msg.chatId, result.output);
 }
 
@@ -794,8 +929,14 @@ async function routeRead(msg, platform, config, filePath, toolDeps = {}) {
 }
 
 async function routeIndex(msg, platform, config, indexer, args) {
+  // `/index <path>` reads from the HOST filesystem (indexFile -> fs.readFileSync),
+  // so it is an OWNER-only capability — same trust boundary as /exec and /read. A
+  // limited admin has no host/file access; letting one index an arbitrary path
+  // (e.g. `/index /etc/passwd public`) would be a host-file read primitive that
+  // also plants the bytes into the world-readable KB. Limited admins contribute to
+  // the KB by uploading a file in chat (handled as a scoped upload), not by path.
   if (!isOwner(msg.senderId, config, msg)) {
-    await platform.send(msg.chatId, 'Owner only command.');
+    await platform.send(msg.chatId, 'Owner only command. (Limited admins: send the file in chat to index it.)');
     return;
   }
 
@@ -842,8 +983,11 @@ async function routeSearch(msg, platform, config, indexer, query) {
   }
 
   const admin = isOwner(msg.senderId, config, msg);
-  const roles = admin ? undefined : ['public', `user:${msg.chatId}`];
-  const results = indexer.search(query, 5, { roles });
+  // Owner /search recalls admin ∪ global-KB; a customer recalls own ∪ global-KB.
+  // litectx recall(scope) returns scope ∪ null-global, so a customer (user:*) chunk
+  // can never enter another customer's or the owner's results (#6).
+  const scope = admin ? 'admin' : `user:${msg.chatId}`;
+  const results = await indexer.search(query, { scope, n: 5 });
 
   if (results.length === 0) {
     await platform.send(msg.chatId, 'No results found.');
@@ -851,32 +995,26 @@ async function routeSearch(msg, platform, config, indexer, query) {
   }
 
   const formatted = results.map((r, i) => {
-    const path = r.sectionPath.join(' > ') || r.name;
     const preview = r.content.slice(0, 200).replace(/\n/g, ' ');
-    return `${i + 1}. [${r.element}] ${path}\n${preview}...`;
+    return `${i + 1}. ${r.name}\n${preview}...`;
   });
 
   await platform.send(msg.chatId, formatted.join('\n\n'));
   logAudit({ action: 'search', user_id: msg.senderId, query, results: results.length });
-
-  // Record access for ACT-R activation tracking
-  if (results.length > 0) {
-    try {
-      indexer.store.recordSearchAccess(results.map(c => c.chunkId), query);
-    } catch { /* non-critical */ }
-  }
+  // litectx self-tracks recall demand-signal; no manual access recording needed.
 }
 
 async function routeDocs(msg, platform, config, indexer) {
-  const stats = indexer.getStats();
-  const lines = [
-    `Indexed documents: ${stats.indexedFiles}`,
-    `Total chunks: ${stats.totalChunks}`
-  ];
-  for (const [type, count] of Object.entries(stats.byType)) {
-    lines.push(`  ${type}: ${count} chunks`);
+  // stats() is a process-wide count across ALL scopes (docs + memory for every
+  // tenant). litectx exposes no per-scope count, so the figure is global — gate it
+  // to admins rather than leak the cross-tenant total to a customer.
+  if (!isAdmin(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, 'Admin only command.');
+    return;
   }
-  await platform.send(msg.chatId, lines.join('\n') || 'No documents indexed yet.');
+  const stats = indexer.stats();
+  const line = `Indexed items: ${stats.total}`;
+  await platform.send(msg.chatId, stats.total ? line : 'No documents indexed yet.');
 }
 
 // Shared circuit breaker (one per process, resets on provider recovery)
@@ -905,7 +1043,9 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   const adapted = adaptTools(tools, ctx);
 
   // Resolve governance lazily on first call (ESM bareguard requires await import)
+  const _gc = startClock();
   const { policy, onLlmResult, onToolResult } = gov ? await gov.resolve() : {};
+  mark('runAgentLoop: gov.resolve done', _gc);
 
   // Build retry + circuit breaker from config
   const retryCfg = config?.llm?.retry || {};
@@ -933,6 +1073,8 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   });
 
   // Pass _ctx through so humanChannel can route prompts back via platformRegistry.
+  const _rc = startClock();
+  mark('runAgentLoop: loop.run start');
   const result = await loop.run(messages, adapted, {
     ctx: {
       senderId: ctx.senderId,
@@ -941,6 +1083,7 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
       platform: ctx.platform?.name || ctx.platform?.platform || ctx.platformName,
     },
   });
+  mark(`runAgentLoop: loop.run done (rounds=${result.toolRounds ?? '?'}, err=${result.error ? 'yes' : 'no'})`, _rc);
   if (result.error) {
     // Halt errors come back as `error: 'halt:<rule>'` strings — surface as a normal Error
     throw result.error instanceof Error ? result.error : new Error(String(result.error));
@@ -993,18 +1136,29 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
       }
     }
 
-    // Search for relevant documents (scoped)
-    const roles = admin ? undefined : ['public', `user:${msg.chatId}`];
-    const chunks = indexer.search(question, 5, { roles });
+    // Search for relevant documents (scoped). Owner recalls admin ∪ global-KB; a
+    // customer recalls own ∪ global-KB. litectx recall(scope) returns scope ∪
+    // null-global, so customer-planted content can't surface in another customer's
+    // or the owner's tool-enabled agent loop as trusted instructions (#6).
+    const scope = admin ? 'admin' : `user:${msg.chatId}`;
+    const _sc = startClock();
+    mark('routeAsk -> indexer.search');
+    const chunks = await indexer.search(question, { scope, n: 5 });
+    mark(`routeAsk <- indexer.search (${chunks.length} chunks)`, _sc);
 
-    // Resolve agent (handles @mention, per-chat, mode default, fallback)
+    // Resolve agent for @mention stripping + per-chat provider only. The persona
+    // layer is DEFERRED (obedient-bot-first; constitution/persona returns with the
+    // memory module — see dispatch-rewrite-decision). A configured persona must
+    // NOT replace the obedient base prompt, or the model loses "use your tools"
+    // and deflects. So owner/natural chats run the base prompt with NO persona.
     const resolved = agentRegistry && agentRegistry.size > 0
       ? resolveAgent(question, msg.chatId, config, agentRegistry)
-      : { agent: { provider, persona: null }, name: 'default', text: question };
+      : { agent: { provider }, name: 'default', text: question };
     const agentProvider = resolved.agent.provider || resolved.agent.llm || provider;
-    let agentPersona = resolved.agent.persona;
 
-    // Business mode: use structured business prompt when configured
+    // Only business mode injects a customer-facing persona (no host tools there).
+    // Everything else (owner, natural) → base prompt, persona ignored.
+    let agentPersona = null;
     if (msg.routeAs === 'business' && !admin && config.business?.name) {
       agentPersona = buildBusinessPrompt(config);
     }
@@ -1037,19 +1191,25 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     const userTools = getToolsForUser(allTools, admin, tCfg);
     const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, platformName: msg.platform, config, platformRegistry };
 
+    const _lc = startClock();
+    mark(`routeAsk -> agent loop (${userTools.length} tools, model ${config?.llm?.model || '?'})`);
     const answer = await runAgentLoop(agentProvider, messages, userTools, {
       system,
       ctx,
       config,
       gov,
     });
+    mark('routeAsk <- agent loop', _lc);
 
     // Prefix with agent name only when multiple agents exist
     const prefixed = agentRegistry && agentRegistry.size > 1
       ? `[${resolved.name}] ${answer}`
       : answer;
 
+    const _pc = startClock();
+    mark('routeAsk -> platform.send');
     await platform.send(msg.chatId, prefixed);
+    mark('routeAsk <- platform.send', _pc);
 
     // Record assistant response (without prefix for clean memory)
     if (mem) {
@@ -1058,13 +1218,7 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     }
 
     logAudit({ action: 'ask', user_id: msg.senderId, question, chunks: chunks.length, routeAs: msg.routeAs, agent: resolved.name });
-
-    // Record access for ACT-R activation tracking
-    if (chunks.length > 0) {
-      try {
-        indexer.store.recordSearchAccess(chunks.map(c => c.chunkId), question);
-      } catch { /* non-critical */ }
-    }
+    // litectx self-tracks recall demand-signal; no manual access recording needed.
 
     // Fire-and-forget two-stage capture if threshold reached
     if (mem && memCfg && mem.shouldCapture(memCfg.capture_threshold)) {
@@ -1072,13 +1226,17 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
       runCapture(msg.chatId, mem, simpleGenerate(provider), indexer, {
         keepLast: 5,
         role: captureRole,
+        retentionDays: memCfg.retention_days,
+        adminRetentionDays: memCfg.admin_retention_days,
         maxSections: memCfg.memory_max_sections
       }).then(() => {
         // Stage 2: condense if memory.md sections >= cap
         const sectionCap = memCfg.memory_section_cap || 5;
         if (mem.countMemorySections() >= sectionCap) {
           return runCondenseMemory(msg.chatId, mem, simpleGenerate(provider), indexer, {
-            sectionCap, keepRecent: 3, role: captureRole
+            sectionCap, keepRecent: 3, role: captureRole,
+            retentionDays: memCfg.retention_days,
+            adminRetentionDays: memCfg.admin_retention_days
           });
         }
       }).catch(err => {
@@ -1120,10 +1278,10 @@ async function routeRemember(msg, platform, config, getMem, note) {
 
 const VALID_MODES = ['off', 'business', 'silent'];
 
-async function routeMode(msg, platform, config, args, agentRegistry, platformRegistry) {
-  // Owner-only
-  if (!isOwner(msg.senderId, config, msg)) {
-    await platform.send(msg.chatId, 'Owner only command.');
+async function routeMode(msg, platform, config, args, agentRegistry, platformRegistry, pending) {
+  // Admin command (super-admin or a designated limited admin).
+  if (!isAdmin(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, 'Admin only command.');
     return;
   }
 
@@ -1176,8 +1334,11 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
       }
       if (match.length > 1) {
         const list = match.map((c, i) => `  ${i + 1}) ${c.title || c.name || c.id}`).join('\n');
-        if (!config._pendingMode) config._pendingMode = {};
-        config._pendingMode[msg.chatId] = { mode, matches: match, agent: null };
+        pending.set(msg.chatId, msg.senderId, 'mode', {
+          data: { mode, matches: match, agent: null },
+          ttlMs: pickerTtlMs(config),
+          expireMsg: 'Mode selection expired — re-run /mode.',
+        });
         await platform.send(msg.chatId, `Multiple matches:\n${list}\n\nReply with a number:`);
         return;
       }
@@ -1195,7 +1356,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
 
     // No target + business → show business menu
     if (mode === 'business') {
-      await showBusinessMenu(msg, platform, config);
+      await showBusinessMenu(msg, platform, config, pending);
       return;
     }
 
@@ -1209,7 +1370,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
 
   // Beeper: no args → list chats with current modes (read-only, no PIN needed)
   if (!mode) {
-    if (config?.chats || platform._api) {
+    if (config?.chats || typeof platform?.listInbox === 'function') {
       const allChats = listBeeperChats(platform, config);
       if (!allChats || allChats.length === 0) {
         await platform.send(msg.chatId, 'No chats found.');
@@ -1272,8 +1433,11 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
     if (match.length > 1) {
       const list = match.map((c, i) => `  ${i + 1}) ${c.title || c.name || c.id}`).join('\n');
       // Store pending mode selection (include agent for deferred assignment)
-      if (!config._pendingMode) config._pendingMode = {};
-      config._pendingMode[msg.chatId] = { mode, matches: match, agent: agentArg };
+      pending.set(msg.chatId, msg.senderId, 'mode', {
+        data: { mode, matches: match, agent: agentArg },
+        ttlMs: pickerTtlMs(config),
+        expireMsg: 'Mode selection expired — re-run /mode.',
+      });
       await platform.send(msg.chatId, `Multiple matches:\n${list}\n\nReply with a number:`);
       return;
     }
@@ -1311,8 +1475,11 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
       return `  ${i + 1}) ${c.title || c.name || c.id} [${currentMode}]`;
     }).join('\n');
     // Store pending mode selection (include agent for deferred assignment)
-    if (!config._pendingMode) config._pendingMode = {};
-    config._pendingMode[msg.chatId] = { mode, matches: chats, agent: agentArg };
+    pending.set(msg.chatId, msg.senderId, 'mode', {
+      data: { mode, matches: chats, agent: agentArg },
+      ttlMs: pickerTtlMs(config),
+      expireMsg: 'Mode selection expired — re-run /mode.',
+    });
     await platform.send(msg.chatId, `Pick a chat to set to ${mode}:\n${list}\n\nReply with a number:`);
     return;
   }
@@ -1323,6 +1490,129 @@ async function routeMode(msg, platform, config, args, agentRegistry, platformReg
   const agentNote = agentArg ? `, agent: ${agentArg}` : '';
   await platform.send(msg.chatId, `Chat mode set to: ${mode}${agentNote}`);
   logAudit({ action: 'mode', user_id: msg.senderId, chatId: msg.chatId, mode, agent: agentArg });
+}
+
+/**
+ * /admin — super-admin (owner) designates/revokes LIMITED admin windows.
+ * Flow: /admin → numbered list of chats → pick → confirm → PIN → added.
+ * Limited admins get mode/index/ask, NOT host shell (exec/read stay owner-only).
+ * Subcommands: /admin list, /admin remove <number>.
+ */
+async function routeAdmin(msg, platform, config, args, platformRegistry, pending) {
+  if (!isOwner(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, 'Owner only command.');
+    return;
+  }
+  const parts = (args || '').trim().split(/\s+/).filter(Boolean);
+  const sub = parts[0] ? parts[0].toLowerCase() : '';
+  const admins = config.admins || [];
+  const nameOf = (id) => config.chats?.[id]?.name || id;
+
+  if (sub === 'list') {
+    if (admins.length === 0) { await platform.send(msg.chatId, 'No limited admins designated.'); return; }
+    const lines = admins.map((id, i) => `  ${i + 1}) ${nameOf(id)}`);
+    await platform.send(msg.chatId, `Limited admins:\n${lines.join('\n')}\n\nRemove with: /admin remove <number>`);
+    return;
+  }
+
+  if (sub === 'remove') {
+    if (admins.length === 0) { await platform.send(msg.chatId, 'No limited admins to remove.'); return; }
+    const n = parseInt(parts[1], 10);
+    if (!n || n < 1 || n > admins.length) {
+      const lines = admins.map((id, i) => `  ${i + 1}) ${nameOf(id)}`);
+      await platform.send(msg.chatId, `Usage: /admin remove <number>\n${lines.join('\n')}`);
+      return;
+    }
+    const removedId = admins[n - 1];
+    removeAdmin(config, removedId);
+    await platform.send(msg.chatId, `Removed limited admin: ${nameOf(removedId)}`);
+    logAudit({ action: 'admin_remove', user_id: msg.senderId, chatId: removedId });
+    return;
+  }
+
+  // Default: start the designation picker over all known chats (any platform),
+  // excluding the command channel and chats already designated.
+  const adminSet = new Set(admins.map(String));
+  const chats = Object.entries(config.chats || {})
+    .filter(([id]) => id !== msg.chatId && !adminSet.has(String(id)))
+    .map(([id, c]) => ({ id, title: c.name || id, lastActive: c.lastActive || '' }))
+    .sort((a, b) => b.lastActive.localeCompare(a.lastActive));
+
+  if (chats.length === 0) {
+    await platform.send(msg.chatId, 'No eligible chats to designate yet. (Chats appear here once they have been active.)');
+    return;
+  }
+  const list = chats.map((c, i) => `  ${i + 1}) ${c.title}`).join('\n');
+  pending.set(msg.chatId, msg.senderId, 'admin', {
+    data: { step: 'pick', matches: chats },
+    ttlMs: pickerTtlMs(config),
+    expireMsg: 'Admin setup expired — re-run /admin.',
+  });
+  await platform.send(msg.chatId,
+    `Pick a chat to make a LIMITED admin (mode/index/ask — NOT shell):\n${list}\n\n` +
+    `Reply with a number. Or: /admin list, /admin remove <n>.`);
+}
+
+/** Drive the multi-step /admin designation flow (pick → confirm → PIN). */
+async function handleAdminFlowReply(msg, platform, config, text, pinManager, state, registry) {
+  // `state` is the registry entry's payload (mutated in place across steps);
+  // `registry` clears it on completion/cancel.
+  const pending = state;
+  const nameOf = (c) => c.title || c.id;
+
+  if (pending.step === 'pick') {
+    if (!/^\d+$/.test(text)) {
+      await platform.send(msg.chatId, `Pick a number (1-${pending.matches.length}), or send a /command to cancel.`);
+      return;
+    }
+    const idx = parseInt(text, 10) - 1;
+    if (idx < 0 || idx >= pending.matches.length) {
+      await platform.send(msg.chatId, `Invalid choice. Pick 1-${pending.matches.length}.`);
+      return;
+    }
+    pending.selected = pending.matches[idx];
+    pending.step = 'confirm';
+    await platform.send(msg.chatId, `Make "${nameOf(pending.selected)}" a limited admin (mode/index/ask, no shell)? Reply "yes" to confirm.`);
+    return;
+  }
+
+  if (pending.step === 'confirm') {
+    if (!/^y(es)?$/i.test(text)) {
+      registry.clear(msg.chatId, msg.senderId);
+      await platform.send(msg.chatId, 'Cancelled.');
+      return;
+    }
+    if (!pinManager.isEnabled()) {
+      // No PIN configured — promote directly (the owner already confirmed).
+      addAdmin(config, pending.selected.id);
+      const name = nameOf(pending.selected);
+      registry.clear(msg.chatId, msg.senderId);
+      await platform.send(msg.chatId, `Done. "${name}" is now a limited admin. (No PIN is set — consider /pin.)`);
+      logAudit({ action: 'admin_add', user_id: msg.senderId, chatId: pending.selected.id });
+      return;
+    }
+    pending.step = 'pin';
+    await platform.send(msg.chatId, 'Enter your PIN to confirm:');
+    return;
+  }
+
+  if (pending.step === 'pin') {
+    if (!/^\d{4,6}$/.test(text)) {
+      await platform.send(msg.chatId, 'PIN must be 4-6 digits. Try again:');
+      return;
+    }
+    const result = pinManager.authenticate(msg.senderId, text);
+    if (!result.success) {
+      await platform.send(msg.chatId, result.reason);
+      if (result.locked) registry.clear(msg.chatId, msg.senderId);
+      return;
+    }
+    addAdmin(config, pending.selected.id);
+    const name = nameOf(pending.selected);
+    registry.clear(msg.chatId, msg.senderId);
+    await platform.send(msg.chatId, `Done. "${name}" is now a limited admin.`);
+    logAudit({ action: 'admin_add', user_id: msg.senderId, chatId: pending.selected.id });
+  }
 }
 
 function setChatMode(config, chatId, mode) {
@@ -1385,13 +1675,14 @@ async function findBeeperChat(platform, search, config) {
     if (matches.length > 0) return matches;
   }
 
-  // Fall back to Beeper API for undiscovered chats
-  if (!platform?._api) return null;
+  // Fall back to the beeperbox list_inbox verb (MCP, not raw :23373 — works
+  // against a remote beeperbox) for undiscovered chats.
+  if (typeof platform?.listInbox !== 'function') return null;
   try {
     backupConfig();
     const botChatId = platform._botChatId || null;
-    const data = await platform._api('GET', '/v1/chats?limit=100');
-    const chats = (data.items || []).map(c => ({
+    const list = await platform.listInbox(100);
+    const chats = list.map(c => ({
       id: c.id || c.chatID,
       title: c.title || c.name || '',
       network: c.network || '',
@@ -1494,8 +1785,10 @@ function createSchedulerTick({ platformRegistry, config, provider, indexer, getM
       const userTools = getToolsForUser(allTools || [], admin, toolsConfig);
       const mem = getMem ? getMem(job.chatId, { isAdmin: admin }) : null;
       const memoryMd = mem ? mem.loadMemory() : '';
-      const roles = undefined; // admin sees all scopes
-      const chunks = indexer ? indexer.search(job.action, 5, { roles }) : [];
+      // Agentic jobs run as owner, so recall is scoped to 'admin' (admin ∪ global-KB)
+      // — identical to the owner's interactive /ask. recall() is fail-closed and never
+      // crosses into customer (user:*) scopes, even for an owner-run job.
+      const chunks = indexer ? await indexer.search(job.action, { scope: 'admin', n: 5 }) : [];
       const system = buildMemorySystemPrompt(memoryMd, chunks);
 
       const answer = await runAgentLoop(provider, [{ role: 'user', content: job.action }], userTools, {
@@ -1660,9 +1953,12 @@ async function routePlan(msg, platform, config, provider, goal, toolDeps) {
 // /mode business menu + setup wizard
 // ---------------------------------------------------------------------------
 
-async function showBusinessMenu(msg, platform, config) {
-  if (!config._pendingBusinessMenu) config._pendingBusinessMenu = {};
-  config._pendingBusinessMenu[msg.chatId] = { senderId: msg.senderId };
+async function showBusinessMenu(msg, platform, config, pending) {
+  pending.set(msg.chatId, msg.senderId, 'business_menu', {
+    data: { senderId: msg.senderId },
+    ttlMs: pickerTtlMs(config),
+    expireMsg: 'Business menu expired — re-run /mode business.',
+  });
   await platform.send(msg.chatId,
     'Business Mode\n' +
     '1) Setup persona\n' +
@@ -1674,8 +1970,8 @@ async function showBusinessMenu(msg, platform, config) {
   );
 }
 
-async function handleBusinessMenuReply(msg, platform, config, input, agentRegistry, platformRegistry) {
-  const pending = config._pendingBusinessMenu[msg.chatId];
+async function handleBusinessMenuReply(msg, platform, config, input, agentRegistry, platformRegistry, state, registry) {
+  const pending = state;
   if (!pending) return false;
 
   const choice = parseInt(input, 10);
@@ -1684,22 +1980,26 @@ async function handleBusinessMenuReply(msg, platform, config, input, agentRegist
     return true;
   }
 
-  delete config._pendingBusinessMenu[msg.chatId];
+  registry.clear(msg.chatId, msg.senderId);
 
   switch (choice) {
     case 1: {
-      // Launch wizard — pre-populated from existing config
-      if (!config._pendingBusiness) config._pendingBusiness = {};
+      // Launch wizard — pre-populated from existing config. Replaces the menu
+      // entry on the same (chat,sender) key; longer TTL for the multi-step fill.
       const existing = config.business || {};
-      config._pendingBusiness[msg.senderId] = {
-        step: 'name',
+      registry.set(msg.chatId, msg.senderId, 'business_wizard', {
+        ttlMs: wizardTtlMs(config),
+        expireMsg: 'Business setup expired — re-run /mode business → 1.',
         data: {
-          name: existing.name || null,
-          greeting: existing.greeting || null,
-          topics: existing.topics ? existing.topics.map(t => ({ ...t })) : [],
-          rules: existing.rules ? [...existing.rules] : []
+          step: 'name',
+          data: {
+            name: existing.name || null,
+            greeting: existing.greeting || null,
+            topics: existing.topics ? existing.topics.map(t => ({ ...t })) : [],
+            rules: existing.rules ? [...existing.rules] : []
+          }
         }
-      };
+      });
       const current = existing.name ? `\nCurrent: ${existing.name}` : '';
       await platform.send(msg.chatId, `Step 1/5 — Name${current}\nSend new name or "skip" to keep it.`);
       return true;
@@ -1761,8 +2061,11 @@ async function handleBusinessMenuReply(msg, platform, config, input, agentRegist
         const currentMode = getChatMode(config, c.id);
         return `  ${i + 1}) ${c.title || c.name || c.id} [${currentMode}]`;
       }).join('\n');
-      if (!config._pendingMode) config._pendingMode = {};
-      config._pendingMode[msg.chatId] = { mode: 'business', matches: chats, agent: null };
+      registry.set(msg.chatId, msg.senderId, 'mode', {
+        data: { mode: 'business', matches: chats, agent: null },
+        ttlMs: pickerTtlMs(config),
+        expireMsg: 'Mode selection expired — re-run /mode.',
+      });
       await platform.send(msg.chatId, `Pick a chat to set to business:\n${list}\n\nReply with a number:`);
       return true;
     }
@@ -1770,12 +2073,14 @@ async function handleBusinessMenuReply(msg, platform, config, input, agentRegist
   return false;
 }
 
-async function handleBusinessWizardStep(msg, platform, config, input) {
-  const pending = config._pendingBusiness[msg.senderId];
+async function handleBusinessWizardStep(msg, platform, config, input, state, registry) {
+  // `state` is the registry entry payload { step, data } (mutated in place
+  // across steps); `registry` clears it on save/cancel.
+  const pending = state;
   const lower = input.toLowerCase();
 
   if (lower === 'cancel') {
-    delete config._pendingBusiness[msg.senderId];
+    registry.clear(msg.chatId, msg.senderId);
     await platform.send(msg.chatId, 'Business setup cancelled.');
     return;
   }
@@ -1899,11 +2204,11 @@ async function handleBusinessWizardStep(msg, platform, config, input) {
       if (lower === 'yes' || lower === 'y') {
         config.business = { ...config.business, ...pending.data };
         saveConfig(config);
-        delete config._pendingBusiness[msg.senderId];
+        registry.clear(msg.chatId, msg.senderId);
         await platform.send(msg.chatId, 'Business persona saved.');
         logAudit({ action: 'business_setup', user_id: msg.senderId, name: pending.data.name });
       } else {
-        delete config._pendingBusiness[msg.senderId];
+        registry.clear(msg.chatId, msg.senderId);
         await platform.send(msg.chatId, 'Discarded.');
       }
       break;
@@ -1927,45 +2232,94 @@ function formatBusinessSummary(data) {
   return lines.join('\n');
 }
 
-async function routeHelp(msg, platform, config) {
-  const cmds = [
-    'multis commands:',
-    '/ask <question> - Ask about indexed documents',
-    '/status - Bot info',
-    '/search <query> - Search indexed documents',
-    '/docs - Show indexing stats',
-    '/memory - Show conversation memory',
-    '/remember <note> - Save a note to memory',
-    '/forget - Clear conversation memory',
-    '/skills - List available skills',
-    '/unpair - Remove pairing',
-    '/help - This message',
-    '',
-    'Plain text messages are treated as questions.'
-  ];
-  if (isOwner(msg.senderId, config, msg)) {
-    cmds.splice(1, 0,
-      '/exec <cmd> - Run a shell command (owner)',
-      '/read <path> - Read a file or directory (owner)',
-      '/index <path> <public|admin> - Index a document (owner)',
-      '/pin - Change PIN (owner)',
-      '/mode - List chat modes / /mode <business|silent|off> [target] (owner)',
-      '/agent [name] - Show/set agent for this chat (owner)',
-      '/agents - List all agents (owner)',
-      '/remind <duration> <action> [--agent] - Set a reminder (owner)',
-      '/cron <expression> <action> [--agent] - Recurring scheduled task (owner)',
-      '/jobs - List active scheduled jobs (owner)',
-      '/cancel <id> - Cancel a scheduled job (owner)',
-      '/plan <goal> - Break a goal into steps and execute (owner)',
-      '/mode business - Business persona menu (owner)',
-      'Send a file to index it (owner, Telegram/Beeper)',
-      'Use @agentname to invoke a specific agent per-message'
-    );
-  }
-  await platform.send(msg.chatId, cmds.join('\n'));
+// Command catalogue — the single source for /help. Grouped by INTENT (not an
+// alphabetical wall), role-filtered, deduped (/mode is one entry; its business
+// menu is reached via `/mode business`). `role` gates visibility: 'all' (anyone
+// who can run commands), 'admin' (owner + limited admins), 'owner' (owner only).
+const HELP_GROUPS = [
+  { key: 'ASK',      tagline: 'find answers' },
+  { key: 'REMEMBER', tagline: 'build memory & knowledge' },
+  { key: 'SCHEDULE', tagline: 'do things later' },
+  { key: 'RUN',      tagline: 'act on this machine' },
+  { key: 'MANAGE',   tagline: 'configure the bot' },
+];
+
+const HELP_COMMANDS = [
+  // ASK
+  { name: 'ask',      group: 'ASK',      role: 'all',   usage: '/ask <question>',                 summary: 'ask about your documents & chats (or just type)' },
+  { name: 'search',   group: 'ASK',      role: 'all',   usage: '/search <query>',                 summary: 'keyword-search the index' },
+  { name: 'docs',     group: 'ASK',      role: 'all',   usage: '/docs',                           summary: 'show what is indexed' },
+  { name: 'skills',   group: 'ASK',      role: 'all',   usage: '/skills',                         summary: 'list available skills' },
+  // REMEMBER
+  { name: 'remember', group: 'REMEMBER', role: 'all',   usage: '/remember <note>',                summary: 'save a note to memory' },
+  { name: 'memory',   group: 'REMEMBER', role: 'all',   usage: '/memory',                         summary: 'show what I remember here' },
+  { name: 'forget',   group: 'REMEMBER', role: 'all',   usage: '/forget',                         summary: "clear this chat's memory" },
+  { name: 'index',    group: 'REMEMBER', role: 'admin', usage: '/index <path> <public|admin>',    summary: 'add a document to the knowledge base',
+    detail: 'Adds a file to the searchable KB. Scope: public (everyone) or admin (owner-only knowledge — owner only). On Telegram/Beeper you can also just send a file to index it.' },
+  // SCHEDULE
+  { name: 'remind',   group: 'SCHEDULE', role: 'owner', usage: '/remind <when> <action> [--agent]', summary: 'set a one-off reminder' },
+  { name: 'cron',     group: 'SCHEDULE', role: 'owner', usage: '/cron <expr> <action> [--agent]', summary: 'recurring scheduled task' },
+  { name: 'jobs',     group: 'SCHEDULE', role: 'owner', usage: '/jobs',                           summary: 'list active scheduled jobs' },
+  { name: 'cancel',   group: 'SCHEDULE', role: 'owner', usage: '/cancel <id>',                    summary: 'cancel a scheduled job' },
+  // RUN
+  { name: 'exec',     group: 'RUN',      role: 'owner', usage: '/exec <command>',                 summary: 'run a shell command (may need PIN)' },
+  { name: 'read',     group: 'RUN',      role: 'owner', usage: '/read <path>',                    summary: 'read a file or directory (may need PIN)' },
+  { name: 'plan',     group: 'RUN',      role: 'owner', usage: '/plan <goal>',                    summary: 'break a goal into steps & run them' },
+  // MANAGE
+  { name: 'mode',     group: 'MANAGE',   role: 'admin', usage: '/mode [business|silent|off] [chat]', summary: 'how I respond in a chat',
+    detail: 'No target → this chat (or, with no Beeper, the global default). With a chat name → that Beeper chat (interactive picker on multiple matches). `/mode business` opens the business-persona menu. silent = archive only; off = ignore.' },
+  { name: 'agent',    group: 'MANAGE',   role: 'owner', usage: '/agent [name]',                   summary: "show or set this chat's agent" },
+  { name: 'agents',   group: 'MANAGE',   role: 'owner', usage: '/agents',                         summary: 'list all agents' },
+  { name: 'admin',    group: 'MANAGE',   role: 'owner', usage: '/admin [list|remove <n>]',        summary: 'designate / list / remove limited admins' },
+  { name: 'pin',      group: 'MANAGE',   role: 'owner', usage: '/pin',                            summary: 'set or change your PIN' },
+  { name: 'status',   group: 'MANAGE',   role: 'all',   usage: '/status',                         summary: 'bot info & status' },
+  { name: 'unpair',   group: 'MANAGE',   role: 'all',   usage: '/unpair',                         summary: 'remove pairing' },
+  { name: 'help',     group: 'MANAGE',   role: 'all',   usage: '/help [command]',                 summary: 'this menu — add a command for details' },
+];
+
+const ROLE_RANK = { all: 0, admin: 1, owner: 2 };
+
+/** The viewer's tier, highest first: owner > admin > all. */
+function helpViewerRank(msg, config) {
+  if (isOwner(msg.senderId, config, msg)) return ROLE_RANK.owner;
+  if (isAdmin(msg.senderId, config, msg)) return ROLE_RANK.admin;
+  return ROLE_RANK.all;
 }
 
-async function handleBeeperFileIndex(msg, platform, config, indexer) {
+async function routeHelp(msg, platform, config, args) {
+  const rank = helpViewerRank(msg, config);
+  const visible = HELP_COMMANDS.filter(c => rank >= ROLE_RANK[c.role]);
+
+  // Progressive disclosure: `/help <command>` → that command's detail.
+  const topic = (args || '').trim().replace(/^\//, '').toLowerCase();
+  if (topic) {
+    const c = visible.find(x => x.name === topic);
+    if (c) {
+      const lines = [c.usage, '', c.summary];
+      if (c.detail) lines.push('', c.detail);
+      await platform.send(msg.chatId, lines.join('\n'));
+      return;
+    }
+    // Unknown/!visible topic falls through to the full menu (with a nudge).
+  }
+
+  const out = ['multis — what can I do?'];
+  for (const g of HELP_GROUPS) {
+    const cmds = visible.filter(c => c.group === g.key);
+    if (cmds.length === 0) continue;
+    out.push('', `${g.key} · ${g.tagline}`);
+    for (const c of cmds) out.push(`  ${c.usage} — ${c.summary}`);
+    // Owner-only inline hint: dropping a file is the no-typing path to /index.
+    if (g.key === 'REMEMBER' && rank >= ROLE_RANK.admin) {
+      out.push('  (or send a file to index it)');
+    }
+  }
+  out.push('', 'Tip: just type to ask · @agent for a specific agent · /help <command> for details');
+  if (topic) out.unshift(`No command "/${topic}". Showing everything:`, '');
+  await platform.send(msg.chatId, out.join('\n'));
+}
+
+async function handleBeeperFileIndex(msg, platform, config, indexer, pending) {
   if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only. File indexing not available.');
     return;
@@ -1983,7 +2337,7 @@ async function handleBeeperFileIndex(msg, platform, config, indexer) {
   }
 
   const fileName = attachment.fileName;
-  const srcURL = attachment.srcURL || attachment.id;
+  const srcURL = attachment.srcURL;
 
   // Parse scope from text: "/index public", "/index admin", "/index kb"
   const text = (msg.text || '').trim();
@@ -1993,16 +2347,18 @@ async function handleBeeperFileIndex(msg, platform, config, indexer) {
 
   if (!scope) {
     // Ask for scope
-    if (!config._pendingIndex) config._pendingIndex = {};
-    config._pendingIndex[msg.senderId] = { fileName, srcURL };
+    pending.set(msg.chatId, msg.senderId, 'index', {
+      data: { fileName, srcURL },
+      ttlMs: pickerTtlMs(config),
+      expireMsg: 'File index prompt expired — re-send the file.',
+    });
     await platform.send(msg.chatId, `Got "${fileName}". Index as:\n1. Public (kb)\n2. Admin only\n3. Skip\nReply 1, 2, or 3.`);
     return;
   }
 
   try {
     await platform.send(msg.chatId, `Downloading and indexing: ${fileName} (${scope})...`);
-    const localPath = await platform.downloadAsset(srcURL);
-    const buffer = require('fs').readFileSync(localPath);
+    const buffer = await platform.downloadAsset(srcURL);
     const count = await indexer.indexBuffer(buffer, fileName, scope);
     await platform.send(msg.chatId, `Indexed ${count} chunks from ${fileName} [${scope}]`);
     logAudit({ action: 'index_upload', user_id: msg.senderId, filename: fileName, chunks: count, scope, platform: 'beeper' });
@@ -2078,231 +2434,13 @@ async function handleSilentAttachment(msg, platform, config, indexer, source) {
 
     try {
       const scope = `user:${msg.chatId}`;
-      const localPath = await platform.downloadAsset(attachment.srcURL || attachment.id);
-      const buffer = require('fs').readFileSync(localPath);
+      const buffer = await platform.downloadAsset(attachment.srcURL);
       const count = await indexer.indexBuffer(buffer, attachment.fileName, scope);
       logAudit({ action: 'silent_index', user_id: msg.senderId, filename: attachment.fileName, chunks: count, scope, platform: 'beeper' });
     } catch (err) {
       console.error(`Silent index error (beeper): ${err.message}`);
     }
   }
-}
-
-// ---------------------------------------------------------------------------
-// Legacy Telegraf-style handlers (kept for backward compat, delegates to above)
-// ---------------------------------------------------------------------------
-
-function handleStart(config) {
-  return (ctx) => {
-    const userId = ctx.from.id;
-    const username = ctx.from.username || ctx.from.first_name;
-
-    if (isPaired(ctx, config)) {
-      ctx.reply(`Welcome back, ${username}! You're already paired. Send me any message.`);
-      logAudit({ action: 'start', user_id: userId, username, status: 'already_paired' });
-      return;
-    }
-
-    const text = ctx.message.text || '';
-    const parts = text.split(/\s+/);
-    const code = ctx.startPayload || parts[1];
-
-    if (!code) {
-      ctx.reply('Send: /start <pairing_code>\nOr use deep link: t.me/multis02bot?start=<code>');
-      logAudit({ action: 'start', user_id: userId, username, status: 'no_code' });
-      return;
-    }
-
-    if (code.toUpperCase() === config.pairing_code.toUpperCase()) {
-      const id = String(userId);
-      addAllowedUser(id);
-      if (!config.allowed_users.map(String).includes(id)) {
-        config.allowed_users.push(id);
-      }
-      if (!config.owner_id) config.owner_id = id;
-      const role = String(config.owner_id) === id ? 'owner' : 'user';
-      ctx.reply(`Paired successfully as ${role}! Welcome, ${username}.`);
-      logAudit({ action: 'pair', user_id: id, username, status: 'success' });
-    } else {
-      ctx.reply('Invalid pairing code. Try again.');
-      logAudit({ action: 'pair', user_id: userId, username, status: 'invalid_code', code_given: code });
-    }
-  };
-}
-
-function handleStatus(config) {
-  return (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    const owner = isOwner(ctx.from.id, config);
-    const info = [
-      `multis bot v${PKG_VERSION}`,
-      `Role: ${owner ? 'owner' : 'user'}`,
-      `Paired users: ${config.allowed_users.length}`,
-      `LLM provider: ${config.llm.provider}`,
-      `Governance: bareguard Gate (bareguard 0.4 + bare-agent 0.10)`
-    ];
-    ctx.reply(info.join('\n'));
-  };
-}
-
-function handleUnpair(config) {
-  return (ctx) => {
-    const userId = ctx.from.id;
-    if (!isPaired(ctx, config)) return;
-    config.allowed_users = config.allowed_users.filter(id => id !== userId);
-    const { saveConfig } = require('../config');
-    saveConfig(config);
-    ctx.reply('Unpaired. Send /start <code> to pair again.');
-    logAudit({ action: 'unpair', user_id: userId, status: 'success' });
-  };
-}
-
-function handleExec(config) {
-  return (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    if (!isOwner(ctx.from.id, config)) { ctx.reply('Owner only command.'); return; }
-    const text = ctx.message.text || '';
-    const command = text.replace(/^\/exec\s*/, '').trim();
-    if (!command) { ctx.reply('Usage: /exec <command>'); return; }
-    const result = execCommand(command, ctx.from.id);
-    ctx.reply(result.output);
-  };
-}
-
-function handleRead(config) {
-  return (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    if (!isOwner(ctx.from.id, config)) { ctx.reply('Owner only command.'); return; }
-    const text = ctx.message.text || '';
-    const filePath = text.replace(/^\/read\s*/, '').trim();
-    if (!filePath) { ctx.reply('Usage: /read <path>'); return; }
-    const result = readFile(filePath, ctx.from.id);
-    ctx.reply(result.output);
-  };
-}
-
-function handleSkills(config) {
-  return (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    ctx.reply(`Available skills:\n${listSkills()}`);
-  };
-}
-
-function handleHelp(config) {
-  return (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    const cmds = [
-      'multis commands:',
-      '/ask <question> - Ask about indexed documents',
-      '/status - Bot info',
-      '/search <query> - Search indexed documents',
-      '/docs - Show indexing stats',
-      '/skills - List available skills',
-      '/unpair - Remove pairing',
-      '/help - This message',
-      '',
-      'Plain text messages are treated as questions.'
-    ];
-    if (isOwner(ctx.from.id, config)) {
-      cmds.splice(1, 0,
-        '/exec <cmd> - Run a shell command (owner)',
-        '/read <path> - Read a file or directory (owner)',
-        '/index <path> - Index a document (owner)',
-        '/mode <business|silent|off> - Set chat mode (owner)',
-        'Send a file to index it (owner)'
-      );
-    }
-    ctx.reply(cmds.join('\n'));
-  };
-}
-
-function handleIndex(config, indexer) {
-  return async (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    if (!isOwner(ctx.from.id, config)) { ctx.reply('Owner only command.'); return; }
-    const text = ctx.message.text || '';
-    const filePath = text.replace(/^\/index\s*/, '').trim();
-    if (!filePath) { ctx.reply('Usage: /index <path>'); return; }
-    const expanded = filePath.replace(/^~/, process.env.HOME || process.env.USERPROFILE);
-    try {
-      ctx.reply(`Indexing: ${filePath}...`);
-      const count = await indexer.indexFile(expanded);
-      ctx.reply(`Indexed ${count} chunks from ${filePath}`);
-    } catch (err) {
-      ctx.reply(`Index error: ${err.message}`);
-    }
-  };
-}
-
-function handleDocument(config, indexer) {
-  return async (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    if (!isOwner(ctx.from.id, config)) { ctx.reply('Owner only.'); return; }
-    const doc = ctx.message.document;
-    if (!doc) return;
-    const filename = doc.file_name || 'unknown';
-    const ext = filename.split('.').pop().toLowerCase();
-    const supported = ['pdf', 'docx', 'md', 'txt'];
-    if (!supported.includes(ext)) { ctx.reply(`Unsupported: .${ext}`); return; }
-    try {
-      ctx.reply(`Downloading and indexing: ${filename}...`);
-      const fileLink = await ctx.telegram.getFileLink(doc.file_id);
-      const response = await fetch(fileLink.href);
-      const buffer = Buffer.from(await response.arrayBuffer());
-      const count = await indexer.indexBuffer(buffer, filename);
-      ctx.reply(`Indexed ${count} chunks from ${filename}`);
-      logAudit({ action: 'index_upload', user_id: ctx.from.id, filename, chunks: count });
-    } catch (err) {
-      ctx.reply(`Index error: ${err.message}`);
-      logAudit({ action: 'index_error', user_id: ctx.from.id, filename, error: err.message });
-    }
-  };
-}
-
-function handleSearch(config, indexer) {
-  return (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    const text = ctx.message.text || '';
-    const query = text.replace(/^\/search\s*/, '').trim();
-    if (!query) { ctx.reply('Usage: /search <query>'); return; }
-    const results = indexer.search(query, 5);
-    if (results.length === 0) { ctx.reply('No results found.'); return; }
-    const formatted = results.map((r, i) => {
-      const p = r.sectionPath.join(' > ') || r.name;
-      const preview = r.content.slice(0, 200).replace(/\n/g, ' ');
-      return `${i + 1}. [${r.element}] ${p}\n${preview}...`;
-    });
-    ctx.reply(formatted.join('\n\n'));
-    logAudit({ action: 'search', user_id: ctx.from.id, query, results: results.length });
-  };
-}
-
-function handleDocs(config, indexer) {
-  return (ctx) => {
-    if (!isPaired(ctx, config)) return;
-    const stats = indexer.getStats();
-    const lines = [`Indexed documents: ${stats.indexedFiles}`, `Total chunks: ${stats.totalChunks}`];
-    for (const [type, count] of Object.entries(stats.byType)) {
-      lines.push(`  ${type}: ${count} chunks`);
-    }
-    ctx.reply(lines.join('\n') || 'No documents indexed yet.');
-  };
-}
-
-function handleMessage(config) {
-  return (ctx) => {
-    const userId = ctx.from.id;
-    const username = ctx.from.username || ctx.from.first_name;
-    if (!isPaired(ctx, config)) {
-      ctx.reply('You are not paired. Send /start <pairing_code> to pair.');
-      logAudit({ action: 'message', user_id: userId, username, status: 'unpaired' });
-      return;
-    }
-    const text = ctx.message.text;
-    if (text.startsWith('/')) return;
-    logAudit({ action: 'message', user_id: userId, username, text });
-    ctx.reply(`Echo: ${text}`);
-  };
 }
 
 module.exports = {
@@ -2312,18 +2450,5 @@ module.exports = {
   buildAgentRegistry,
   resolveAgent,
   clearAdminPauses,
-  // Legacy Telegraf handlers
-  handleStart,
-  handleStatus,
-  handleUnpair,
-  handleExec,
-  handleRead,
-  handleIndex,
-  handleDocument,
-  handleSearch,
-  handleDocs,
-  handleSkills,
-  handleHelp,
-  handleMessage,
   isPaired
 };

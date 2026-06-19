@@ -3,8 +3,9 @@ const { logAudit } = require('./governance/audit');
 const { createMessageRouter } = require('./bot/handlers');
 const { TelegramPlatform } = require('./platforms/telegram');
 const { BeeperPlatform } = require('./platforms/beeper');
-const { cleanupLogs, pruneMemoryChunks } = require('./maintenance/cleanup');
-const { DocumentStore } = require('./indexer/store');
+const { cleanupLogs } = require('./maintenance/cleanup');
+const context = require('./context');
+const { startLagMonitor, ENABLED: INSTR_ON } = require('./debug/instr');
 const fs = require('fs');
 const path = require('path');
 
@@ -12,10 +13,17 @@ async function main() {
   ensureMultisDir();
   const config = loadConfig();
 
+  startLagMonitor(); // TEMP: pin the 15s timeout. Disable with MULTIS_INSTR=0.
+  if (INSTR_ON) console.log('[INSTR] instrumentation ON (event-loop lag + phase marks)');
+
   console.log(`multis v${require('../package.json').version}`);
   console.log(`Pairing code: ${config.pairing_code}`);
   console.log(`Paired users: ${config.allowed_users.length}`);
   console.log(`LLM provider: ${config.llm.provider}`);
+
+  // Bring up litectx (process-wide doc + memory store) before the router/platforms.
+  await context.init({ documents: config.documents });
+  context.setBounds(config.documents);
 
   const handler = createMessageRouter(config);
   const platforms = [];
@@ -68,18 +76,15 @@ async function main() {
   if (!fs.existsSync(pidDir)) fs.mkdirSync(pidDir, { recursive: true });
   fs.writeFileSync(PATHS.pid(), String(process.pid));
 
-  // Run cleanup on startup
+  // Run cleanup on startup. Memory retention is enforced at write time via
+  // per-row expiresAt (admin rows live longer — see capture.js); purge() just
+  // reclaims whatever has expired. Log files are pruned separately by age.
   try {
-    const store = new DocumentStore();
-    const logDays = config.memory?.log_retention_days || 30;
-    const memDays = config.memory?.retention_days || 90;
-    const adminDays = config.memory?.admin_retention_days || 365;
-    const logResult = cleanupLogs(logDays);
-    const chunksPruned = pruneMemoryChunks(store, memDays, adminDays);
-    if (logResult.deleted > 0 || chunksPruned > 0) {
-      console.log(`Cleanup: ${logResult.deleted} old logs, ${chunksPruned} old chunks removed`);
+    const logResult = cleanupLogs(config.memory?.log_retention_days || 30);
+    const purged = await context.purge();
+    if (logResult.deleted > 0 || purged > 0) {
+      console.log(`Cleanup: ${logResult.deleted} old logs, ${purged} expired memory rows removed`);
     }
-    store.close();
   } catch (err) {
     console.warn(`Cleanup warning: ${err.message}`);
   }
@@ -87,14 +92,14 @@ async function main() {
   // Schedule daily cleanup
   const DAILY_MS = 24 * 60 * 60 * 1000;
   setInterval(() => {
-    try {
-      const store = new DocumentStore();
-      cleanupLogs(config.memory?.log_retention_days || 30);
-      pruneMemoryChunks(store, config.memory?.retention_days || 90, config.memory?.admin_retention_days || 365);
-      store.close();
-    } catch (err) {
-      console.warn(`Scheduled cleanup error: ${err.message}`);
-    }
+    (async () => {
+      try {
+        cleanupLogs(config.memory?.log_retention_days || 30);
+        await context.purge();
+      } catch (err) {
+        console.warn(`Scheduled cleanup error: ${err.message}`);
+      }
+    })();
   }, DAILY_MS);
 
   // Graceful shutdown

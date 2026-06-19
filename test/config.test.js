@@ -60,6 +60,36 @@ describe('loadConfig — default merging', () => {
     assert.strictEqual(config.security.prompt_injection_detection, true);
   });
 
+  it('fills security.rate_limit, llm.max_tool_rounds and documents bounds for pre-existing configs', () => {
+    // The minimal config.json on disk has none of these — loadConfig must add
+    // them so installs created before these knobs existed are still bounded.
+    delete require.cache[require.resolve('../src/config')];
+    const { loadConfig } = require('../src/config');
+    const config = loadConfig();
+
+    // #8 — agent loop is bounded
+    assert.strictEqual(config.llm.max_tool_rounds, 5);
+    // #1 — rate limit defaults present
+    assert.strictEqual(config.security.rate_limit.enabled, true);
+    assert.strictEqual(config.security.rate_limit.burst_per_min, 10);
+    assert.strictEqual(config.security.rate_limit.daily_per_sender, 100);
+    // #4 — parser bounds present
+    assert.strictEqual(config.documents.maxSize, 10485760);
+    assert.strictEqual(config.documents.maxPdfPages, 2000);
+    assert.strictEqual(config.documents.parseTimeoutMs, 30000);
+  });
+
+  it('preserves a custom max_tool_rounds over the default', () => {
+    const multisDir = path.join(tmpDir, '.multis');
+    const config = JSON.parse(fs.readFileSync(path.join(multisDir, 'config.json'), 'utf-8'));
+    config.llm = { ...config.llm, max_tool_rounds: 2 };
+    fs.writeFileSync(path.join(multisDir, 'config.json'), JSON.stringify(config, null, 2));
+
+    delete require.cache[require.resolve('../src/config')];
+    const { loadConfig } = require('../src/config');
+    assert.strictEqual(loadConfig().llm.max_tool_rounds, 2, 'custom value must win');
+  });
+
   it('preserves existing security values over defaults', () => {
     // Write config with custom security
     const multisDir = path.join(tmpDir, '.multis');
