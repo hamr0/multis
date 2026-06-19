@@ -4,6 +4,10 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-06-19
+
+Baresuite migration milestone — M-B (beeperbox MCP swap) + M3 (litectx 0.18.0 doc index) + security overhaul + init rewrite. Merged behind a reduced `/security` + `/diff-review` gate; full LIVE‡ pass follows M9.
+
 ### Security — pre-merge gate: shell-injection class closed in the agent tools
 
 A `/security` + `/diff-review` pass before merging the migration branch found and fixed a **command-injection / gate-bypass** class in the LLM agent tools:
