@@ -50,7 +50,11 @@ function buildGovernDeps({ pinChallenge, floorPolicy, denylist = [], indexer, ap
         user_id: meta.ctx?.senderId,
         chatId: meta.ctx?.chatId,
         platform: meta.ctx?.platform,
-        status: 'executed',
+        // The core records a catastrophic WALL via this same audit dep (with
+        // blocked:true) — it must not read as 'executed'. Reflect the real outcome.
+        // The core records a catastrophic WALL via this same audit dep (with
+        // blocked:true) — it must not read as 'executed'. Reflect the real outcome.
+        status: meta.blocked ? 'blocked' : 'executed',
       });
     },
   };

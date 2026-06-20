@@ -20,7 +20,14 @@ The catastrophic tier (`rm -rf` of a root/home target, `dd` to a device, `mkfs`,
 
 `/unpair` is gone. Removing a limited admin is already `/admin remove` (owner-only, and structurally cannot touch the owner); the only account in the paired list is the owner's, so a self-unpair would risk orphaning the bot with no owner left. Full teardown remains a CLI action (`multis stop` → `rm -rf ~/.multis`).
 
-> Note: global `/mode off` (no target) was found to be a dead setting — `getChatMode` maps `bot_mode:'off'`→`'business'`, so it never produces a global-off. Left un-gated (it does nothing) and flagged as a latent pre-existing bug.
+### Removed — global `/mode off` (no target)
+
+Global `/mode off` is gone. It was both **redundant** (to halt the bot you stop the daemon — `multis stop` — which actually frees the process; a global off would keep it running but playing dead, with no way to re-enable from chat since `off` ignores incoming messages) and a **footgun** (it wrote `bot_mode='off'` directly, bypassing the governed core, and that value was inert — `getChatMode` mapped global `off`→`business`). `/mode off` with no target now refuses and points the owner at `multis stop` (to halt) or per-chat `/mode off <chat>` (to mute one conversation, unchanged). Global `business`/`silent`/`personal` defaults are untouched.
+
+### Tests — M0 door-convergence parity net + audit fidelity
+
+- **`test/e2e/parity.test.js`** — proves M9's load-bearing claim ("one governed core, both doors") *directly*: the **slash door** (`/exec`) and the **LLM door** (the model's `exec` tool call) are driven with the **same** command + governance and asserted to produce **byte-identical** governed records — same verbatim ceremony echo, same plain-language govern audit line, same PIN-gated execution, same catastrophic hard-wall. Mutation-proven (bypassing the LLM door's core routing turns all three red). The natural-language door (`"silence Amr"`→app-verb) is documented as a future third column — it was POC-validated but not wired (app-verbs aren't exposed to the LLM).
+- **Audit fidelity** — a catastrophic *blocked* action now records `status:'blocked'` (was hardcoded `'executed'`, ignoring the `blocked:true` the core already passed). The wall itself was always correct; only the audit label was wrong.
 
 ## [0.17.0] - 2026-06-19
 

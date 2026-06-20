@@ -1404,6 +1404,22 @@ describe('/mode business menu', () => {
     assert.strictEqual(env.config.bot_mode, 'business');
   });
 
+  // Global "off" is bloat (redundant with `multis stop`) AND was a footgun — it
+  // wrote bot_mode='off' directly, bypassing the governed core, and that value is
+  // inert (getChatMode maps global off→business). It's now rejected outright: no
+  // global write, point the owner at `multis stop` / per-chat off instead.
+  it('/mode off with no target does NOT write a global off and is rejected', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1', bot_mode: 'personal' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/mode off'), platform);
+
+    assert.notStrictEqual(env.config.bot_mode, 'off', 'global bot_mode was NOT set to off');
+    assert.strictEqual(env.config.bot_mode, 'personal', 'global bot_mode is unchanged');
+    assert.match(platform.lastTo('chat1').text, /multis stop|isn't supported/i);
+  });
+
   it('menu option 1 starts wizard full flow', async () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();

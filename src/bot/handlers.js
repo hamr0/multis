@@ -1425,6 +1425,17 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
       return;
     }
 
+    // Global "off" is not supported. To halt the bot, stop the daemon
+    // (`multis stop`) — a global off would keep the process running but playing
+    // dead, with no way to re-enable from chat (off ignores incoming messages).
+    // Per-chat off (/mode off <chat>) mutes a single conversation and IS supported.
+    if (mode === 'off') {
+      await platform.send(msg.chatId,
+        'Global "off" isn\'t supported — to stop the bot, run `multis stop`.\n' +
+        'To mute one chat: /mode off <chat name>.');
+      return;
+    }
+
     // No target → set global bot_mode
     config.bot_mode = mode;
     saveConfig(config);
