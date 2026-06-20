@@ -2,33 +2,35 @@
 
 > **Purpose:** the merge gate for this branch (PRD §10) is the set of `LIVE‡` rows — security fixes proven only at unit/integration level that **must** be re-verified against a live harness before `baresuite-migration-m3` → `main`. This sheet turns those rows into an ordered, copy-paste checklist with exact commands and pass criteria, so the manual pass is mechanical.
 >
-> Source of truth for *what* must pass: `docs/01-product/baresuite-migration-prd.md` §10.5 / §10.3 / §10.4. This sheet is the *how*. Branch state: refreshed after the M3 security + litectx-0.18.0 session — HEAD `a4a2e20`, package `0.16.1`, 420 tests green.
+> Source of truth for *what* must pass: `docs/01-product/baresuite-migration-prd.md` §10.5 / §10.3 / §10.4. This sheet is the *how*. Branch state: refreshed after the **M9 intent-first dispatch** build + M0 parity net — branch `m9-intent-first-dispatch`, HEAD `38d16c5`, package `0.17.1`, **456 tests green**.
 >
-> **Changed this session — read before running:**
-> - **SEC9 flipped:** `/index <path>` is now **owner-only entirely** (host-filesystem read = owner capability). A limited admin is refused in **any** scope (`public` *and* `admin`), not just `admin`. Updated below.
-> - **Scope fence is now litectx-native** (`strictScope`, litectx 0.18.0): a missing recall scope **throws** (fail-closed) instead of returning every tenant — affects SEC5 / R2. The homegrown store + its hand-rolled fence are gone.
-> - **`/docs` is now admin-gated** (a customer running `/docs` is refused) — spot-check alongside C5.
-> - **DOCX-parser DoS hardened:** `mammoth`'s transitive `@xmldom/xmldom`/`underscore` recursion-DoS CVEs are pinned to patched versions — folds into SEC2.
+> **Changed by M9 — read before running (the command-governance model changed):**
+> - **Host actions now run through ONE governed core** (`runGovernedAction`) on **both** doors — slash (`/exec`) and the LLM tool path. The 3 tiers are now: **benign → runs free (no PIN)** · **destructive → PIN** · **catastrophic → HARD WALL** (never runs, no override). This replaces "every `/exec` PINs" and "catastrophic → PIN+CONFIRM".
+> - **`/read` is benign** (no PIN) — the fs scope is open; reads/finds don't ceremony. The old "`/read` requires PIN" line is **wrong** now; don't expect a prompt.
+> - **`/exec rm -rf /` (and `~/*`, `dd of=/dev/*`, `mkfs`, fork bomb, `shutdown`) is a HARD WALL** — the reply is "too destructive… do it in a terminal", no PIN offered. (Door-convergence proven byte-identical in `test/e2e/parity.test.js`; mutation-proven.)
+> - **SEC4 example changed:** a *benign* NL command (`whoami`, "read my config") now runs **without** a PIN. To exercise the agent-path PIN you must use a **destructive** NL request (e.g. "delete notes.txt").
+> - **Global `/mode off` (no target) removed** — refuses + points at `multis stop` / per-chat off. (From M3 still in force: SEC9 `/index` owner-only entirely; `strictScope` litectx-native fence; `/docs` admin-gated; DOCX-DoS pinned.)
 
 ## 0. Harness setup (once)
 
 You need: a real LLM key, a real Telegram bot, a live beeperbox container, and **two identities** — the owner (you, via Telegram pairing + Beeper note-to-self) and a throwaway **"customer"** account in a separate Beeper chat. A third identity (a normal Telegram user, or a Beeper chat you'll designate) plays the **limited admin**.
 
+> **⚠ Real-account harness hazard (2026-06-20).** This pass runs against your **real** Beeper account (owner `8503143603`, beeperbox `:23375` live, 7 real chats). The isolation guard is now applied: **`platforms.beeper.default_mode='off'`** — every un-named chat (incl. bridged mirrors of your own Telegram) resolves to `off` = zero I/O, so a real contact is never auto-answered. **Verified:** all 7 chats resolve to `off`; owner note-to-self still routes (off-mode lets self-messages through). A pre-isolation snapshot is at `~/.multis/config.json.bak`; the older real-config backup is `~/.multis.bak`.
+>
+> **Do NOT fresh-`init`** — that re-pairs Telegram + re-connects beeperbox against the real account for no benefit. Use the existing isolated `~/.multis`. For the **customer-facing rows** (SEC1/SEC3/SEC5), temporarily opt **one throwaway chat** into business: `/mode business <that chat>` from your owner channel — then set it back to `off` when done. Never put a real contact's chat in business.
+
 ```bash
-# fresh state — do NOT clobber a real ~/.multis you care about
-mv ~/.multis ~/.multis.bak 2>/dev/null || true
-node bin/multis.js init       # wizard: pick mode, connect Telegram, choose LLM, set PIN
-node bin/multis.js start       # daemon up
-node bin/multis.js status      # confirm role/provider
+node bin/multis.js status      # confirm role/provider (daemon still down at this point)
+node bin/multis.js start       # daemon up — ONLY after the off-guard is confirmed (above)
 node bin/multis.js doctor      # diagnostics pass
 tail -f ~/.multis/logs/audit.log    # keep this open in a 2nd pane — most rows assert on it
 ```
 
-Pairing (PRD §10.2, prerequisite for the gate rows):
-- Telegram: first `/start <code>` → you become `owner_id`. A second pairer is a plain user.
-- Beeper: note-to-self chat is detected as the owner channel (`isOwner` now requires `isSelf && isPersonalChat`).
+Pairing (PRD §10.2, prerequisite for the gate rows) — already done on this account:
+- Telegram: first `/start <code>` → you became `owner_id`. A second pairer is a plain user.
+- Beeper: note-to-self chat is the owner channel (`isOwner` requires `isSelf && isPersonalChat`).
 
-> **Cleanup when done:** `node bin/multis.js stop` → `rm -rf ~/.multis` → `mv ~/.multis.bak ~/.multis`.
+> **Cleanup when done:** `node bin/multis.js stop`. The off-guard can stay (it's harmless); to fully restore the pre-session config: `cp ~/.multis/config.json.bak ~/.multis/config.json`. (Do **not** `rm -rf ~/.multis` here — that was the fresh-init teardown; this run reuses the real account.)
 
 ---
 
@@ -36,11 +38,16 @@ Pairing (PRD §10.2, prerequisite for the gate rows):
 
 Legend: **GIVEN** = setup / who sends it · **DO** = exact input · **EXPECT** = pass criterion · **WHERE** = where to confirm.
 
-### C1 — Owner `/exec`, `/read`; denylist; non-owner refused
-- **GIVEN** owner (Telegram, paired), PIN set.
-- **DO** `/exec echo hello` → enter PIN when prompted. Then `/read ~/.multis/config.json`. Then a denied command, e.g. `/exec rm -rf /`. Then send `/exec echo hi` from the **non-owner** account.
-- **EXPECT** owner: `echo`/`read` succeed *after* PIN; the denied command is blocked by the gate denylist (not executed). Non-owner: refused (owner-only).
-- **WHERE** chat replies + `gate.jsonl` (deny entry) + `audit.log`.
+### C1 — Owner `/exec`, `/read`; tiers; non-owner refused  ⚠ M9 3-tier model
+- **GIVEN** owner (Telegram, paired), PIN set. Governance allowlist must include the verbs you test (a benign command not in the allowlist is *floor-denied*, not run — that's expected).
+- **DO** in order:
+  1. **benign:** `/exec echo hello` → **runs immediately, no PIN**.
+  2. **benign read:** `/read ~/.multis/config.json` → **returns contents, no PIN** (reads are benign in M9).
+  3. **destructive:** `/exec rm somefile` (a plain `rm <file>`, not root/home) → **prompts for PIN**; on correct PIN it runs, on wrong PIN it cancels.
+  4. **catastrophic (HARD WALL):** `/exec rm -rf /` → reply is **"too destructive… do it in a terminal"**, **no PIN offered, never runs**. (Try `rm -rf ~/*` too — same wall.)
+  5. **non-owner:** send `/exec echo hi` from the **non-owner** account → **refused (owner-only)**.
+- **EXPECT** benign runs free; destructive PINs (verbatim-command echo in the prompt); catastrophic is walled with no override; non-owner refused.
+- **WHERE** chat replies + `audit.log` (`action:'govern'` lines: `tier:'benign'|'destructive'`, and `status:'blocked'` for the catastrophic wall) + `gate.jsonl`.
 
 ### A1 — Designate limited admin: pick → confirm → PIN
 - **GIVEN** owner in a Beeper note-to-self chat; a candidate chat exists.
@@ -79,11 +86,11 @@ Legend: **GIVEN** = setup / who sends it · **DO** = exact input · **EXPECT** =
 - **EXPECT** flooding customer gets **one** handoff message + escalation to owner; LLM stops responding to the flood. Second customer is unaffected (limiter is per-sender).
 - **WHERE** `audit.log` `action: 'rate_limit'`, `scope: 'burst'`; owner channel notification.
 
-### SEC4 — PIN on the agent path, resumes the same action
+### SEC4 — PIN on the agent path, resumes the same action  ⚠ M9: use a DESTRUCTIVE request
 - **GIVEN** owner, PIN session **expired/stale**.
-- **DO** natural language (not a slash command): "run `whoami`" or "read my config file".
-- **EXPECT** bot prompts for PIN, and on **correct** PIN **resumes the same action** (executes `whoami`). On **wrong** PIN or timeout → cancelled, action not run.
-- **WHERE** chat reply (the command output appears only after correct PIN).
+- **DO** natural language (not a slash command) for a **destructive** action — benign ones no longer PIN: e.g. "delete the file notes.txt" or "remove ~/scratch/old.log". (A benign "run whoami" / "read my config" now just runs — that's correct M9 behavior, not a miss.)
+- **EXPECT** the model resolves it to the `exec`/`run_shell` capability, the core classifies it destructive, and the bot prompts for PIN with the **verbatim resolved command** echoed; on **correct** PIN it **resumes the same action**, on **wrong** PIN / timeout it cancels and does not run. (A catastrophic NL request — "wipe my home directory" — is **hard-walled**, no PIN.)
+- **WHERE** chat reply (output only after correct PIN); `audit.log` `action:'govern'` `tier:'destructive'`.
 
 ### SEC5 — Owner scoping + prompt-injection fencing
 - **GIVEN** a customer chat; owner has a tool-enabled channel.
@@ -129,7 +136,7 @@ Legend: **GIVEN** = setup / who sends it · **DO** = exact input · **EXPECT** =
 
 ## 3. Sign-off
 
-Merge `baresuite-migration-m3` → `main` only when **every** row in §1 (C1, A1–A3, SEC1–SEC6, SEC9–SEC10) is checked and SEC11–SEC12 spot-checked. Any fix that falls out of this pass rides **0.16.1** under CHANGELOG `[Unreleased]`. After merge, 0.16.1 is the next verified npm release.
+Merge `m9-intent-first-dispatch` → `main` only when **every** row in §1 (C1, A1–A3, SEC1–SEC6, SEC9–SEC10) is checked and SEC11–SEC12 spot-checked. Any fix that falls out of this pass rides **0.17.1** under CHANGELOG `[Unreleased]`. After merge, 0.17.1 is the next verified npm release.
 
 | Row | Pass | Notes |
 |---|---|---|
