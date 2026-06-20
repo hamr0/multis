@@ -588,12 +588,31 @@ describe('Owner commands', () => {
   });
 
   it('/read shows file content', async () => {
+    // Read a file that is genuinely inside the fs readScope and assert its real
+    // content. (Previously this read `package.json` under the default governance,
+    // which is OUTSIDE readScope → a floor deny; it only "passed" because the raw
+    // deny string echoed the repo path `…/multis/package.json`. With the floor-deny
+    // message now friendly, that coincidence is gone — so test the real happy path.)
+    const os = require('os');
+    const path = require('path');
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-read-'));
+    const file = path.join(dir, 'note.txt');
+    fs.writeFileSync(file, 'hello-from-read-test');
     const platform = mockPlatform();
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+    const router = createMessageRouter(env.config, {
+      llm: mockLLM(), indexer: stubIndexer(),
+      fileless: true,
+      governanceFile: { commands: { allowlist: ['.*'], denylist: [] }, paths: { allowed: [dir], denied: [] } },
+    });
 
-    await router(msg('/read package.json'), platform);
-    assert.match(platform.sent[0].text, /multis/);
+    try {
+      await router(msg(`/read ${file}`), platform);
+      assert.match(platform.sent[0].text, /hello-from-read-test/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      env.cleanup();
+    }
   });
 
   it('/read without args shows usage', async () => {

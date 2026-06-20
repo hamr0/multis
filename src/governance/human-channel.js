@@ -116,8 +116,14 @@ function createPinChallenge({ platformRegistry, pinManager, pending, timeoutMs =
   // optional and omitted there, so the prompt degrades to the generic line.
   return async function pinChallenge(ctx, opts = {}) {
     if (!pinManager || !pinManager.isEnabled()) return true; // no PIN configured
+    // M9 always-ceremony (owner-decided 2026-06-20): a destructive action ALWAYS
+    // re-prompts for a fresh PIN — we deliberately do NOT honor a still-fresh PIN
+    // session here. The old 24h session bypass (`if (auth === false) return true`)
+    // let a destructive command run for up to a day after one PIN, undercutting
+    // "no destructive capability bypasses ceremony" (negative POC: assume the model
+    // is compromised, so the ceremony is the load-bearing control). `needsAuth` is
+    // still consulted for the LOCKOUT state; only the session-fresh shortcut is gone.
     const auth = pinManager.needsAuth(ctx?.senderId);
-    if (auth === false) return true; // session still fresh
 
     const platform = platformRegistry?.get(ctx?.platform);
     if (!platform || typeof platform.send !== 'function') return false; // can't prompt → deny

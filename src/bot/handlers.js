@@ -862,6 +862,20 @@ function buildAppExec(config, getMem) {
 }
 
 /**
+ * Map a bareguard floor-deny verdict string to a readable, non-leaky line.
+ * The raw verdict (rule name + matched regex) stays in gate.jsonl for forensics;
+ * the owner just sees why it was blocked, in plain language.
+ */
+function friendlyFloorDeny(raw) {
+  const s = String(raw || '');
+  if (/fs\.deny|\bpath\b/i.test(s)) return '⛔ Blocked: that path is off-limits.';
+  if (/shellMeta|metacharacter/i.test(s)) return "⛔ Blocked: that command uses shell special characters I can't run safely — simplify it, or run it yourself in a terminal.";
+  if (/denyPatterns|catastrophic/i.test(s)) return '⛔ Blocked: that command is too dangerous to run through me — please do it yourself in a terminal.';
+  if (/bash\.allow|not in|allowlist/i.test(s)) return "⛔ Blocked: that command isn't on the allowed list.";
+  return '⛔ Blocked by safety policy.';
+}
+
+/**
  * Render a governed-core result to the user. `format(result)` shapes the OK
  * text; `usage` shows when a required arg is missing/invalid (the picker
  * stand-in for the slash door). DENIED maps the owner floor and a declined
@@ -885,9 +899,11 @@ async function sendCapabilityResult(r, platform, msg, opts = {}) {
     } else if (/_ceremony_declined$/.test(r.reason || '')) {
       await platform.send(msg.chatId, 'Action cancelled.');
     } else {
-      // floor deny — surface bareguard's own verdict string (it carries the
-      // allowlist/fs.deny reason the audit also records).
-      await platform.send(msg.chatId, r.message || 'Denied by governance.');
+      // floor deny (Axis-A) — bareguard's raw verdict (e.g.
+      // "[deny: content.denyPatterns] matched /\brm\s+-rf\s+\//") is an internal
+      // rule string and already recorded in gate.jsonl. Show the owner a readable
+      // line instead of leaking the regex/rule name into chat.
+      await platform.send(msg.chatId, friendlyFloorDeny(r.message));
     }
     return;
   }
