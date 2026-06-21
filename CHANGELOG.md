@@ -4,6 +4,15 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+### Removed — the limited-admin tier (`/admin`, `admins[]`, `isAdmin`, `isAdminChat`)
+
+The second-tier "limited admin" principal is gone. It never fit the architecture: multis runs on the **owner's** machine watching the **owner's** Beeper inbox, so every Beeper chat is "owner ↔ someone" — a third party has no independent channel to the bot (only their conversation *with the owner*), making a Beeper "limited admin" circular ("which chat is admin? the one with me"). A Telegram-only admin is a half-operator (gets escalation pings but can't see or act in chats — those live in Beeper). A useful operator must SEE+ACT, which means the **Beeper account itself** (multi-device); at that point they *are* the owner identity, with nothing to designate. And the PIN can't separate shared-account operators — note-to-self is synced, so any PIN is visible to everyone on the account; the PIN's real job is a **destructive-action speed bump**, not access control.
+
+- **Model now (LOCKED):** `owner` (one identity, any number of trusted devices/people sharing the Beeper account) + `customers`. Telegram is the owner's remote control, not an operator host. There is no reduced-privilege tier — a shared-account operator is a full owner (the PIN still gates destructive actions; benign host reads run free).
+- **Removed:** the `/admin` command and its `routeAdmin`/`handleAdminFlowReply` designation flow; `admins[]` (config field, template default, and migration); `isAdmin`/`addAdmin`/`removeAdmin`; Beeper `isAdminChat` routing (which also **closes the off-mode footgun** — an admin-designated chat could bypass the off-mode early-exit); `Message.isAdminChat`; and the help "admin" role tier (now just `all`/`owner`). Beeper commands are now owner-note-to-self only.
+- **Kept (different concept, same word):** the `admin` *document scope* (the owner's private KB — `/index … admin`, `recall(scope:'admin')`, memory capture). The scope selector was already keyed on `isOwner`, so memory/RAG isolation is unchanged.
+- Deleted `test/admin.test.js`; reframed the `/index` host-FS-floor tests from "limited admin cannot" to "a non-owner cannot" (a paired non-owner, so the test exercises the `routeIndex` owner-only floor, not the pairing gate). 456/456 green. If a genuinely restricted remote helper is ever needed, that's a future reply-only **relay-operator** build, not this tier.
+
 ### Fixed — `/mode` chat directory is beeperbox-live; `config.chats` no longer drifts
 
 The Beeper chat directory is **beeperbox's** (always current); multis's `config.chats` is only the mode overlay + names for chats it has acted on. Two fixes restore that split:

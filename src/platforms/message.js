@@ -15,7 +15,7 @@ function looksLikeCommand(text) {
  * Beeper messages are commands only when prefixed with / from personal chats.
  */
 class Message {
-  constructor({ id, platform, chatId, chatName, senderId, senderName, isSelf, text, raw, routeAs, network, isAdminChat, isPersonalChat }) {
+  constructor({ id, platform, chatId, chatName, senderId, senderName, isSelf, text, raw, routeAs, network, isPersonalChat }) {
     this.id = id;
     this.platform = platform;
     this.chatId = chatId;
@@ -28,8 +28,6 @@ class Message {
     this.network = network || '';
     /** @type {'natural'|'business'|null} Set by platform for non-command routing */
     this.routeAs = routeAs || null;
-    /** @type {boolean} Beeper: a chat designated a limited admin via /admin. */
-    this.isAdminChat = isAdminChat || false;
     /**
      * @type {boolean} Beeper: the account's own note-to-self chat (the owner
      * channel). Gates the owner grant so `isSelf` alone — e.g. a self-message in
@@ -45,7 +43,7 @@ class Message {
    */
   isCommand() {
     if (this.platform === 'telegram') return true;
-    if (this.platform === 'beeper') return (this.isSelf || this.isAdminChat) && looksLikeCommand(this.text);
+    if (this.platform === 'beeper') return this.isSelf && looksLikeCommand(this.text);
     return false;
   }
 

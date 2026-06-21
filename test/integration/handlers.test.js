@@ -660,33 +660,35 @@ describe('Owner commands', () => {
 
   // Security regression: `/index <path>` reads from the HOST filesystem
   // (indexFile -> fs.readFileSync), so it is an owner-only capability — same trust
-  // boundary as /exec and /read. A limited admin must not be able to point it at an
+  // boundary as /exec and /read. A non-owner must not be able to point it at an
   // arbitrary host path (`/index /etc/passwd public` would be a host-file read that
   // also lands the bytes in the world-readable KB), in ANY scope.
-  it('limited admin CANNOT /index a host path (admin scope)', async () => {
-    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1', admins: ['staffchat'] });
+  // Use a PAIRED non-owner: they clear the pairing gate and reach routeIndex's
+  // own owner-only floor, which is the boundary under test (not the pairing wall).
+  it('a non-owner CANNOT /index a host path (admin scope)', async () => {
+    const env = createTestEnv({ allowed_users: ['user1', 'cust'], owner_id: 'user1' });
     const platform = mockPlatform();
     let called = false;
     const indexer = stubIndexer();
     indexer.indexFile = async () => { called = true; return 5; };
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
-    await router(msg('/index /tmp/x.pdf admin', { senderId: 'staff', chatId: 'staffchat' }), platform);
-    assert.strictEqual(called, false, 'host-path index must not run for a limited admin');
-    assert.match(platform.lastTo('staffchat').text, /owner only/i);
+    await router(msg('/index /tmp/x.pdf admin', { senderId: 'cust', chatId: 'custchat' }), platform);
+    assert.strictEqual(called, false, 'host-path index must not run for a non-owner');
+    assert.match(platform.lastTo('custchat').text, /owner only/i);
   });
 
-  it('limited admin CANNOT /index a host path (public scope)', async () => {
-    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1', admins: ['staffchat'] });
+  it('a non-owner CANNOT /index a host path (public scope)', async () => {
+    const env = createTestEnv({ allowed_users: ['user1', 'cust'], owner_id: 'user1' });
     const platform = mockPlatform();
     let called = false;
     const indexer = stubIndexer();
     indexer.indexFile = async () => { called = true; return 5; };
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
-    await router(msg('/index /tmp/x.pdf public', { senderId: 'staff', chatId: 'staffchat' }), platform);
-    assert.strictEqual(called, false, 'host-path index must not run for a limited admin');
-    assert.match(platform.lastTo('staffchat').text, /owner only/i);
+    await router(msg('/index /tmp/x.pdf public', { senderId: 'cust', chatId: 'custchat' }), platform);
+    assert.strictEqual(called, false, 'host-path index must not run for a non-owner');
+    assert.match(platform.lastTo('custchat').text, /owner only/i);
   });
 
   it('owner CAN /index to the admin scope', async () => {
@@ -1497,7 +1499,7 @@ describe('/mode business menu', () => {
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
     await router(msg('/mode business', { senderId: 'user2' }), platform);
-    assert.match(platform.sent[0].text, /Admin only/);
+    assert.match(platform.sent[0].text, /Owner only/);
   });
 
   it('wizard skip preserves existing values', async () => {

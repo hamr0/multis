@@ -13,7 +13,7 @@
 
 ## 0. Harness setup (once)
 
-You need: a real LLM key, a real Telegram bot, a live beeperbox container, and **two identities** — the owner (you, via Telegram pairing + Beeper note-to-self) and a throwaway **"customer"** account in a separate Beeper chat. A third identity (a normal Telegram user, or a Beeper chat you'll designate) plays the **limited admin**.
+You need: a real LLM key, a real Telegram bot, a live beeperbox container, and **two identities** — the owner (you, via Telegram pairing + Beeper note-to-self) and a throwaway **"customer"** account in a separate Beeper chat. (The limited-admin tier was removed 2026-06-21, so no third identity is needed.)
 
 > **⚠ Real-account harness hazard (2026-06-20).** This pass runs against your **real** Beeper account (owner `8503143603`, beeperbox `:23375` live, 7 real chats). The isolation guard is now applied: **`platforms.beeper.default_mode='off'`** — every un-named chat (incl. bridged mirrors of your own Telegram) resolves to `off` = zero I/O, so a real contact is never auto-answered. **Verified:** all 7 chats resolve to `off`; owner note-to-self still routes (off-mode lets self-messages through). A pre-isolation snapshot is at `~/.multis/config.json.bak`; the older real-config backup is `~/.multis.bak`.
 >
@@ -49,26 +49,14 @@ Legend: **GIVEN** = setup / who sends it · **DO** = exact input · **EXPECT** =
 - **EXPECT** benign runs free; destructive PINs (verbatim-command echo in the prompt); catastrophic is walled with no override; non-owner refused.
 - **WHERE** chat replies + `audit.log` (`action:'govern'` lines: `tier:'benign'|'destructive'`, and `status:'blocked'` for the catastrophic wall) + `gate.jsonl`.
 
-### A1 — Designate limited admin: pick → confirm → PIN
-- **GIVEN** owner in a Beeper note-to-self chat; a candidate chat exists.
-- **DO** `/admin` → pick the candidate chat → confirm → enter PIN.
-- **EXPECT** chat joins `admins[]` **only after correct PIN**. Repeat with a **wrong** PIN → chat is **not** added.
-- **WHERE** `~/.multis/config.json` `admins[]` array; chat reply.
-
-### A2 — Designated chat becomes a command channel (Beeper)
-- **GIVEN** the chat designated in A1.
-- **DO** from that chat: `/mode silent`, then `/index <some.pdf> public`.
-- **EXPECT** both execute (isAdminChat routing) — before A1 they would have been ignored as a non-owner Beeper chat.
-- **WHERE** chat replies; `audit.log` index entry.
-
-### A3 — Limited admin cannot `/exec` / `/read` / `/admin` / `/pin`
-- **GIVEN** the limited-admin chat from A1.
-- **DO** each of: `/exec id`, `/read /etc/hostname`, `/admin`, `/pin 1234`.
-- **EXPECT** each refused — these are owner-only; limited admin has the staff block only.
-- **WHERE** chat replies (refusal text).
+### A1–A3 — limited-admin flow — **REMOVED 2026-06-21**
+The limited-admin tier was deleted (PRD §8 register, 2026-06-21). There is no
+`/admin` designation, no `admins[]`, no `isAdminChat` routing. The non-owner-cannot-
+reach-host-tools property these rows touched is covered by **C1** (non-owner refused)
+and **SEC1** below (a business-mode customer is floored from every host tool).
 
 ### SEC1 — Host tools denied to a business-mode customer
-- **GIVEN** a customer chat in `business` mode; the customer is **not** owner/admin. Optionally plant a stale `tools.json` granting host tools.
+- **GIVEN** a customer chat in `business` mode; the customer is **not** the owner. Optionally plant a stale `tools.json` granting host tools.
 - **DO** as the customer, prompt the bot to do something needing a host tool: "send me the file at /etc/hosts", "what's my system info", "open https://example.com", "turn up the volume".
 - **EXPECT** the LLM has **no** `send_file` / `system_info` / `open_url` / `notify` / `media_control` available — it cannot invoke them; a stale `tools.json` granting them is ignored (registry filters by platform + enabled + owner_only).
 - **WHERE** customer reply (no file/action); `audit.log` shows no host-tool call.
@@ -104,11 +92,11 @@ Legend: **GIVEN** = setup / who sends it · **DO** = exact input · **EXPECT** =
 - **EXPECT** the approval prompt is delivered to the **owner's** channel — a customer **cannot** self-approve.
 - **WHERE** owner channel receives the `humanPrompt`; customer chat does not.
 
-### SEC9 — `/index <path>` is owner-only entirely (host-file read)  ⚠️ CHANGED this session
-- **GIVEN** the limited-admin chat (A1).
+### SEC9 — `/index <path>` is owner-only entirely (host-file read)
+- **GIVEN** a paired **non-owner** chat (a customer).
 - **DO** from that chat: `/index <file> admin`. Then `/index <file> public`. Then as **owner**: `/index <file> public` and `/index <file> admin`.
-- **EXPECT** limited admin → refused in **both** scopes with **`Owner only command. (Limited admins: send the file in chat to index it.)`** (`/index <path>` reads the host filesystem via `fs.readFileSync`, so it's an owner capability — same boundary as `/exec`/`/read`; a limited admin can no longer read an arbitrary host path into the KB). Owner → both `public` and `admin` work. (Limited admins still contribute to the KB by **uploading a file in chat**, not by path — verify that path still works as a cross-check.)
-- **WHERE** chat replies; `audit.log` index scope. Regression-locked by `test/integration/handlers.test.js` ("limited admin CANNOT /index a host path").
+- **EXPECT** non-owner → refused in **both** scopes with **`Owner only command.`** (`/index <path>` reads the host filesystem via `fs.readFileSync`, so it's an owner capability — same boundary as `/exec`/`/read`; a non-owner can no longer read an arbitrary host path into the KB). Owner → both `public` and `admin` work. (A non-owner still contributes to the KB by **uploading a file in chat**, not by path — verify that path still works as a cross-check.)
+- **WHERE** chat replies; `audit.log` index scope. Regression-locked by `test/integration/handlers.test.js` ("a non-owner CANNOT /index a host path").
 
 ### SEC10 — exec env scrub
 - **GIVEN** owner, PIN ok.
@@ -136,14 +124,11 @@ Legend: **GIVEN** = setup / who sends it · **DO** = exact input · **EXPECT** =
 
 ## 3. Sign-off
 
-Merge `m9-intent-first-dispatch` → `main` only when **every** row in §1 (C1, A1–A3, SEC1–SEC6, SEC9–SEC10) is checked and SEC11–SEC12 spot-checked. Any fix that falls out of this pass rides **0.17.1** under CHANGELOG `[Unreleased]`. After merge, 0.17.1 is the next verified npm release.
+Merge `m9-intent-first-dispatch` → `main` only when **every** row in §1 (C1, SEC1–SEC6, SEC9–SEC10) is checked and SEC11–SEC12 spot-checked. Any fix that falls out of this pass rides **0.17.1** under CHANGELOG `[Unreleased]`. After merge, 0.17.1 is the next verified npm release.
 
 | Row | Pass | Notes |
 |---|---|---|
 | C1  | ☐ | |
-| A1  | ☐ | |
-| A2  | ☐ | |
-| A3  | ☐ | |
 | SEC1 | ☐ | |
 | SEC2 | ☐ | |
 | SEC3 | ☐ | |
