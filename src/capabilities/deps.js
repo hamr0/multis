@@ -50,11 +50,10 @@ function buildGovernDeps({ pinChallenge, floorPolicy, denylist = [], indexer, ap
         user_id: meta.ctx?.senderId,
         chatId: meta.ctx?.chatId,
         platform: meta.ctx?.platform,
-        // The core records a catastrophic WALL via this same audit dep (with
-        // blocked:true) — it must not read as 'executed'. Reflect the real outcome.
-        // The core records a catastrophic WALL via this same audit dep (with
-        // blocked:true) — it must not read as 'executed'. Reflect the real outcome.
-        status: meta.blocked ? 'blocked' : 'executed',
+        // The core records a catastrophic WALL (blocked:true) and now also owner /
+        // declined-ceremony denials (explicit meta.status) via this same dep — none
+        // may read as 'executed'. Honor an explicit status, else reflect blocked/ran.
+        status: meta.status || (meta.blocked ? 'blocked' : 'executed'),
       });
     },
   };

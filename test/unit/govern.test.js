@@ -9,14 +9,14 @@ const DENYLIST = ['rm', 'mv', 'chmod', 'chown', 'kill', 'dd', 'sudo'];
 
 // A test deps factory: records what was called, lets each ceremony pass/fail.
 function makeDeps({ pin = true } = {}) {
-  const calls = { pin: 0, execute: 0, audit: [], echoSeen: null };
+  const calls = { pin: 0, execute: 0, audit: [], auditMeta: [], echoSeen: null };
   return {
     calls,
     deps: {
       denylist: DENYLIST,
       pinChallenge: async (_ctx, { echo } = {}) => { calls.pin += 1; calls.echoSeen = echo; return pin; },
       execute: async (cap, args) => { calls.execute += 1; return { ran: cap.name, args }; },
-      audit: async (line) => { calls.audit.push(line); },
+      audit: async (line, meta) => { calls.audit.push(line); calls.auditMeta.push(meta); },
     },
   };
 }
@@ -122,4 +122,27 @@ test('plain-language intent is recorded on every action', async () => {
   assert.strictEqual(calls.audit.length, 1);
   assert.match(calls.audit[0], /set_mode/);
   assert.match(calls.audit[0], /Amr/);
+});
+
+// A denied host attempt must leave a forensic trace. The owner_only floor returns
+// BEFORE deps.floor (bareguard), so without this the slash door's denial is recorded
+// in neither audit.log nor gate.jsonl — proven live in the M9 LIVE‡ owner-flip run.
+test('a non-owner (owner_only) denial is audited as denied-owner', async () => {
+  const { deps, calls } = makeDeps();
+  const r = await runGovernedAction({ capability: 'run_shell', args: { command: 'whoami' }, ctx: GUEST, deps });
+  assert.strictEqual(r.reason, 'owner_only');
+  assert.strictEqual(calls.execute, 0, 'nothing runs');
+  assert.strictEqual(calls.audit.length, 1, 'the blocked attempt MUST leave a trace');
+  assert.match(calls.audit[0], /run_shell/);
+  assert.strictEqual(calls.auditMeta[0].status, 'denied-owner');
+});
+
+test('a declined destructive ceremony is audited as denied-ceremony', async () => {
+  const { deps, calls } = makeDeps({ pin: false });
+  const r = await runGovernedAction({ capability: 'run_shell', args: { command: 'rm -rf ./build' }, ctx: OWNER, deps });
+  assert.strictEqual(r.kind, RESULT.DENIED);
+  assert.match(r.reason, /ceremony_declined/);
+  assert.strictEqual(calls.execute, 0, 'declined → nothing runs');
+  assert.strictEqual(calls.audit.length, 1, 'the declined attempt MUST leave a trace');
+  assert.strictEqual(calls.auditMeta[0].status, 'denied-ceremony');
 });

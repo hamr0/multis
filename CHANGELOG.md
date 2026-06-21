@@ -4,6 +4,10 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+### Fixed — audit fidelity: a denied host attempt now leaves a forensic trace
+
+A non-owner probing host verbs left **no record** in either log. The owner-floor in `runGovernedAction` returns *before* the Axis-A floor (bareguard), so a slash-door `owner_only` denial never reached `audit.log` *or* `gate.jsonl` — invisible. (The NL door's denial was recorded in `gate.jsonl` by the wired gate, so the two doors disagreed.) Surfaced live during the M9 LIVE‡ owner-flip run: a non-owner's `/exec`, `/read`, `/index` and an NL "find my resume" (the model genuinely attempted `read` against `/home/...` twice — both `denied-owner`) all held the boundary, but the slash attempts were untraceable. Now the core records every denial through the same audit dep — `owner_only` → `status:'denied-owner'`, declined destructive ceremony → `status:'denied-ceremony'` (joining the existing catastrophic `'blocked'` and successful `'executed'`). Boundary behavior is unchanged (nothing new runs or is denied); only observability improves, consistently across both doors. Red→green (2 tests), integration-smoked against the real audit dep.
+
 ### Changed — M9 intent-first dispatch: one governed core (increments 1 & 2)
 
 Host and app actions now resolve to a **declared capability** (a capability registry where each entry declares `args + scope + severity`) and run through a single `runGovernedAction` core — the only place auth, ceremony, and audit happen. The flow is: owner-floor → schema arg-validation → Axis-A floor (bareguard's deterministic boundary) → severity classify → ceremony (benign runs free · destructive → PIN · catastrophic → PIN+CONFIRM, with verbatim-arg echo) → execute → record plain-language intent.

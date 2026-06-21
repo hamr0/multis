@@ -55,7 +55,11 @@ async function runGovernedAction({ capability, args = {}, ctx = {}, deps = {} })
   if (!cap) return { kind: RESULT.UNKNOWN, ok: false, reason: 'unknown_capability' };
 
   // 1. Floor — the single owner boundary (was split across registry + gate ownerCheck).
+  //    This returns BEFORE deps.floor (bareguard), so a denied attempt would otherwise
+  //    reach neither audit.log nor gate.jsonl — a non-owner probing host verbs left no
+  //    trace (M9 LIVE‡ owner-flip finding). Record it; the boundary already holds.
   if (cap.ownerOnly && !ctx.isOwner) {
+    if (deps.audit) await deps.audit(plainIntent(cap, args, 'denied'), { capability: cap.name, ctx, status: 'denied-owner' }).catch(() => {});
     return { kind: RESULT.DENIED, ok: false, reason: 'owner_only' };
   }
 
@@ -100,6 +104,7 @@ async function runGovernedAction({ capability, args = {}, ctx = {}, deps = {} })
   if (requiresCeremony(tier)) {
     const cleared = await runCeremony({ ctx, echo, deps });
     if (!cleared) {
+      if (deps.audit) await deps.audit(plainIntent(cap, args, tier), { capability: cap.name, tier, ctx, status: 'denied-ceremony' }).catch(() => {});
       return { kind: RESULT.DENIED, ok: false, reason: `${tier}_ceremony_declined`, tier, echo };
     }
   }
