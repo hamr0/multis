@@ -1380,7 +1380,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
       const current = config.bot_mode || 'personal';
       let statusMsg = `Bot mode: ${current}`;
       if (hasBeeperChats) {
-        const allChats = listBeeperChats(beeperPlatform, config);
+        const allChats = await listBeeperChats(beeperPlatform, config);
         if (allChats && allChats.length > 0) {
           const lines = allChats.map((c, i) => {
             const m = getChatMode(config, c.id);
@@ -1463,7 +1463,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
   // Beeper: no args → list chats with current modes (read-only, no PIN needed)
   if (!mode) {
     if (config?.chats || typeof platform?.listInbox === 'function') {
-      const allChats = listBeeperChats(platform, config);
+      const allChats = await listBeeperChats(platform, config);
       if (!allChats || allChats.length === 0) {
         await platform.send(msg.chatId, 'No chats found.');
         return;
@@ -1544,7 +1544,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
 
   // Beeper: no target — if in self-chat, show interactive picker
   if (msg.isSelf) {
-    const allChats = listBeeperChats(platform, config);
+    const allChats = await listBeeperChats(platform, config);
     if (!allChats || allChats.length === 0) {
       await platform.send(msg.chatId, 'No chats found.');
       return;
@@ -1714,23 +1714,35 @@ function getChatMode(config, chatId) {
  * List chats from config.chats (filter by platform=beeper), sorted by lastActive desc.
  * No Beeper API call needed — works even when Desktop is down.
  */
-function listBeeperChats(platformOrConfig, config) {
-  // Accept either (platform, config) or (config) for backward compat
-  const cfg = config || platformOrConfig;
-  if (!cfg?.chats) return [];
-  const botChatId = (typeof platformOrConfig === 'object' && platformOrConfig._botChatId) ? platformOrConfig._botChatId : null;
-  return Object.entries(cfg.chats)
-    .filter(([id, c]) => c.platform === 'beeper' && id !== botChatId)
-    .map(([id, c]) => ({
-      id,
-      title: c.name || '',
-      network: c.network || '',
-    }))
-    .sort((a, b) => {
-      const aTime = cfg.chats[a.id]?.lastActive || '';
-      const bTime = cfg.chats[b.id]?.lastActive || '';
-      return bTime.localeCompare(aTime);
-    });
+async function listBeeperChats(platform, config) {
+  // beeperbox's live inbox is the source of truth for what chats exist — it's
+  // always current. Ask it first (recency-ordered); config.chats only overlays the
+  // mode decisions + names for chats already acted on. If beeperbox is unreachable
+  // we degrade to the configured chats so the menu still works offline.
+  const botChatId = platform?._botChatId || null;
+  const byId = new Map();
+
+  if (typeof platform?.listInbox === 'function') {
+    try {
+      const live = await platform.listInbox(100);
+      for (const c of live) {
+        const id = c.id || c.chatID;
+        if (!id || id === botChatId) continue;
+        byId.set(id, { id, title: c.title || c.name || '', network: c.network || '' });
+      }
+    } catch { /* beeperbox unreachable → fall back to configured chats below */ }
+  }
+
+  // Merge in configured beeper chats not in the live window — one that fell out of
+  // the recent ~24 but still has a mode set stays visible with its mode.
+  if (config?.chats) {
+    for (const [id, c] of Object.entries(config.chats)) {
+      if (c.platform !== 'beeper' || id === botChatId || byId.has(id)) continue;
+      byId.set(id, { id, title: c.name || '', network: c.network || '' });
+    }
+  }
+
+  return [...byId.values()];
 }
 
 /**
@@ -1756,7 +1768,6 @@ async function findBeeperChat(platform, search, config) {
   // against a remote beeperbox) for undiscovered chats.
   if (typeof platform?.listInbox !== 'function') return null;
   try {
-    backupConfig();
     const botChatId = platform._botChatId || null;
     const list = await platform.listInbox(100);
     const chats = list.map(c => ({
@@ -1765,22 +1776,31 @@ async function findBeeperChat(platform, search, config) {
       network: c.network || '',
     })).filter(c => c.id && c.id !== botChatId);
 
-    // Upsert discovered chats into config.chats
-    if (config) {
-      for (const c of chats) {
-        if (!config.chats) config.chats = {};
-        if (!config.chats[c.id]) {
-          config.chats[c.id] = { name: c.title, network: c.network, platform: 'beeper', lastActive: new Date().toISOString() };
-        }
-      }
-      saveConfig(config);
-    }
-
     const matches = chats.filter(c =>
       (c.title && c.title.toLowerCase().includes(q)) ||
       (c.id && c.id.toLowerCase().includes(q))
     );
-    return matches.length > 0 ? matches : null;
+    if (matches.length === 0) return null; // no-upsert-on-failed-match
+
+    // Persist ONLY the matched chats — never the whole recent-inbox window. The
+    // old bulk upsert dumped all ~24 chats list_inbox returns into config.chats on
+    // every name lookup, so config grew unevenly each time the window shifted
+    // (25→35→43). We still persist the matched chat(s) because setChatMode stores
+    // only {mode}, so the name/network must come from here for the chat to show in
+    // the menu and be findable by name later. beeperbox stays the live directory;
+    // config.chats is just the mode overlay + names for chats you've acted on.
+    if (config) {
+      if (!config.chats) config.chats = {};
+      let changed = false;
+      for (const c of matches) {
+        if (!config.chats[c.id]) {
+          config.chats[c.id] = { name: c.title, network: c.network, platform: 'beeper', lastActive: new Date().toISOString() };
+          changed = true;
+        }
+      }
+      if (changed) { backupConfig(); saveConfig(config); }
+    }
+    return matches;
   } catch {
     return null;
   }
@@ -2128,7 +2148,7 @@ async function handleBusinessMenuReply(msg, platform, config, input, agentRegist
         await platform.send(msg.chatId, 'No Beeper chats available. Connect Beeper first.');
         return true;
       }
-      const allChats = listBeeperChats(beeperPlatform, config);
+      const allChats = await listBeeperChats(beeperPlatform, config);
       if (!allChats || allChats.length === 0) {
         await platform.send(msg.chatId, 'No chats found.');
         return true;

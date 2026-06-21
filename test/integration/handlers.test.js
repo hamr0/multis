@@ -1,5 +1,5 @@
 const fs = require('fs');
-const { describe, it, beforeEach } = require('node:test');
+const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert');
 const { createMessageRouter, buildAgentRegistry, resolveAgent, clearAdminPauses } = require('../../src/bot/handlers');
 const { updateChatMeta, backupConfig } = require('../../src/config');
@@ -1858,6 +1858,78 @@ describe('Config backup', () => {
     backupConfig();
     assert.ok(require('fs').existsSync(configPath + '.bak'), 'backup should exist');
     env.cleanup();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3h/3f — the Beeper chat directory is beeperbox-live (the source of truth),
+// not multis's config. (3h) /mode <name> no longer dumps the whole recent-inbox
+// window into config.chats — only the matched chat is persisted, and a miss
+// persists nothing. (3f) the no-arg /mode menu lists the LIVE inbox, merging any
+// configured chat that fell out of the recent window so its mode stays visible.
+// ---------------------------------------------------------------------------
+
+describe('/mode chat directory is beeperbox-live, not config-bloating', () => {
+  let env;
+  afterEach(() => { if (env) env.cleanup(); env = null; });
+
+  // A beeper platform that returns a recent-inbox WINDOW of several chats (this
+  // is what list_inbox hands back — ~24 recent, here 4 for the test).
+  const WINDOW = [
+    { id: 'wa1', title: 'Alice', network: 'whatsapp' },
+    { id: 'wa2', title: 'Bob', network: 'whatsapp' },
+    { id: 'wa3', title: 'Carol', network: 'whatsapp' },
+    { id: 'tg1', title: 'Dave', network: 'telegram' },
+  ];
+  const beeperWith = (chats) => ({
+    send: async () => {}, listInbox: async () => chats,
+    _botChatId: null, _personalChats: new Set(),
+  });
+
+  function ownerRouter(extraChats = {}) {
+    env = createTestEnv({
+      allowed_users: ['user1'], owner_id: 'user1',
+      platforms: { beeper: { enabled: true } },
+      chats: { ...extraChats },
+    });
+    const tg = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+    router.registerPlatform('beeper', beeperWith(WINDOW));
+    return { router, tg };
+  }
+
+  it('3h: /mode <name> persists ONLY the matched chat, not the whole inbox window', async () => {
+    const { router, tg } = ownerRouter();
+    await router(msg('/mode silent Carol', { senderId: 'user1', chatId: 'oc' }), tg);
+    assert.deepStrictEqual(Object.keys(env.config.chats || {}), ['wa3'],
+      'only the matched chat lands in config.chats — not all 4 window chats');
+    assert.strictEqual(env.config.chats.wa3.mode, 'silent', 'its mode was set');
+    assert.strictEqual(env.config.chats.wa3.name, 'Carol', 'its name was persisted from the live list');
+  });
+
+  it('3h: /mode <no-match> persists nothing (no-upsert-on-failed-match)', async () => {
+    const { router, tg } = ownerRouter();
+    await router(msg('/mode silent Zelda', { senderId: 'user1', chatId: 'oc' }), tg);
+    assert.match(tg.lastTo('oc').text, /No chat found/);
+    assert.deepStrictEqual(env.config.chats, {}, 'a miss leaves config.chats untouched');
+  });
+
+  it('3f: the no-arg /mode menu lists the LIVE inbox (not just configured chats)', async () => {
+    const { router, tg } = ownerRouter();
+    await router(msg('/mode', { senderId: 'user1', chatId: 'oc' }), tg);
+    const text = tg.lastTo('oc').text;
+    for (const c of WINDOW) {
+      assert.match(text, new RegExp(c.title), `${c.title} shown from the live inbox`);
+    }
+  });
+
+  it('3f: the menu merges a configured chat that fell out of the live window', async () => {
+    const { router, tg } = ownerRouter({ old1: { name: 'OldFriend', platform: 'beeper', mode: 'business' } });
+    await router(msg('/mode', { senderId: 'user1', chatId: 'oc' }), tg);
+    const text = tg.lastTo('oc').text;
+    assert.match(text, /OldFriend/, 'a configured chat not in the live window still shows');
+    assert.match(text, /Alice/, 'live chats appear too');
+    assert.match(text, /OldFriend.*\[business\]/, 'its configured mode is shown');
   });
 });
 
