@@ -4,6 +4,24 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+### Fixed — `/mode` chat directory is beeperbox-live; `config.chats` no longer drifts
+
+The Beeper chat directory is **beeperbox's** (always current); multis's `config.chats` is only the mode overlay + names for chats it has acted on. Two fixes restore that split:
+
+- **No more upsert drift.** `findBeeperChat` used to dump the *entire* recent-~24 `list_inbox` window into `config.chats` on **every** `/mode <name>` lookup — and that window is recency-ordered, so `config.chats` grew in uneven jumps (observed 25→35→43) and a *failed* lookup silently rewrote config. It now filters for matches **first** and persists **only the matched chat(s)** (with name/network, since `setChatMode` stores just `{mode}`); a miss writes nothing (`backupConfig`/`saveConfig` run only when a match is actually persisted). Mutation-proven red→green (re-introducing the bulk upsert fails the test).
+- **The `/mode` menu is live.** `listBeeperChats` is now async **live-first**: every chat-listing menu (Telegram `/mode` status, Beeper `/mode` status, the self-chat picker, the business-menu "assign chats" picker) asks `list_inbox` (beeperbox = the source of truth) and merges in any *configured* chat that fell out of the recent window so its mode stays visible. Display-only (no upsert); degrades to config-only when beeperbox is unreachable. Validated live against the running beeperbox (24 live chats pulled + merge confirmed), plus 4 integration tests.
+
+### Tests — LIVE‡ owner-testable gate rows proven (SEC2/SEC4/SEC10–12)
+
+The owner-testable rows of the M9 LIVE‡ merge gate are now proven with **failable real-input tests** against the real production functions and installed libraries (not assertions, not mocks of the thing under test):
+
+- **SEC2 (parser bounds)** — over-limit inputs driven at the production `context.indexBuffer` → installed litectx 0.18.0. `maxSize`/`maxPages` are set **below litectx's own defaults**, so a rejection can only come from multis's wiring (failability proven: with no bound wired, litectx's 10 MB default lets a 2 MB doc through). 11 MB → rejected before parse (no OOM); a 2-page PDF rejected at a 1-page cap. `parseTimeoutMs` is per-page and cannot interrupt a single CPU-bound page (documented upstream) — noted, not over-claimed.
+- **SEC4 (PIN on the NL path)** — added the consumer-level **wrong-PIN-cancels** case (correct-PIN-resumes-the-same-action and catastrophic-wall were already covered).
+- **SEC12 (asset cap)** — a >25 MB base64 attachment is rejected (`download_asset`) **before** `Buffer.from` materializes it (no OOM); the small-payload test is the control.
+- SEC10 (exec env scrub) and SEC11 (audit redaction) were already covered by real failable tests.
+
+**Lib finding filed, not papered over (Principle 8):** litectx 0.18.0 ingests `.txt`/`.text`/`.log`/`.csv` as **0 searchable chunks** despite multis advertising `txt` in `allowedTypes` — written up as a request (`docs/01-product/litectx-asks/plaintext-chunker.md`, PRD §7).
+
 ### Fixed — audit fidelity: a denied host attempt now leaves a forensic trace
 
 A non-owner probing host verbs left **no record** in either log. The owner-floor in `runGovernedAction` returns *before* the Axis-A floor (bareguard), so a slash-door `owner_only` denial never reached `audit.log` *or* `gate.jsonl` — invisible. (The NL door's denial was recorded in `gate.jsonl` by the wired gate, so the two doors disagreed.) Surfaced live during the M9 LIVE‡ owner-flip run: a non-owner's `/exec`, `/read`, `/index` and an NL "find my resume" (the model genuinely attempted `read` against `/home/...` twice — both `denied-owner`) all held the boundary, but the slash attempts were untraceable. Now the core records every denial through the same audit dep — `owner_only` → `status:'denied-owner'`, declined destructive ceremony → `status:'denied-ceremony'` (joining the existing catastrophic `'blocked'` and successful `'executed'`). Boundary behavior is unchanged (nothing new runs or is denied); only observability improves, consistently across both doors. Red→green (2 tests), integration-smoked against the real audit dep.

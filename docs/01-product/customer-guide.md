@@ -364,11 +364,13 @@ The bot completely ignores messages in this chat. No archiving, no logs, no memo
 ### Setting Modes Per Chat
 
 ```
-/mode                           # Show current modes for all chats
+/mode                           # List your recent chats (live) with their current mode
 /mode business                  # Set current chat to business mode
 /mode silent John               # Set John's chat to silent (searches by name)
 /mode off "WhatsApp Group"      # Set a specific chat to off
 ```
+
+`/mode` with no target lists your **recent** chats live from Beeper (the most recent ~24), each with its current mode — plus any chat you've already set a mode on, so it stays visible even after it drops out of the recent list. A chat that's neither recent nor already configured won't appear; set it by name with `/mode <mode> <name>`, which finds it live.
 
 From Telegram (admin channel), you can manage Beeper chat modes remotely:
 

@@ -31,7 +31,7 @@ The **owner** (super-admin, set at setup) can run everything below. A **limited 
 | `/index <path> <kb\|admin>` | Admin | Index a document with scope (benign — owner-floor, no PIN) |
 | `/pin` | Owner | Change or set PIN |
 | `/admin` | Owner | Designate / list / remove limited admins (`/admin`, `/admin list`, `/admin remove <n>`) |
-| `/mode <personal\|business\|silent\|off> [agent]` | Admin | Set chat mode, optionally assign agent. Turning a chat **off** requires the PIN; other modes run free. `/mode business` (no target) opens the business persona menu |
+| `/mode <personal\|business\|silent\|off> [agent]` | Admin | Set chat mode, optionally assign agent. Turning a chat **off** requires the PIN; other modes run free. `/mode` (no target) lists your recent chats live from Beeper (~24) with their current modes; `/mode business` (no target) opens the business persona menu |
 | `/agent [name]` | Owner | Show current agent (no args) or assign agent to this chat |
 | `/agents` | Owner | List all configured agents |
 | `/start <code>` | — | Pair with the bot using pairing code |
