@@ -157,4 +157,55 @@ describe('context wrapper (litectx policy layer)', () => {
     const other = await context.get(hit.name, 'user:B');
     assert.strictEqual(other, null, 'a foreign scope is fenced from the handle (R2)');
   });
+
+  // ---------------------------------------------------------------------------
+  // SEC2 — untrusted-input parser bounds. multis maps config.documents → litectx
+  // (src/index.js: setBounds(config.documents)); litectx 0.18.0 enforces them
+  // deterministically BEFORE any parse/store, so an over-limit upload is rejected
+  // without OOM. These prove multis WIRES the configured value through (not that
+  // litectx merely has a default): each bound is set BELOW litectx's own default
+  // (maxSize 10MB / maxPages 2000), so the rejection can only come from the value
+  // multis passed — if the wiring broke, the over-limit input would ingest under
+  // litectx's looser default and the test would fail. Same format in each pair, so
+  // the size / page count is the only discriminator. Runs against the INSTALLED
+  // litectx.
+  //
+  // Honest scope: maxSize and maxPages are deterministic caps. litectx's
+  // parseTimeoutMs is a PER-PAGE wall-clock guard that cannot interrupt a single
+  // CPU-bound page (no worker thread) — documented upstream, not asserted here.
+  describe('SEC2 — config.documents bounds rejection (litectx enforcement)', () => {
+    const MB = 1024 * 1024;
+    // Restore the file's default (empty → litectx defaults) so later state is clean.
+    after(() => context.setBounds({}));
+
+    it('rejects a buffer over maxSize before parse/store (sub-default bound proves the wiring)', async () => {
+      context.setBounds({ maxSize: 1 * MB, maxPdfPages: 2000, parseTimeoutMs: 30000 });
+      // An under-limit doc of the SAME format ingests → the rejection is the byte
+      // cap, not a content/format quirk.
+      const under = buf('# Doc\n' + 'The widget fox jumps over the lazy dog. '.repeat(8000)); // ~0.3MB
+      assert.ok((await context.indexBuffer(under, 'under.md', 'kb')) >= 1, 'an under-limit doc ingests');
+      // 2MB > the 1MB bound multis wired (and < litectx's 10MB default — so a
+      // rejection here can ONLY be multis's configured cap).
+      await assert.rejects(
+        () => context.indexBuffer(Buffer.alloc(2 * MB, 'x'), 'over.md', 'kb'),
+        /exceeds maxSize/,
+        'a 2MB buffer is rejected at the 1MB configured bound'
+      );
+    });
+
+    it('rejects a PDF over maxPages (page count is the discriminator)', async () => {
+      const pdf = fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'two-page.pdf'));
+      // At a 2-page cap the same PDF ingests; at a 1-page cap it is rejected — and
+      // 1 is below litectx's 2000 default, so the cap is multis's configured value.
+      context.setBounds({ maxSize: 10 * MB, maxPdfPages: 2, parseTimeoutMs: 30000 });
+      assert.ok((await context.indexBuffer(pdf, 'ok.pdf', 'kb')) >= 1, 'a 2-page PDF ingests at a 2-page cap');
+
+      context.setBounds({ maxSize: 10 * MB, maxPdfPages: 1, parseTimeoutMs: 30000 });
+      await assert.rejects(
+        () => context.indexBuffer(pdf, 'toomany.pdf', 'kb'),
+        /exceeds maxPages/,
+        'a 2-page PDF is rejected at a 1-page cap'
+      );
+    });
+  });
 });

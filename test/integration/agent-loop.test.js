@@ -251,6 +251,17 @@ describe('Agent loop with tool calling', () => {
       assert.deepStrictEqual(ran, ['rm notes.txt'], 'ran after the correct PIN');
     });
 
+    it('a destructive exec the model calls is CANCELLED on a wrong PIN — never runs', async () => {
+      const ran = [];
+      const { platform, router } = build([{ id: 't1', name: 'exec', arguments: { command: 'rm notes.txt' } }], ran);
+      const p = router(msg('/ask delete my notes'), platform);
+      await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
+      await router(msg('9999'), platform); // wrong PIN
+      await p;
+      assert.deepStrictEqual(ran, [], 'a wrong PIN cancels — the command never ran');
+      assert.ok(platform.sent.some((s) => /wrong pin/i.test(s.text)), 'the owner is told the PIN was wrong');
+    });
+
     it('a catastrophic exec the model calls is HARD-WALLED — no PIN, never runs', async () => {
       const ran = [];
       const { platform, router } = build([{ id: 't1', name: 'exec', arguments: { command: 'rm -rf ~/*' } }], ran);
