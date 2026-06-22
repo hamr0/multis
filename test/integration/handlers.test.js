@@ -1,5 +1,5 @@
 const fs = require('fs');
-const { describe, it, beforeEach } = require('node:test');
+const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert');
 const { createMessageRouter, buildAgentRegistry, resolveAgent, clearAdminPauses } = require('../../src/bot/handlers');
 const { updateChatMeta, backupConfig } = require('../../src/config');
@@ -158,179 +158,202 @@ describe('RAG pipeline', () => {
 // PIN auth
 // ---------------------------------------------------------------------------
 
-describe('PIN auth', () => {
-  it('prompts for PIN on protected command, then executes after correct PIN', async () => {
-    const pinHash = hashPin('1234');
+// M9: /exec, /read, /index no longer carry a blanket router-level PIN
+// (PIN_PROTECTED is retired). Host actions resolve to a declared capability and
+// run through the single governed core (runGovernedAction): the owner floor +
+// Axis-A boundary + a severity ceremony (benign runs free; destructive → PIN;
+// catastrophic → PIN+CONFIRM). These tests prove the SLASH-door wiring into that
+// core. The ceremony is now INLINE-AWAIT (the core awaits the PIN reply on the
+// shared gate_reply waiter) rather than the old parked pin_command state, so a
+// /exec call does not resolve until the ceremony does — hence the
+// fire-without-await + poll pattern below. (createPinChallenge internals —
+// wrong-PIN copy, lockout, timeout — are unit-covered in pin-challenge.test.js.)
+describe('PIN auth — governed-core ceremony (M9 slash door)', () => {
+  const flush = () => new Promise((r) => setImmediate(r));
+  async function waitFor(pred, label = 'condition', tries = 500) {
+    for (let i = 0; i < tries; i++) {
+      if (pred()) return;
+      await flush();
+    }
+    throw new Error(`waitFor timed out: ${label}`);
+  }
+  // echo is in BOTH lists: allowlisted so Axis-A lets it run, denylisted so the
+  // core classifies it destructive → ceremony. Running `echo` is harmless and
+  // deterministic, so "the command ran" is observable without a real mutation.
+  const DESTRUCTIVE_GOV = { commands: { allowlist: ['echo'], denylist: ['echo'] }, paths: { allowed: ['.*'], denied: [] } };
+  const BENIGN_GOV = { commands: { allowlist: ['echo'], denylist: [] }, paths: { allowed: ['.*'], denied: [] } };
+
+  function build(gov, llm) {
     const env = createTestEnv({
-      allowed_users: ['user1'],
-      owner_id: 'user1',
-      security: { pin_hash: pinHash, pin_timeout_hours: 24 }
-    });
-    const platform = mockPlatform();
-    const pinManager = new PinManager(env.config);
-    pinManager.sessions = {}; // Clear any persisted sessions
-    const router = createMessageRouter(env.config, {
-      llm: mockLLM(),
-      indexer: stubIndexer(),
-      pinManager
-    });
-
-    // Send protected command — should prompt for PIN
-    await router(msg('/exec ls'), platform);
-    assert.match(platform.sent[0].text, /Enter your PIN/);
-
-    // Send correct PIN
-    await router(msg('1234'), platform);
-    assert.match(platform.sent[1].text, /PIN accepted/);
-  });
-
-  it('wrong PIN shows remaining attempts', async () => {
-    const pinHash = hashPin('1234');
-    const env = createTestEnv({
-      allowed_users: ['user1'],
-      owner_id: 'user1',
-      security: { pin_hash: pinHash, pin_timeout_hours: 24 }
-    });
-    const platform = mockPlatform();
-    const pinManager = new PinManager(env.config);
-    pinManager.sessions = {}; // Clear any persisted sessions
-    const router = createMessageRouter(env.config, {
-      llm: mockLLM(),
-      indexer: stubIndexer(),
-      pinManager
-    });
-
-    await router(msg('/exec ls'), platform);
-    await router(msg('9999'), platform);
-    assert.match(platform.sent[1].text, /Wrong PIN/);
-    assert.match(platform.sent[1].text, /attempts remaining/);
-  });
-
-  it('locked account rejects command', async () => {
-    const pinHash = hashPin('1234');
-    const env = createTestEnv({
-      allowed_users: ['user1'],
-      owner_id: 'user1',
-      security: { pin_hash: pinHash, pin_timeout_hours: 24 }
-    });
-    const platform = mockPlatform();
-    const pinManager = new PinManager(env.config);
-    // Simulate lockout
-    pinManager.failCounts.set('user1', { count: 3, lockedUntil: Date.now() + 60000 });
-    const router = createMessageRouter(env.config, {
-      llm: mockLLM(),
-      indexer: stubIndexer(),
-      pinManager
-    });
-
-    await router(msg('/exec ls'), platform);
-    assert.match(platform.sent[0].text, /locked/i);
-  });
-
-  it('two concurrent PIN replies execute the stored command exactly once (no double-run race)', async () => {
-    // The race: the get→clear window spans an `await platform.send('PIN accepted')`,
-    // so two near-simultaneous correct PINs could both reach executeCommand. The
-    // fix claims the entry synchronously before the first await.
-    const pinHash = hashPin('1234');
-    const env = createTestEnv({
-      allowed_users: ['user1'],
-      owner_id: 'user1',
-      governance: { commands: { allowlist: ['echo'], denylist: [] }, paths: { allowed: ['.*'], denied: [] } },
-      security: { pin_hash: pinHash, pin_timeout_hours: 24, checkpoint_tools: [] },
-    });
-    const platform = mockPlatform();
-    const pinManager = new PinManager(env.config);
-    pinManager.sessions = {};
-    const router = createMessageRouter(env.config, {
-      llm: mockLLM(),
-      indexer: stubIndexer(),
-      pinManager,
-      fileless: true,
-      governanceFile: { commands: { allowlist: ['echo'], denylist: [] }, paths: { allowed: ['.*'], denied: [] } },
-    });
-    router.registerPlatform('telegram', platform);
-
-    await router(msg('/exec echo hello'), platform);
-    assert.match(platform.sent[0].text, /Enter your PIN/);
-
-    // Fire the two replies WITHOUT awaiting the first — they interleave the way
-    // two inbound messages would. (On Telegram the loser becomes an implicit
-    // /ask once the PIN entry is gone; only the winner runs the exec.)
-    await Promise.all([router(msg('1234'), platform), router(msg('1234'), platform)]);
-
-    const ran = platform.sent.filter((s) => /hello/.test(s.text));
-    assert.strictEqual(ran.length, 1, 'the PIN-gated command executed exactly once');
-  });
-
-  it('a non-digit message while a PIN is pending does not consume or disturb the pending command', async () => {
-    const pinHash = hashPin('1234');
-    const env = createTestEnv({
-      allowed_users: ['user1'],
-      owner_id: 'user1',
-      security: { pin_hash: pinHash, pin_timeout_hours: 24, checkpoint_tools: [] },
+      allowed_users: ['user1'], owner_id: 'user1',
+      security: { pin_hash: hashPin('1234'), pin_timeout_hours: 24, checkpoint_tools: [] },
     });
     const platform = mockPlatform();
     const pinManager = new PinManager(env.config);
     pinManager.sessions = {};
     const pending = new PendingRegistry();
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer(), pinManager, pending });
+    const router = createMessageRouter(env.config, {
+      llm: llm || mockLLM(), indexer: stubIndexer(), pinManager, pending,
+      fileless: true, governanceFile: gov,
+    });
+    router.registerPlatform('telegram', platform);
+    return { env, platform, router, pending };
+  }
+  const out = (platform) => platform.sent.filter((s) => !/PIN/i.test(s.text)); // command output, not the prompt
 
-    await router(msg('/exec ls'), platform);
-    assert.match(platform.sent[0].text, /Enter your PIN/);
+  it('a destructive /exec prompts via the core ceremony (verbatim echo) and runs after the correct PIN', async () => {
+    const { platform, router } = build(DESTRUCTIVE_GOV);
+    const execP = router(msg('/exec echo hello'), platform);
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
 
-    // A non-digit reply must NOT be read as a PIN — no "Wrong PIN", no "accepted",
-    // and the pending command survives for the real PIN that follows.
-    await router(msg('hello there'), platform);
-    assert.ok(pending.peek('chat1', 'user1'), 'pending PIN command still parked after a non-digit');
-    assert.ok(!platform.sent.some((s) => /Wrong PIN|accepted/i.test(s.text)), 'non-digit was not treated as a PIN attempt');
+    // The prompt echoes the VERBATIM resolved command, not a model intent (POC #2).
+    assert.match(platform.sent.find((s) => /PIN/i.test(s.text)).text, /echo hello/);
 
-    // The real PIN still works afterwards.
     await router(msg('1234'), platform);
-    assert.ok(platform.sent.some((s) => /accepted/i.test(s.text)), 'correct PIN still accepted after the non-digit');
+    await execP;
+    assert.ok(platform.sent.some((s) => /accepted/i.test(s.text)), 'PIN accepted');
+    assert.ok(out(platform).some((s) => /hello/.test(s.text)), 'command produced its output');
   });
 
-  it('a PIN reply that arrives after the prompt EXPIRES is announced, not routed to /ask (orphaned-reply bug)', async () => {
-    // The bug: once the PIN prompt's pending state lapses, the user's late PIN
-    // digits fell through the dispatch and, in a natural/business chat, landed
-    // in the RAG pipeline as a search query (or were silently dropped). The
-    // registry's announce-on-expiry must intercept it instead.
-    const pinHash = hashPin('1234');
+  it('a benign /exec does NOT prompt for a PIN, even when one is configured', async () => {
+    const { platform, router } = build(BENIGN_GOV);
+    await router(msg('/exec echo benign-marker'), platform);
+    assert.ok(!platform.sent.some((s) => /PIN/i.test(s.text)), 'no ceremony for a benign command');
+    assert.ok(platform.sent.some((s) => /benign-marker/.test(s.text)), 'benign command ran straight through');
+  });
+
+  it('a wrong PIN on a destructive /exec cancels — the command never runs', async () => {
+    const { platform, router } = build(DESTRUCTIVE_GOV);
+    const execP = router(msg('/exec echo should-not-run'), platform);
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
+
+    await router(msg('9999'), platform); // wrong
+    await execP;
+    assert.ok(platform.sent.some((s) => /cancelled/i.test(s.text)), 'ceremony declined → cancelled');
+    assert.ok(!out(platform).some((s) => /should-not-run/.test(s.text)), 'command did not execute');
+  });
+
+  it('two concurrent correct PINs run the destructive command exactly once (no double-run)', async () => {
+    const { platform, router } = build(DESTRUCTIVE_GOV, mockLLM('mock-rag'));
+    const execP = router(msg('/exec echo hello'), platform);
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
+
+    // Fire both replies without awaiting the first — they interleave like two
+    // inbound messages. The winner resolves the gate_reply waiter (which clears
+    // the entry synchronously); the loser finds nothing and falls through.
+    await Promise.all([router(msg('1234'), platform), router(msg('1234'), platform)]);
+    await execP;
+    assert.strictEqual(out(platform).filter((s) => /hello/.test(s.text)).length, 1,
+      'the ceremony-gated command executed exactly once');
+  });
+
+  it('a stray message during the ceremony is consumed as a failed PIN, not routed to the LLM', async () => {
+    // The gate_reply waiter claims the NEXT message (no digit-match), so a stray
+    // reply is read as a PIN attempt and fails the ceremony — it must NOT leak
+    // through to the RAG pipeline as a query (the orphaned-reply class).
+    const llm = mockLLM('RAG answer — must never be produced for a ceremony reply');
+    const { platform, router } = build(DESTRUCTIVE_GOV, llm);
+    const execP = router(msg('/exec echo should-not-run'), platform);
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
+
+    await router(msg('hello there', { routeAs: 'natural' }), platform);
+    await execP;
+    assert.strictEqual(llm.calls.length, 0, 'the stray reply never reached the LLM');
+    assert.ok(platform.sent.some((s) => /cancelled/i.test(s.text)), 'ceremony was cancelled');
+    assert.ok(!out(platform).some((s) => /should-not-run/.test(s.text)), 'command did not execute');
+  });
+});
+
+// M9 increment 2: the APP-VERB door. The destructive app-verbs (/forget,
+// set_mode→off) now resolve to a declared capability and run through the SAME
+// governed core (runGovernedAction) as the slash host-tools, so they ceremony
+// (PIN) before the data-losing write; benign verbs (/remember, set_mode→silent)
+// run straight through. set_mode funnels every commit site through one commitMode
+// helper, including the interactive picker-resume — proven here end-to-end.
+describe('App-verb door — governed-core ceremony (M9 increment 2)', () => {
+  const flush = () => new Promise((r) => setImmediate(r));
+  async function waitFor(pred, label = 'condition', tries = 500) {
+    for (let i = 0; i < tries; i++) {
+      if (pred()) return;
+      await flush();
+    }
+    throw new Error(`waitFor timed out: ${label}`);
+  }
+  // A PIN is configured + the session is stale, so a destructive verb must prompt.
+  function buildPin() {
     const env = createTestEnv({
-      allowed_users: ['user1'],
-      owner_id: 'user1',
-      security: { pin_hash: pinHash, pin_timeout_hours: 24 },
+      allowed_users: ['user1'], owner_id: 'user1',
+      security: { pin_hash: hashPin('1234'), pin_timeout_hours: 24, checkpoint_tools: [] },
     });
     const platform = mockPlatform();
     const pinManager = new PinManager(env.config);
     pinManager.sessions = {};
-
-    // Injected clock so we can age the pending entry past its TTL deterministically.
-    let clock = 1_000_000;
-    const pending = new PendingRegistry({ now: () => clock });
-
-    const llm = mockLLM('RAG answer — should never be produced for a PIN reply');
+    const pending = new PendingRegistry();
     const router = createMessageRouter(env.config, {
-      llm,
-      indexer: stubIndexer(),
-      pinManager,
-      pending,
+      llm: mockLLM(), indexer: stubIndexer(), pinManager, pending,
+      fileless: true,
+      governanceFile: { commands: { allowlist: ['.*'], denylist: [] }, paths: { allowed: ['.*'], denied: [] } },
+      memoryBaseDir: env.memoryBaseDir,
     });
+    router.registerPlatform('telegram', platform);
+    router.registerPlatform('beeper', platform);
+    return { env, platform, router, pending };
+  }
 
-    // Owner issues a protected command → PIN prompt; entry stamped at t0.
-    await router(msg('/exec ls'), platform);
-    assert.match(platform.sent[0].text, /Enter your PIN/);
+  it('a destructive /forget prompts for the PIN, then clears memory after the correct PIN', async () => {
+    const { platform, router } = buildPin();
+    await router(msg('/remember keep-this-note'), platform); // benign seed, no PIN
+    const forgetP = router(msg('/forget'), platform);
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
+    await router(msg('1234'), platform);
+    await forgetP;
+    assert.ok(platform.sent.some((s) => /Memory cleared/i.test(s.text)), 'memory cleared after PIN');
+    await router(msg('/memory'), platform);
+    assert.match(platform.lastTo('chat1').text, /No memory notes/, 'memory is empty after the cleared forget');
+  });
 
-    // Time passes beyond the 5-minute TTL, then the owner finally types the PIN
-    // in a natural-routed chat (the exact path the old code sent to routeAsk).
-    clock += 6 * 60 * 1000;
-    await router(msg('1234', { routeAs: 'natural' }), platform);
+  it('a wrong PIN on /forget cancels — memory is NOT cleared', async () => {
+    const { platform, router } = buildPin();
+    await router(msg('/remember keep-this-note'), platform);
+    const forgetP = router(msg('/forget'), platform);
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
+    await router(msg('9999'), platform); // wrong
+    await forgetP;
+    assert.ok(platform.sent.some((s) => /cancelled/i.test(s.text)), 'declined ceremony cancels');
+    await router(msg('/memory'), platform);
+    assert.match(platform.lastTo('chat1').text, /keep-this-note/, 'memory survived the declined forget');
+  });
 
-    // It is intercepted as an expiry announcement…
-    assert.match(platform.sent[1].text, /expired/i);
-    // …NOT handed to the LLM/RAG pipeline as a query…
-    assert.strictEqual(llm.calls.length, 0, 'late PIN digits must not reach the LLM');
-    // …and the stale entry is gone (announce-once).
-    assert.strictEqual(pending.get('chat1', 'user1'), null);
+  it('a benign /remember runs free even when a PIN is configured', async () => {
+    const { platform, router } = buildPin();
+    await router(msg('/remember hello-note'), platform);
+    assert.ok(!platform.sent.some((s) => /PIN/i.test(s.text)), 'no ceremony for a benign write');
+    assert.ok(platform.sent.some((s) => /Noted/i.test(s.text)), 'note saved');
+  });
+
+  it('selecting OFF in the mode picker requires the PIN before the chat is set off', async () => {
+    const { env, platform, router, pending } = buildPin();
+    pending.set('chat1', 'user1', 'mode', {
+      data: { mode: 'off', matches: [{ id: 'cust-x', title: 'Customer X' }], agent: null },
+      ttlMs: 60_000, expireMsg: 'Mode selection expired — re-run /mode.',
+    });
+    const selP = router(msg('1'), platform); // pick #1 from the open picker
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
+    assert.notStrictEqual(env.config.chats?.['cust-x']?.mode, 'off', 'not set off before the PIN clears');
+    await router(msg('1234'), platform);
+    await selP;
+    assert.strictEqual(env.config.chats?.['cust-x']?.mode, 'off', 'chat set off after the PIN');
+  });
+
+  it('selecting SILENT in the mode picker sets it straight through (no PIN)', async () => {
+    const { env, platform, router, pending } = buildPin();
+    pending.set('chat1', 'user1', 'mode', {
+      data: { mode: 'silent', matches: [{ id: 'cust-y', title: 'Customer Y' }], agent: null },
+      ttlMs: 60_000, expireMsg: 'Mode selection expired — re-run /mode.',
+    });
+    await router(msg('1'), platform);
+    assert.ok(!platform.sent.some((s) => /PIN/i.test(s.text)), 'no ceremony for a benign mode');
+    assert.strictEqual(env.config.chats?.['cust-y']?.mode, 'silent', 'chat set silent immediately');
   });
 });
 
@@ -565,12 +588,31 @@ describe('Owner commands', () => {
   });
 
   it('/read shows file content', async () => {
+    // Read a file that is genuinely inside the fs readScope and assert its real
+    // content. (Previously this read `package.json` under the default governance,
+    // which is OUTSIDE readScope → a floor deny; it only "passed" because the raw
+    // deny string echoed the repo path `…/multis/package.json`. With the floor-deny
+    // message now friendly, that coincidence is gone — so test the real happy path.)
+    const os = require('os');
+    const path = require('path');
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-read-'));
+    const file = path.join(dir, 'note.txt');
+    fs.writeFileSync(file, 'hello-from-read-test');
     const platform = mockPlatform();
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+    const router = createMessageRouter(env.config, {
+      llm: mockLLM(), indexer: stubIndexer(),
+      fileless: true,
+      governanceFile: { commands: { allowlist: ['.*'], denylist: [] }, paths: { allowed: [dir], denied: [] } },
+    });
 
-    await router(msg('/read package.json'), platform);
-    assert.match(platform.sent[0].text, /multis/);
+    try {
+      await router(msg(`/read ${file}`), platform);
+      assert.match(platform.sent[0].text, /hello-from-read-test/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      env.cleanup();
+    }
   });
 
   it('/read without args shows usage', async () => {
@@ -618,33 +660,35 @@ describe('Owner commands', () => {
 
   // Security regression: `/index <path>` reads from the HOST filesystem
   // (indexFile -> fs.readFileSync), so it is an owner-only capability — same trust
-  // boundary as /exec and /read. A limited admin must not be able to point it at an
+  // boundary as /exec and /read. A non-owner must not be able to point it at an
   // arbitrary host path (`/index /etc/passwd public` would be a host-file read that
   // also lands the bytes in the world-readable KB), in ANY scope.
-  it('limited admin CANNOT /index a host path (admin scope)', async () => {
-    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1', admins: ['staffchat'] });
+  // Use a PAIRED non-owner: they clear the pairing gate and reach routeIndex's
+  // own owner-only floor, which is the boundary under test (not the pairing wall).
+  it('a non-owner CANNOT /index a host path (admin scope)', async () => {
+    const env = createTestEnv({ allowed_users: ['user1', 'cust'], owner_id: 'user1' });
     const platform = mockPlatform();
     let called = false;
     const indexer = stubIndexer();
     indexer.indexFile = async () => { called = true; return 5; };
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
-    await router(msg('/index /tmp/x.pdf admin', { senderId: 'staff', chatId: 'staffchat' }), platform);
-    assert.strictEqual(called, false, 'host-path index must not run for a limited admin');
-    assert.match(platform.lastTo('staffchat').text, /owner only/i);
+    await router(msg('/index /tmp/x.pdf admin', { senderId: 'cust', chatId: 'custchat' }), platform);
+    assert.strictEqual(called, false, 'host-path index must not run for a non-owner');
+    assert.match(platform.lastTo('custchat').text, /owner only/i);
   });
 
-  it('limited admin CANNOT /index a host path (public scope)', async () => {
-    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1', admins: ['staffchat'] });
+  it('a non-owner CANNOT /index a host path (public scope)', async () => {
+    const env = createTestEnv({ allowed_users: ['user1', 'cust'], owner_id: 'user1' });
     const platform = mockPlatform();
     let called = false;
     const indexer = stubIndexer();
     indexer.indexFile = async () => { called = true; return 5; };
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
-    await router(msg('/index /tmp/x.pdf public', { senderId: 'staff', chatId: 'staffchat' }), platform);
-    assert.strictEqual(called, false, 'host-path index must not run for a limited admin');
-    assert.match(platform.lastTo('staffchat').text, /owner only/i);
+    await router(msg('/index /tmp/x.pdf public', { senderId: 'cust', chatId: 'custchat' }), platform);
+    assert.strictEqual(called, false, 'host-path index must not run for a non-owner');
+    assert.match(platform.lastTo('custchat').text, /owner only/i);
   });
 
   it('owner CAN /index to the admin scope', async () => {
@@ -715,22 +759,6 @@ describe('Info commands', () => {
 
     await router(msg('/skills'), platform);
     assert.match(platform.sent[0].text, /Available skills/);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// /unpair
-// ---------------------------------------------------------------------------
-
-describe('Unpair', () => {
-  it('/unpair removes user from allowed list', async () => {
-    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
-    const platform = mockPlatform();
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
-
-    await router(msg('/unpair'), platform);
-    assert.strictEqual(env.config.allowed_users.includes('user1'), false);
-    assert.match(platform.sent[0].text, /Unpaired/);
   });
 });
 
@@ -1397,6 +1425,22 @@ describe('/mode business menu', () => {
     assert.strictEqual(env.config.bot_mode, 'business');
   });
 
+  // Global "off" is bloat (redundant with `multis stop`) AND was a footgun — it
+  // wrote bot_mode='off' directly, bypassing the governed core, and that value is
+  // inert (getChatMode maps global off→business). It's now rejected outright: no
+  // global write, point the owner at `multis stop` / per-chat off instead.
+  it('/mode off with no target does NOT write a global off and is rejected', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1', bot_mode: 'personal' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+
+    await router(msg('/mode off'), platform);
+
+    assert.notStrictEqual(env.config.bot_mode, 'off', 'global bot_mode was NOT set to off');
+    assert.strictEqual(env.config.bot_mode, 'personal', 'global bot_mode is unchanged');
+    assert.match(platform.lastTo('chat1').text, /multis stop|isn't supported/i);
+  });
+
   it('menu option 1 starts wizard full flow', async () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();
@@ -1455,7 +1499,7 @@ describe('/mode business menu', () => {
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
     await router(msg('/mode business', { senderId: 'user2' }), platform);
-    assert.match(platform.sent[0].text, /Admin only/);
+    assert.match(platform.sent[0].text, /Owner only/);
   });
 
   it('wizard skip preserves existing values', async () => {
@@ -1816,6 +1860,78 @@ describe('Config backup', () => {
     backupConfig();
     assert.ok(require('fs').existsSync(configPath + '.bak'), 'backup should exist');
     env.cleanup();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3h/3f — the Beeper chat directory is beeperbox-live (the source of truth),
+// not multis's config. (3h) /mode <name> no longer dumps the whole recent-inbox
+// window into config.chats — only the matched chat is persisted, and a miss
+// persists nothing. (3f) the no-arg /mode menu lists the LIVE inbox, merging any
+// configured chat that fell out of the recent window so its mode stays visible.
+// ---------------------------------------------------------------------------
+
+describe('/mode chat directory is beeperbox-live, not config-bloating', () => {
+  let env;
+  afterEach(() => { if (env) env.cleanup(); env = null; });
+
+  // A beeper platform that returns a recent-inbox WINDOW of several chats (this
+  // is what list_inbox hands back — ~24 recent, here 4 for the test).
+  const WINDOW = [
+    { id: 'wa1', title: 'Alice', network: 'whatsapp' },
+    { id: 'wa2', title: 'Bob', network: 'whatsapp' },
+    { id: 'wa3', title: 'Carol', network: 'whatsapp' },
+    { id: 'tg1', title: 'Dave', network: 'telegram' },
+  ];
+  const beeperWith = (chats) => ({
+    send: async () => {}, listInbox: async () => chats,
+    _botChatId: null, _personalChats: new Set(),
+  });
+
+  function ownerRouter(extraChats = {}) {
+    env = createTestEnv({
+      allowed_users: ['user1'], owner_id: 'user1',
+      platforms: { beeper: { enabled: true } },
+      chats: { ...extraChats },
+    });
+    const tg = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+    router.registerPlatform('beeper', beeperWith(WINDOW));
+    return { router, tg };
+  }
+
+  it('3h: /mode <name> persists ONLY the matched chat, not the whole inbox window', async () => {
+    const { router, tg } = ownerRouter();
+    await router(msg('/mode silent Carol', { senderId: 'user1', chatId: 'oc' }), tg);
+    assert.deepStrictEqual(Object.keys(env.config.chats || {}), ['wa3'],
+      'only the matched chat lands in config.chats — not all 4 window chats');
+    assert.strictEqual(env.config.chats.wa3.mode, 'silent', 'its mode was set');
+    assert.strictEqual(env.config.chats.wa3.name, 'Carol', 'its name was persisted from the live list');
+  });
+
+  it('3h: /mode <no-match> persists nothing (no-upsert-on-failed-match)', async () => {
+    const { router, tg } = ownerRouter();
+    await router(msg('/mode silent Zelda', { senderId: 'user1', chatId: 'oc' }), tg);
+    assert.match(tg.lastTo('oc').text, /No chat found/);
+    assert.deepStrictEqual(env.config.chats, {}, 'a miss leaves config.chats untouched');
+  });
+
+  it('3f: the no-arg /mode menu lists the LIVE inbox (not just configured chats)', async () => {
+    const { router, tg } = ownerRouter();
+    await router(msg('/mode', { senderId: 'user1', chatId: 'oc' }), tg);
+    const text = tg.lastTo('oc').text;
+    for (const c of WINDOW) {
+      assert.match(text, new RegExp(c.title), `${c.title} shown from the live inbox`);
+    }
+  });
+
+  it('3f: the menu merges a configured chat that fell out of the live window', async () => {
+    const { router, tg } = ownerRouter({ old1: { name: 'OldFriend', platform: 'beeper', mode: 'business' } });
+    await router(msg('/mode', { senderId: 'user1', chatId: 'oc' }), tg);
+    const text = tg.lastTo('oc').text;
+    assert.match(text, /OldFriend/, 'a configured chat not in the live window still shows');
+    assert.match(text, /Alice/, 'live chats appear too');
+    assert.match(text, /OldFriend.*\[business\]/, 'its configured mode is shown');
   });
 });
 

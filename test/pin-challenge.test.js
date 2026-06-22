@@ -43,11 +43,17 @@ describe('createPinChallenge (#5)', () => {
     assert.strictEqual(plat.sent.length, 0, 'must not prompt when PIN unset');
   });
 
-  it('no-ops (allows) when the session is still fresh — no double prompt', async () => {
+  it('STILL prompts even when the session is fresh — destructive always re-ceremonies (M9 always-ceremony)', async () => {
+    // A fresh PIN session must NOT bypass a destructive ceremony (owner-decided
+    // 2026-06-20): the 24h session shortcut undercut "no destructive capability
+    // bypasses ceremony". With auth:false (fresh session) the challenge must still
+    // prompt and verify — proven by the waiter actually being parked + consumed.
     const plat = mockPlatform();
-    const challenge = createPinChallenge({ pending, platformRegistry: new Map([['telegram', plat]]), pinManager: stubPin({ auth: false }) });
-    assert.strictEqual(await challenge({ senderId: 'u', chatId: 'c', platform: 'telegram' }), true);
-    assert.strictEqual(plat.sent.length, 0);
+    const challenge = createPinChallenge({ pending, platformRegistry: new Map([['telegram', plat]]), pinManager: stubPin({ auth: false }), timeoutMs: 1000 });
+    const p = challenge({ senderId: 'u', chatId: 'c', platform: 'telegram' });
+    assert.ok(await deliverReply('c', 'u', '1234'), 'a fresh session must NOT skip the prompt — the waiter is parked');
+    assert.strictEqual(await p, true);
+    assert.match(plat.sent[0].text, /needs your PIN/i);
   });
 
   it('prompts, accepts the correct PIN, resolves true', async () => {

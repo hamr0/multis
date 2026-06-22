@@ -116,10 +116,15 @@ function commandHead(cmd) {
   return head.toLowerCase();
 }
 // Destructive = the governance denylist (rm/mv-class, chmod, kill, …) + `sudo`
-// itself. PIN-gated (runs after a correct PIN).
+// itself. PIN-gated (runs after a correct PIN). Scans EVERY segment of a chained
+// command (`;`/`&&`/`||`/`|`), like isCatastrophic — so `ls; rm -rf x` classifies
+// destructive on the `rm`, not benign on the `ls` head. (Chained commands are
+// also denied outright by the bash metachar floor; scanning all segments keeps
+// classification from silently depending on that floor — defense-in-depth.)
 function makeDestructiveCheck(denylist) {
   const set = new Set((denylist || []).map((c) => String(c).toLowerCase()));
-  return (cmd) => set.has('sudo') && /^\s*sudo\b/i.test(cmd) ? true : set.has(commandHead(cmd));
+  const isSeg = (seg) => (set.has('sudo') && /^\s*sudo\b/i.test(seg) ? true : set.has(commandHead(seg)));
+  return (cmd) => String(cmd || '').split(/(?:;|&&|\|\||\|)/).some(isSeg);
 }
 
 /**
@@ -132,11 +137,19 @@ function buildGateConfig({ governance, security, audit, budget, llm, safeAskPatt
   const cfg = {};
 
   if (governance?.commands) {
-    // The denylist is NO LONGER a hard deny — it is the DESTRUCTIVE tier, PIN-gated
-    // in policy() (the owner can run it after a PIN). Only the allowlist informs
-    // bareguard here. (Catastrophic ops add a typed CONFIRM on top — also policy().)
+    // bash.allow = the commands PERMITTED to run = allowlist (benign) ∪ denylist
+    // (destructive, permitted *after* ceremony). The denylist's role is SEVERITY
+    // CLASSIFICATION (→ PIN / PIN+CONFIRM in the M9 core), NOT permission — so its
+    // commands must pass this floor to *reach* the ceremony. A command in NEITHER
+    // list (e.g. `make`, `docker`) stays unpermitted → the floor denies it. Without
+    // the union, a destructive command is walled at the floor and never ceremonies
+    // (the bug that silently broke the slash door's destructive path). The core
+    // reads the raw denylist (surfaced separately) to classify; this union only
+    // governs floor-admission.
+    const allowlist = governance.commands.allowlist || [];
+    const denylist = governance.commands.denylist || [];
     cfg.bash = {
-      allow: governance.commands.allowlist || [],
+      allow: [...allowlist, ...denylist],
     };
   }
 
@@ -342,7 +355,8 @@ async function createGate(opts = {}) {
     actionTranslator: makeActionTranslator(defaultTranslator),
   });
 
-  const isDestructive = makeDestructiveCheck(governance?.commands?.denylist);
+  // Severity classification (destructive/catastrophic) moved to the M9 core
+  // (classifyEffectiveSeverity); the gate keeps only the deterministic Axis-A floor.
   const recordDeny = async (toolName, args, ctx, phase, reason) => {
     try {
       const action = makeActionTranslator(defaultTranslator)(toolName, args, ctx);
@@ -350,59 +364,43 @@ async function createGate(opts = {}) {
     } catch { /* audit write must not break the deny path */ }
   };
 
-  // Owner-bypass layered before wireGate.policy. wireGate.policy throws
-  // HaltError on halt severity (caught by Loop) and returns deny strings
-  // verbatim on action severity (LLM sees them).
-  // Non-owner attempts are recorded to the gate audit so denied attempts
-  // aren't silent — bareguard's policy() never runs on this branch otherwise.
+  // Thin Axis-A floor (M9 increment 3). The exec severity CEREMONY (PIN /
+  // PIN+CONFIRM) used to live here, ahead of wireGate.policy; it now lives ONCE in
+  // the M9 governed core (runGovernedAction), reached by the LLM door via the
+  // wrapped tool execute and by the slash door directly — so both doors ceremony
+  // through the same code. This policy is what bare-agent's Loop calls before each
+  // tool: it keeps only the deterministic floor — the owner-bypass (non-owners get
+  // no shell tool) + wireGate.policy (bareguard's allowlist/fs.deny/content/secrets/
+  // budget + the maxToolRounds HaltError). Because bash.allow now ∪ the denylist, a
+  // destructive command PASSES this floor (not walled) and the core's classifier +
+  // ceremony gate it on execute. wireGate.policy throws HaltError on halt severity
+  // (caught by Loop) and returns deny strings verbatim on action severity.
+  // Non-owner attempts are recorded so a denial isn't silent.
   const policy = async (toolName, args, ctx) => {
     const ownerDeny = ownerCheck(toolName, ctx);
     if (ownerDeny) {
       await recordDeny(toolName, args, ctx, 'denied-owner', ownerDeny);
       return ownerDeny;
     }
-
-    // Command-governance tiers (owner only; ownerCheck already denied non-owners
-    // any shell tool). Benign commands fall through to bareguard; destructive need
-    // a PIN; catastrophic need PIN + a typed CONFIRM. On success the command is
-    // ALLOWED (return null) — the owner deliberately cleared the gate, so we don't
-    // also run it past the allowlist (rm/sudo aren't allowlisted by design).
-    if (toolName === 'exec' && ctx?.isOwner) {
-      const command = String(args?.command || '');
-      if (isCatastrophic(command)) {
-        if (opts.pinChallenge && !(await opts.pinChallenge(ctx))) {
-          await recordDeny(toolName, args, ctx, 'denied-pin', 'PIN required (catastrophic)');
-          return 'PIN required — action cancelled.';
-        }
-        if (opts.confirmChallenge && !(await opts.confirmChallenge(ctx, command))) {
-          await recordDeny(toolName, args, ctx, 'denied-confirm', 'CONFIRM required (catastrophic)');
-          return 'Confirmation required — action cancelled.';
-        }
-        await gate.record(makeActionTranslator(defaultTranslator)(toolName, args, ctx),
-          { phase: 'allow-catastrophic', reason: 'owner PIN+CONFIRM cleared' }).catch(() => {});
-        return null;
-      }
-      if (isDestructive(command)) {
-        if (opts.pinChallenge && !(await opts.pinChallenge(ctx))) {
-          await recordDeny(toolName, args, ctx, 'denied-pin', 'PIN required (destructive)');
-          return 'PIN required — action cancelled.';
-        }
-        await gate.record(makeActionTranslator(defaultTranslator)(toolName, args, ctx),
-          { phase: 'allow-destructive', reason: 'owner PIN cleared' }).catch(() => {});
-        return null;
-      }
-      // benign exec → bareguard (allowlist) governs.
-    }
-
     return wired.policy(toolName, args, ctx);
   };
 
   return {
     gate,
     policy,
+    // Axis-A only — bareguard's deterministic floor (allowlist/denylist, fs.deny,
+    // content patterns, budget, always-ask flags), WITHOUT the multis owner-check
+    // or exec 3-tier ceremony that `policy` composes on top. The M9 governed core
+    // runs this as its `floor` dep so the slash door enforces the same boundary the
+    // LLM door gets, while the ceremony lives once in the core (no double-ceremony).
+    floorPolicy: wired.policy,
     onLlmResult: wired.onLlmResult,
     onToolResult: wired.onToolResult,
     filterTools: wired.filterTools,
+    // The command denylist drives the M9 core's shell-severity classifier
+    // (classifyEffectiveSeverity → makeDestructiveCheck). Surface it here so the
+    // single governed core reads the SAME list the LLM-path 3-tier already uses.
+    denylist: governance?.commands?.denylist || [],
     HaltError,
   };
 }

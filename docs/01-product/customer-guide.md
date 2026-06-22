@@ -50,7 +50,7 @@
     - [Raspberry Pi Setup (Recommended for Business)](#raspberry-pi-setup)
     - [VPS Setup (Telegram Only)](#vps-setup)
 17. [Changing Your LLM Provider](#17-changing-your-llm-provider)
-18. [Adding a Second Admin](#18-adding-a-second-admin)
+18. [Operators & the Single-Owner Model](#18-operators--the-single-owner-model)
 19. [Troubleshooting](#19-troubleshooting)
 20. [File Locations](#20-file-locations)
 
@@ -170,7 +170,7 @@ The wizard verifies connectivity by sending a test message before proceeding.
 
 ### Step 4: Set a PIN
 
-Optionally set a 4-6 digit PIN to protect sensitive commands (`/exec`, `/read`, `/index`). The PIN is hashed and stored locally. You can skip this and set one later with `/pin`.
+Optionally set a 4-6 digit PIN. It guards **destructive actions** before they run — a destructive shell command (`/exec rm …`), clearing a chat's memory (`/forget`), or turning a chat **off** (`/mode … off`). Benign actions (reads, `/index`, `/remember`, other mode changes) run without it. The PIN is hashed and stored locally. You can skip this and set one later with `/pin`.
 
 After completing the wizard, you'll see a summary:
 
@@ -308,24 +308,24 @@ Set this up with `multis init` option 3 (Business chatbot).
 | `/remember <note>` | Save a note to this chat's memory |
 | `/forget` | Clear all memory for this chat |
 | `/skills` | List available skills |
-| `/unpair` | Remove your pairing (you'll need the code to pair again) |
 | `/help` | Show available commands — grouped by intent (Ask / Remember / Schedule / Run / Manage) and filtered to your role; send `/help <command>` (e.g. `/help mode`) for one command's details |
 | *(plain text)* | Drives the full tool-using agent (`/ask`): searches your documents and, on your machine, will find/read files and run things directly rather than telling you to do it yourself |
 
 > A message that starts with `/` but isn't a known command (e.g. a pasted path like `/home/you/file.txt`) is treated as plain text, not a command. A genuinely unknown command (e.g. `/frobnicate`) replies with *"Unknown command — try /help"* rather than being silently ignored.
 
-### Owner / Admin Commands
+### Owner Commands
 
-The **owner** (super-admin, set at setup) can do everything below. A **limited admin** (a chat you designate with `/admin`) gets the staff commands — `/mode`, `/index`, `/ask` — but **not** host shell (`/exec`, `/read`) or `/admin` itself.
+The **owner** (set at setup) can do everything below. The owner is one identity that
+can span any number of trusted devices/people sharing the Beeper account; everyone
+else is a customer and has none of these commands.
 
 | Command | Who | Description |
 |---------|-----|-------------|
-| `/exec <command>` | Owner | Run a shell command on your machine (PIN required) |
-| `/read <path>` | Owner | Read a file or list a directory (PIN required) |
-| `/index <path> <public\|admin>` | Admin | Index a document or directory |
+| `/exec <command>` | Owner | Run a shell command on your machine — benign runs free, destructive needs the PIN, catastrophic (e.g. `rm -rf /`, `dd`, `mkfs`) is hard-blocked |
+| `/read <path>` | Owner | Read a file or list a directory (benign — no PIN) |
+| `/index <path> <public\|admin>` | Owner | Index a document or directory |
 | `/pin` | Owner | Change or set your PIN |
-| `/admin` | Owner | Designate / list / remove limited admins (`/admin`, `/admin list`, `/admin remove <n>`) |
-| `/mode [mode] [target]` | Admin | View or set chat modes (business/silent/off) |
+| `/mode [mode] [target]` | Owner | View or set chat modes (business/silent/off). Turning a chat **off** needs the PIN |
 | `/agent [name]` | Owner | View or assign an agent to this chat |
 | `/agents` | Owner | List all configured agents |
 | `/remind <duration> <action>` | Owner | Set a one-shot reminder (e.g. `/remind 30m call dentist`) |
@@ -365,11 +365,13 @@ The bot completely ignores messages in this chat. No archiving, no logs, no memo
 ### Setting Modes Per Chat
 
 ```
-/mode                           # Show current modes for all chats
+/mode                           # List your recent chats (live) with their current mode
 /mode business                  # Set current chat to business mode
 /mode silent John               # Set John's chat to silent (searches by name)
 /mode off "WhatsApp Group"      # Set a specific chat to off
 ```
+
+`/mode` with no target lists your **recent** chats live from Beeper (the most recent ~24), each with its current mode — plus any chat you've already set a mode on, so it stays visible even after it drops out of the recent list. A chat that's neither recent nor already configured won't appear; set it by name with `/mode <mode> <name>`, which finds it live.
 
 From Telegram (admin channel), you can manage Beeper chat modes remotely:
 
@@ -410,7 +412,7 @@ The wizard walks through 5 steps. Re-running shows current values — send "skip
 
 Type "cancel" at any step to abort. Any `/command` typed during the wizard cancels it and routes the command normally.
 
-Interactive prompts don't wait forever: a numbered picker (mode/index/admin/business menu) lapses after a few minutes and the setup wizard after a longer window, after which the bot tells you the prompt expired and to re-run the command rather than treating a late reply as a question. Tune the windows under `interaction` in `~/.multis/config.json` (`picker_ttl_minutes`, `wizard_ttl_minutes`). Pending prompts are in-memory only, so restarting multis cancels any half-finished picker.
+Interactive prompts don't wait forever: a numbered picker (mode/index/business menu) lapses after a few minutes and the setup wizard after a longer window, after which the bot tells you the prompt expired and to re-run the command rather than treating a late reply as a question. Tune the windows under `interaction` in `~/.multis/config.json` (`picker_ttl_minutes`, `wizard_ttl_minutes`). Pending prompts are in-memory only, so restarting multis cancels any half-finished picker.
 
 Escalation notifications are sent automatically to all admin channels (Telegram + Beeper Note-to-self) — no manual configuration needed.
 
@@ -592,16 +594,16 @@ Restart after editing config: `multis restart`
 
 ## 14. PIN and Security
 
-### PIN-Protected Commands
+### PIN-Protected Actions
 
-These privileged capabilities require PIN authentication:
-- `/exec` — run shell commands
-- `/read` — read files
-- `/index` — index documents
+The PIN guards **destructive actions** by *what they do*, not by which command name you typed. An action is classified when it runs:
+- **Benign** — reads (`/read`), `/index`, `/remember`, `/status`, non-`off` mode changes, and benign shell (e.g. `ls`, `cat`) — run free.
+- **Destructive** — a destructive shell command (`rm <file>`, `rm -rf ./build`, `sudo`, `chmod`…), clearing a chat's memory (`/forget`), or turning a chat **off** (`/mode … off`) — require the **PIN**.
+- **Catastrophic** — machine-wreckers (`rm -rf` of a root/home target, `dd` to a device, `mkfs`, fork bomb, `shutdown`) — are **hard-blocked**. They never run through the bot, with no PIN override; do those in a real terminal. (There's no legitimate reason to automate them, and it removes a footgun if the assistant is ever fed a malicious instruction.)
 
-When you use one, the bot asks for your PIN. After entering the correct PIN, your session is active for 24 hours (configurable).
+When an action needs it, the bot asks for your PIN. After entering the correct PIN, your session is active for 24 hours (configurable).
 
-**The PIN also guards the natural-language path.** If you ask in plain language ("delete the logs in ~/tmp") and the assistant goes to run a shell command or read a file while your PIN session is stale, it prompts `🔒 That action needs your PIN. Reply with your PIN:` and continues the same action once you reply. So rephrasing a command as a sentence can't sidestep the PIN. (`pin_prompt_timeout` in config bounds how long it waits.)
+**This applies to the natural-language path too.** If you ask in plain language ("delete the logs in ~/tmp") and the assistant resolves it to a destructive action while your PIN session is stale, it prompts `🔒 That action needs your PIN.` — echoing the **exact resolved command** — and continues the same action once you reply. So rephrasing a command as a sentence can't sidestep the PIN, and you approve what will *actually* run. (`pin_prompt_timeout` in config bounds how long it waits.)
 
 ### Changing Your PIN
 
@@ -624,9 +626,9 @@ All tool calls (shell commands, file reads, etc.) flow through a **bareguard Gat
 - **Cost cap:** Optional per-run spending limit (set `max_cost_per_run` in config) — covers BOTH LLM tokens and tool execution. On halt, the bot pings you with current spend and asks whether to terminate
 - **Secrets redaction:** the bot's own API keys/tokens (`ANTHROPIC_API_KEY`, `TELEGRAM_BOT_TOKEN`, etc.) are stripped from **both** logs automatically — the gate decision log (`gate.jsonl`) and the app audit log (`audit.log`) — so an `/exec` command that happens to contain a secret never persists it in plaintext
 - **Exec isolation:** commands run via `/exec` run in a child shell with the bot's own credentials **removed from the environment** — a command (or an LLM-driven action) can't read `$ANTHROPIC_API_KEY` and leak it
-- **Owner-only tools:** All host-reaching tools (shell exec, file read/send, system info, opening URLs, notifications, media control) are owner-only and cannot be granted to a customer, even by editing `tools.json` — a customer is never a privileged principal. The `admin` document scope is owner-only too: a limited admin manages only the public knowledge base
+- **Owner-only tools:** All host-reaching tools (shell exec, file read/send, system info, opening URLs, notifications, media control) are owner-only and cannot be granted to a customer, even by editing `tools.json` — a customer is never a privileged principal. The `admin` document scope is owner-only too — it is the owner's private knowledge, distinct from the public KB
 - **Approvals go to you:** confirmation/halt prompts route to the owner's channel, never to the chat that triggered them — no one can self-approve a privileged action
-- **Audit:** Every gate decision is logged at `~/.multis/logs/gate.jsonl` (structured by phase: gate, record, approval, halt, denied-owner, denied-pin). App-level events (pairing, mode change, etc.) stay at `~/.multis/logs/audit.log`
+- **Audit:** Every gate decision is logged at `~/.multis/logs/gate.jsonl` (structured by phase: gate, record, approval, halt, denied-owner, denied-pin). App-level events (pairing, mode change, etc.) stay at `~/.multis/logs/audit.log`. **Blocked attempts leave a trace too, not just successful ones:** a host action that's denied — a non-owner reaching for a host verb, or a destructive command where the PIN was declined — is recorded in `audit.log` as a `govern` event with `status: denied-owner` / `denied-ceremony` (alongside `executed` and `blocked`), so you can see *who tried what and was stopped*, on both the slash (`/exec`) and natural-language paths
 
 Edit `~/.multis/auth/governance.json` to customize allowed/denied commands and paths.
 
@@ -916,53 +918,38 @@ Restart after changing: `multis restart`
 
 ---
 
-## 18. Adding a Second Admin
+## 18. Operators & the Single-Owner Model
 
-There is one **super-admin** (the owner) — the first person to pair, set at setup. The super-admin is fixed and is the only one who can run host shell (`/exec`, `/read`), change the PIN, or designate other admins.
+There is one **owner** — the first person to pair, set at setup. The owner is the only
+privileged principal: only the owner can run host shell (`/exec`, `/read`), index from
+a host path, set chat modes, or change the PIN. Everyone else is a **customer** and has
+none of those commands.
 
-You can promote another chat to a **limited admin** — staff who help run the bot (manage chat modes, update the knowledge base) without access to your machine.
+There is **no second-tier "limited admin."** It was removed because it never fit how
+multis actually runs:
 
-### Designate a limited admin
+- multis runs on **your** machine watching **your** Beeper inbox, so every Beeper chat
+  is "you ↔ someone else." A third party has no independent channel to the bot — only
+  their conversation *with you* — so there's no coherent chat to mark as "admin."
+- A Telegram-only helper would be a half-operator: they'd get escalation pings but
+  **couldn't see or take over a chat** (your conversations live in Beeper, not Telegram).
+- A helper who genuinely needs to see and reply in chats needs the **Beeper account
+  itself** — and Beeper is multi-device, so they just add a device (phone, second
+  desktop). At that point they *are* the owner identity. **The owner is one identity
+  that can span any number of trusted devices or people sharing the account** — nothing
+  to "designate."
 
-From an admin window, send:
+### What about the PIN, then?
 
-```
-/admin
-```
+The PIN can't separate operators who share one account: your note-to-self is synced
+across devices, so any PIN is visible to everyone on the account. The PIN's real job is
+a **speed bump on destructive actions** — anti-accident, anti-injection, anti-hijacked-
+model — not access control. Benign actions run free; destructive ones ask for the PIN;
+catastrophic ones are hard-blocked (see [§14](#14-pin-and-security)).
 
-The bot lists your active chats, numbered. Reply with a number, confirm, then enter your PIN:
-
-```
-Pick a chat to make a LIMITED admin (mode/index/ask — NOT shell):
-  1) Acme Support
-  2) Jordan
-Reply with a number.
-> 1
-Make "Acme Support" a limited admin (mode/index/ask, no shell)? Reply "yes" to confirm.
-> yes
-Enter your PIN to confirm:
-> ••••
-Done. "Acme Support" is now a limited admin.
-```
-
-From then on, messages from that chat are treated as a command channel: that person can use `/mode`, `/index`, `/ask` and the bot's natural-language help. They **cannot** use `/exec`, `/read`, or `/admin`.
-
-### Manage limited admins
-
-```
-/admin list            # show current limited admins
-/admin remove 1        # revoke by number
-```
-
-**What a limited admin can and can't do:**
-
-| | Super-admin (owner) | Limited admin |
-|---|---|---|
-| `/mode`, `/index`, `/ask`, monitoring | ✅ | ✅ |
-| `/exec`, `/read` (host shell) | ✅ (PIN) | ❌ |
-| `/admin`, `/pin` | ✅ | ❌ |
-
-All admins share the **one** PIN (the super-admin's), set at setup or with `/pin`.
+> If you ever need a genuinely restricted remote helper (reply-only, no host access),
+> that's a future "relay-operator" feature, not the removed admin tier — ask if you hit
+> the need.
 
 ---
 

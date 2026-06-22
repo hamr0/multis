@@ -110,10 +110,20 @@ function createHumanPrompt({ platformRegistry, pinManager, config, autoResponder
  * no channel to prompt on — fails closed).
  */
 function createPinChallenge({ platformRegistry, pinManager, pending, timeoutMs = 300_000 } = {}) {
-  return async function pinChallenge(ctx) {
+  // opts.echo (M9): the verbatim RESOLVED action the PIN authorises (e.g. the exact
+  // `rm -rf …` command), so the owner approves what will actually run — not a model
+  // intent (POC finding #2). The LLM-path caller (gate.js) passes only ctx; echo is
+  // optional and omitted there, so the prompt degrades to the generic line.
+  return async function pinChallenge(ctx, opts = {}) {
     if (!pinManager || !pinManager.isEnabled()) return true; // no PIN configured
+    // M9 always-ceremony (owner-decided 2026-06-20): a destructive action ALWAYS
+    // re-prompts for a fresh PIN — we deliberately do NOT honor a still-fresh PIN
+    // session here. The old 24h session bypass (`if (auth === false) return true`)
+    // let a destructive command run for up to a day after one PIN, undercutting
+    // "no destructive capability bypasses ceremony" (negative POC: assume the model
+    // is compromised, so the ceremony is the load-bearing control). `needsAuth` is
+    // still consulted for the LOCKOUT state; only the session-fresh shortcut is gone.
     const auth = pinManager.needsAuth(ctx?.senderId);
-    if (auth === false) return true; // session still fresh
 
     const platform = platformRegistry?.get(ctx?.platform);
     if (!platform || typeof platform.send !== 'function') return false; // can't prompt → deny
@@ -123,8 +133,9 @@ function createPinChallenge({ platformRegistry, pinManager, pending, timeoutMs =
       return false;
     }
 
+    const echoLine = opts.echo ? `\n\n  ${opts.echo}\n` : ' ';
     try {
-      await platform.send(ctx.chatId, '🔒 That action needs your PIN. Reply with your PIN:');
+      await platform.send(ctx.chatId, `🔒 That action needs your PIN.${echoLine}Reply with your PIN:`);
     } catch {
       return false;
     }
@@ -141,38 +152,6 @@ function createPinChallenge({ platformRegistry, pinManager, pending, timeoutMs =
     }
     try { await platform.send(ctx.chatId, 'PIN accepted.'); } catch { /* ignore */ }
     return true;
-  };
-}
-
-/**
- * Build a typed-confirmation challenge for catastrophic commands (the third
- * tier above PIN). After the PIN clears, the gate calls this for the small set
- * of machine-wreckers (rm -rf /, dd to a device, mkfs, fork bomb, shutdown…):
- * it shows the exact command and requires the owner to reply the literal word
- * CONFIRM — a deliberate speed bump a stray message can't satisfy. Routes and
- * waits via the same PendingRegistry path as the PIN/approval flow.
- *
- * Returns (ctx, command) => Promise<boolean>. true only on an exact "CONFIRM".
- */
-function createConfirmChallenge({ platformRegistry, pending, timeoutMs = 300_000 } = {}) {
-  return async function confirmChallenge(ctx, command) {
-    const platform = platformRegistry?.get(ctx?.platform);
-    if (!platform || typeof platform.send !== 'function') return false; // can't prompt → deny
-    try {
-      await platform.send(ctx.chatId,
-        `⚠️ This command can destroy data or your system:\n\n  ${command}\n\n`
-        + `Reply CONFIRM (exactly, all caps) within 5 minutes to run it. Anything else cancels.`);
-    } catch {
-      return false;
-    }
-    const reply = await waitForReply(pending, ctx.chatId, ctx.senderId, { timeoutMs });
-    if (reply == null) {
-      try { await platform.send(ctx.chatId, 'Confirmation timed out — action cancelled.'); } catch { /* ignore */ }
-      return false;
-    }
-    if (reply.trim() === 'CONFIRM') return true;
-    try { await platform.send(ctx.chatId, 'Not confirmed — action cancelled.'); } catch { /* ignore */ }
-    return false;
   };
 }
 
@@ -245,5 +224,4 @@ function waitForReply(pending, chatId, senderId, { timeoutMs } = {}) {
 module.exports = {
   createHumanPrompt,
   createPinChallenge,
-  createConfirmChallenge,
 };

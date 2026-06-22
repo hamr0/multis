@@ -165,14 +165,19 @@ describe('M0 e2e — governance via slash-command path', () => {
 
   it('step 6 (slash) — /exec rm -rf / is DENIED and does not run', async () => {
     await router(msg('/exec rm -rf /tmp/x'), platform);
-    assert.match(platform.lastTo('chat1').text, /deny/i);
+    const text = platform.lastTo('chat1').text;
+    // Readable block message — NOT the raw bareguard rule string / regex.
+    assert.match(text, /Blocked/i);
+    assert.doesNotMatch(text, /denyPatterns|bash\.allow|\\b|\[deny:/, 'internal rule string must not leak to chat');
     const d = decisionFor(gate, 'bash');
     assert.ok(d && d.decision === 'deny', 'bash deny audited for slash /exec');
   });
 
   it('step 7 (slash) — /read /etc/passwd is DENIED by fs.deny', async () => {
     await router(msg('/read /etc/passwd'), platform);
-    assert.match(platform.lastTo('chat1').text, /deny/i);
+    const text = platform.lastTo('chat1').text;
+    assert.match(text, /Blocked|off-limits/i);
+    assert.doesNotMatch(text, /fs\.deny|\[deny:/, 'internal rule string must not leak to chat');
     const d = decisionFor(gate, 'read');
     assert.ok(d && d.decision === 'deny', 'read deny audited for slash /read');
   });

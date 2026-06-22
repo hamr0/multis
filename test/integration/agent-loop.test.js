@@ -4,6 +4,8 @@ const { createMessageRouter } = require('../../src/bot/handlers');
 const { TOOLS } = require('../../src/tools/definitions');
 const { buildToolRegistry, getToolsForUser } = require('../../src/tools/registry');
 const { createTestEnv, mockPlatform, msg } = require('../helpers/setup');
+const { PinManager, hashPin } = require('../../src/security/pin');
+const { PendingRegistry } = require('../../src/bot/pending');
 
 /**
  * Mock bareagent-compatible provider.
@@ -188,6 +190,85 @@ describe('Agent loop with tool calling', () => {
     assert.ok(provider.calls.length <= 3, `Expected max ~3 calls, got ${provider.calls.length}`);
     // Should still produce an answer
     assert.ok(platform.sent.length > 0);
+  });
+
+  // M9 increment 3 — the LLM door through the one governed core. An exec tool call
+  // the model makes runs its execute through runGovernedAction: benign runs free,
+  // destructive PINs in-window, catastrophic is hard-walled (never runs). The
+  // ceremony is the SAME core the slash door uses; gate.js `policy` no longer holds
+  // a 3-tier. Ceremony is inline-await on the gate_reply waiter, so a destructive
+  // call doesn't resolve until the PIN does → fire-without-await + poll.
+  describe('governed-core ceremony on the agent path', () => {
+    const flush = () => new Promise((r) => setImmediate(r));
+    async function waitFor(pred, label = 'condition', tries = 500) {
+      for (let i = 0; i < tries; i++) { if (pred()) return; await flush(); }
+      throw new Error(`waitFor timed out: ${label}`);
+    }
+    // A stub `exec` (owner-only by name) that records what it ran instead of
+    // touching the machine — so "did it run?" is observable without real mutation.
+    function execStub(ran) {
+      return {
+        name: 'exec', description: 'Run a shell command', platforms: ['linux'], owner_only: true,
+        input_schema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+        execute: async (args) => { ran.push(args.command); return `ran: ${args.command}`; },
+      };
+    }
+    function build(toolCalls, ran) {
+      const env = createTestEnv({
+        allowed_users: ['user1'], owner_id: 'user1',
+        security: { pin_hash: hashPin('1234'), pin_timeout_hours: 24, checkpoint_tools: [] },
+      });
+      const platform = mockPlatform();
+      const pinManager = new PinManager(env.config); pinManager.sessions = {};
+      const pending = new PendingRegistry();
+      const provider = mockToolProvider([{ text: '', toolCalls }, { text: 'done.', toolCalls: [] }]);
+      const router = createMessageRouter(env.config, {
+        provider, indexer: stubIndexer(), tools: [execStub(ran)], toolsConfig: {}, runtimePlatform: 'linux',
+        pinManager, pending, fileless: true,
+        governanceFile: { commands: { allowlist: ['ls', 'echo'], denylist: ['rm'] }, paths: { allowed: ['/'], denied: [] } },
+      });
+      router.registerPlatform('telegram', platform);
+      return { platform, router, ran };
+    }
+
+    it('a benign exec the model calls runs free (no PIN)', async () => {
+      const ran = [];
+      const { platform, router } = build([{ id: 't1', name: 'exec', arguments: { command: 'ls ~/Music' } }], ran);
+      await router(msg('/ask list my music'), platform);
+      assert.ok(!platform.sent.some((s) => /PIN/i.test(s.text)), 'no ceremony for a benign command');
+      assert.deepStrictEqual(ran, ['ls ~/Music'], 'benign command ran straight through');
+    });
+
+    it('a destructive exec the model calls PINs in-window, then runs on the correct PIN', async () => {
+      const ran = [];
+      const { platform, router } = build([{ id: 't1', name: 'exec', arguments: { command: 'rm notes.txt' } }], ran);
+      const p = router(msg('/ask delete my notes'), platform);
+      await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
+      assert.deepStrictEqual(ran, [], 'not run before the PIN clears');
+      assert.match(platform.sent.find((s) => /PIN/i.test(s.text)).text, /rm notes\.txt/, 'verbatim echo');
+      await router(msg('1234'), platform);
+      await p;
+      assert.deepStrictEqual(ran, ['rm notes.txt'], 'ran after the correct PIN');
+    });
+
+    it('a destructive exec the model calls is CANCELLED on a wrong PIN — never runs', async () => {
+      const ran = [];
+      const { platform, router } = build([{ id: 't1', name: 'exec', arguments: { command: 'rm notes.txt' } }], ran);
+      const p = router(msg('/ask delete my notes'), platform);
+      await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
+      await router(msg('9999'), platform); // wrong PIN
+      await p;
+      assert.deepStrictEqual(ran, [], 'a wrong PIN cancels — the command never ran');
+      assert.ok(platform.sent.some((s) => /wrong pin/i.test(s.text)), 'the owner is told the PIN was wrong');
+    });
+
+    it('a catastrophic exec the model calls is HARD-WALLED — no PIN, never runs', async () => {
+      const ran = [];
+      const { platform, router } = build([{ id: 't1', name: 'exec', arguments: { command: 'rm -rf ~/*' } }], ran);
+      await router(msg('/ask wipe my home directory'), platform);
+      assert.ok(!platform.sent.some((s) => /PIN/i.test(s.text)), 'a wall is not a ceremony — no PIN');
+      assert.deepStrictEqual(ran, [], 'the catastrophic command never ran');
+    });
   });
 
   it('works without tools (backward compatible — no tool deps)', async () => {

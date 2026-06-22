@@ -643,6 +643,21 @@ describe('BeeperPlatform', () => {
       bp.mcp = { async callTool() { return { content_type: 'application/pdf' }; } };
       await assert.rejects(() => bp.downloadAsset('mxc://x'), /no data/);
     });
+
+    // SEC12 — asset DoS bound. A chat sender controls the attachment size, and
+    // beeperbox returns it base64 in the MCP body. downloadAsset estimates the
+    // decoded size from the base64 length (≈ len*3/4) and rejects ABOVE the 25MB
+    // cap BEFORE Buffer.from materializes the buffer — so an oversized attachment
+    // can't OOM the process. Failable: the small-payload test above returns a
+    // Buffer, so the size is the only discriminator; drop the cap and this resolves.
+    it('downloadAsset rejects an attachment over the ~25MB cap before materializing it', async () => {
+      const { BeeperPlatform } = loadBeeper();
+      const bp = new BeeperPlatform(makeConfig());
+      // base64 length > 25MB * 4/3 (~34.95M chars) → est ~26MB, over the cap.
+      const oversized = 'A'.repeat(35_000_000);
+      bp.mcp = { async callTool() { return { encoding: 'base64', data_base64: oversized }; } };
+      await assert.rejects(() => bp.downloadAsset('mxc://huge'), /too large/i);
+    });
   });
 
   // -------------------------------------------------------------------------

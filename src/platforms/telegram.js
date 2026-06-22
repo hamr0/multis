@@ -47,7 +47,15 @@ class TelegramPlatform extends Platform {
         raw: ctx,
       });
 
-      await this._messageCallback(msg, this);
+      // Fire-and-forget — do NOT await. An inline ceremony (PIN/approval) suspends
+      // the router waiting for the user's *next* message; awaiting here would block
+      // Telegraf's poll loop from fetching that reply until handlerTimeout (90s),
+      // deadlocking the ceremony. Beeper's independent poll loop never had this; the
+      // doc-upload path below (and Beeper) already dispatch without awaiting.
+      this._messageCallback(msg, this).catch((err) => {
+        console.error('Telegram handler error:', err.message);
+        logAudit({ action: 'error', platform: 'telegram', error: err.message });
+      });
     });
 
     this.bot.catch((err, ctx) => {

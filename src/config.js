@@ -227,9 +227,6 @@ function loadConfig() {
   // Ensure config.chats block exists (single source of truth for chat metadata)
   if (!config.chats) config.chats = {};
 
-  // Limited-admin windows (designated via /admin). Distinct from owner_id.
-  if (!Array.isArray(config.admins)) config.admins = [];
-
   // Migrate chat_modes → config.chats (one-time, backward compatible)
   const oldModes = config.platforms?.beeper?.chat_modes;
   if (oldModes && typeof oldModes === 'object') {
@@ -374,44 +371,11 @@ function isOwner(userId, config, msg) {
   // On Beeper the owner is identified by the account's own note-to-self chat —
   // `isSelf` AND `isPersonalChat`. Requiring the personal-chat signal (not bare
   // `isSelf`) keeps the owner grant from leaning solely on the transport flag:
-  // a self-message in a random/silent chat, or in a designated limited-admin
-  // chat, no longer confers owner. Defense-in-depth over the platform's own
-  // routing gate (PRD §11.1). Telegram never sets isSelf → uses owner_id below.
+  // a self-message in a random/silent chat no longer confers owner.
+  // Defense-in-depth over the platform's own routing gate (PRD §11.1).
+  // Telegram never sets isSelf → uses owner_id below.
   if (msg && msg.isSelf && msg.isPersonalChat) return true;
   return String(config.owner_id) === String(userId);
-}
-
-/**
- * Check if a message comes from a privileged window — the super-admin (owner)
- * OR a chat designated a LIMITED admin via /admin. Limited admins get staff
- * commands (mode/index/ask) but NOT host shell (exec/read) — those stay
- * owner-only. Designation is per-chat ("anything from this window is admin").
- */
-function isAdmin(userId, config, msg) {
-  if (isOwner(userId, config, msg)) return true;
-  const chatId = msg?.chatId;
-  return Array.isArray(config.admins)
-    && chatId != null
-    && config.admins.map(String).includes(String(chatId));
-}
-
-/** Designate a chat as a limited admin window (idempotent). */
-function addAdmin(config, chatId) {
-  if (!Array.isArray(config.admins)) config.admins = [];
-  const id = String(chatId);
-  if (!config.admins.map(String).includes(id)) config.admins.push(id);
-  saveConfig(config);
-  return config;
-}
-
-/** Revoke a chat's limited-admin status. Returns true if it was an admin. */
-function removeAdmin(config, chatId) {
-  if (!Array.isArray(config.admins)) { config.admins = []; return false; }
-  const id = String(chatId);
-  const before = config.admins.length;
-  config.admins = config.admins.filter(c => String(c) !== id);
-  saveConfig(config);
-  return config.admins.length < before;
 }
 
 module.exports = {
@@ -421,9 +385,6 @@ module.exports = {
   updateChatMeta,
   addAllowedUser,
   isOwner,
-  isAdmin,
-  addAdmin,
-  removeAdmin,
   generatePairingCode,
   ensureMultisDir,
   getMultisDir,

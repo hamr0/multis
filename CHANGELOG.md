@@ -4,6 +4,75 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+### Security — pre-merge `/security` + `/diff-review` pass (6 fixes, all mutation-proven)
+
+A four-domain security audit of the M9 branch before merge found the M9 core itself clean (auth boundary tightens, governed-core ceremony holds, secrets scrubbed, approvals route to owner), and surfaced two **pre-existing, live** RCEs in the desktop tools plus four hardenings. All fixed red→green:
+
+- **CRITICAL — `media_control` RCE.** `playerctl ${action}` was interpolated raw into `/bin/bash` and the schema `enum` is not enforced at the adapter, so `action: "pause; touch X"` ran arbitrary commands. Now validated against the action allowlist at runtime and executed via `execArgv` (no shell). The volume path is clamped to a 0-100 integer and also runs argv-only.
+- **HIGH — `find_files` `-delete`.** The model-controlled `path` was `find`'s first argv token with no `--`, so `path: "-delete"` was parsed as the `-delete` *action* (find with no path defaults to cwd) and recursively deleted. A path that `find` could read as an option (leading `-`) is now rejected.
+- **MEDIUM — audit parity.** An Axis-A floor deny in `runGovernedAction` left no `audit.log` trace (only `gate.jsonl`), breaking the parity the `denied-owner` fix intended. Floor denies now record `status:'denied-floor'`.
+- **MEDIUM — fs-floor secret fence.** `governance.json` shipped `paths.denied: []`. The file tools (read/find/grep) now deny `~/.multis/config.json`(+`.bak`), `~/.ssh`, and `/etc/shadow` — a defense-in-depth fence so a content-injection-hijacked model can't read the bot's own credentials back out (the app's internal `loadConfig` uses `fs` directly, never the gated tools, so it never self-locks).
+- **MEDIUM — destructive classifier.** `makeDestructiveCheck` inspected only the first command token, so `ls; rm -rf x` classified benign. It now scans every chained segment (`;`/`&&`/`||`/`|`) like the catastrophic check. (Contained today by the metachar floor; this stops classification silently depending on it.)
+- **LOW — `grep_files` flag allowlist.** The free-form `options` string accepted arbitrary `grep` flags (`-f <file>`, `--include`); now only the safe combinable short flags are permitted.
+
+The model layer is assumed compromised by content injection (M9 negative POC), so these owner-only tools matter: the safety can't rest on the model declining. Regression tests added for all six (the two RCEs run their exploit safely in a tmp sandbox to prove red→green); fs-deny proven against the real bareguard gate including `~`-form path expansion. 462/462 green, `npm audit` 0.
+
+### Removed — the limited-admin tier (`/admin`, `admins[]`, `isAdmin`, `isAdminChat`)
+
+The second-tier "limited admin" principal is gone. It never fit the architecture: multis runs on the **owner's** machine watching the **owner's** Beeper inbox, so every Beeper chat is "owner ↔ someone" — a third party has no independent channel to the bot (only their conversation *with the owner*), making a Beeper "limited admin" circular ("which chat is admin? the one with me"). A Telegram-only admin is a half-operator (gets escalation pings but can't see or act in chats — those live in Beeper). A useful operator must SEE+ACT, which means the **Beeper account itself** (multi-device); at that point they *are* the owner identity, with nothing to designate. And the PIN can't separate shared-account operators — note-to-self is synced, so any PIN is visible to everyone on the account; the PIN's real job is a **destructive-action speed bump**, not access control.
+
+- **Model now (LOCKED):** `owner` (one identity, any number of trusted devices/people sharing the Beeper account) + `customers`. Telegram is the owner's remote control, not an operator host. There is no reduced-privilege tier — a shared-account operator is a full owner (the PIN still gates destructive actions; benign host reads run free).
+- **Removed:** the `/admin` command and its `routeAdmin`/`handleAdminFlowReply` designation flow; `admins[]` (config field, template default, and migration); `isAdmin`/`addAdmin`/`removeAdmin`; Beeper `isAdminChat` routing (which also **closes the off-mode footgun** — an admin-designated chat could bypass the off-mode early-exit); `Message.isAdminChat`; and the help "admin" role tier (now just `all`/`owner`). Beeper commands are now owner-note-to-self only.
+- **Kept (different concept, same word):** the `admin` *document scope* (the owner's private KB — `/index … admin`, `recall(scope:'admin')`, memory capture). The scope selector was already keyed on `isOwner`, so memory/RAG isolation is unchanged.
+- Deleted `test/admin.test.js`; reframed the `/index` host-FS-floor tests from "limited admin cannot" to "a non-owner cannot" (a paired non-owner, so the test exercises the `routeIndex` owner-only floor, not the pairing gate). 456/456 green. If a genuinely restricted remote helper is ever needed, that's a future reply-only **relay-operator** build, not this tier.
+
+### Fixed — `/mode` chat directory is beeperbox-live; `config.chats` no longer drifts
+
+The Beeper chat directory is **beeperbox's** (always current); multis's `config.chats` is only the mode overlay + names for chats it has acted on. Two fixes restore that split:
+
+- **No more upsert drift.** `findBeeperChat` used to dump the *entire* recent-~24 `list_inbox` window into `config.chats` on **every** `/mode <name>` lookup — and that window is recency-ordered, so `config.chats` grew in uneven jumps (observed 25→35→43) and a *failed* lookup silently rewrote config. It now filters for matches **first** and persists **only the matched chat(s)** (with name/network, since `setChatMode` stores just `{mode}`); a miss writes nothing (`backupConfig`/`saveConfig` run only when a match is actually persisted). Mutation-proven red→green (re-introducing the bulk upsert fails the test).
+- **The `/mode` menu is live.** `listBeeperChats` is now async **live-first**: every chat-listing menu (Telegram `/mode` status, Beeper `/mode` status, the self-chat picker, the business-menu "assign chats" picker) asks `list_inbox` (beeperbox = the source of truth) and merges in any *configured* chat that fell out of the recent window so its mode stays visible. Display-only (no upsert); degrades to config-only when beeperbox is unreachable. Validated live against the running beeperbox (24 live chats pulled + merge confirmed), plus 4 integration tests.
+
+### Tests — LIVE‡ owner-testable gate rows proven (SEC2/SEC4/SEC10–12)
+
+The owner-testable rows of the M9 LIVE‡ merge gate are now proven with **failable real-input tests** against the real production functions and installed libraries (not assertions, not mocks of the thing under test):
+
+- **SEC2 (parser bounds)** — over-limit inputs driven at the production `context.indexBuffer` → installed litectx 0.18.0. `maxSize`/`maxPages` are set **below litectx's own defaults**, so a rejection can only come from multis's wiring (failability proven: with no bound wired, litectx's 10 MB default lets a 2 MB doc through). 11 MB → rejected before parse (no OOM); a 2-page PDF rejected at a 1-page cap. `parseTimeoutMs` is per-page and cannot interrupt a single CPU-bound page (documented upstream) — noted, not over-claimed.
+- **SEC4 (PIN on the NL path)** — added the consumer-level **wrong-PIN-cancels** case (correct-PIN-resumes-the-same-action and catastrophic-wall were already covered).
+- **SEC12 (asset cap)** — a >25 MB base64 attachment is rejected (`download_asset`) **before** `Buffer.from` materializes it (no OOM); the small-payload test is the control.
+- SEC10 (exec env scrub) and SEC11 (audit redaction) were already covered by real failable tests.
+
+**Lib finding filed, not papered over (Principle 8):** litectx 0.18.0 ingests `.txt`/`.text`/`.log`/`.csv` as **0 searchable chunks** despite multis advertising `txt` in `allowedTypes` — written up as a request (`docs/01-product/litectx-asks/plaintext-chunker.md`, PRD §7).
+
+### Fixed — audit fidelity: a denied host attempt now leaves a forensic trace
+
+A non-owner probing host verbs left **no record** in either log. The owner-floor in `runGovernedAction` returns *before* the Axis-A floor (bareguard), so a slash-door `owner_only` denial never reached `audit.log` *or* `gate.jsonl` — invisible. (The NL door's denial was recorded in `gate.jsonl` by the wired gate, so the two doors disagreed.) Surfaced live during the M9 LIVE‡ owner-flip run: a non-owner's `/exec`, `/read`, `/index` and an NL "find my resume" (the model genuinely attempted `read` against `/home/...` twice — both `denied-owner`) all held the boundary, but the slash attempts were untraceable. Now the core records every denial through the same audit dep — `owner_only` → `status:'denied-owner'`, declined destructive ceremony → `status:'denied-ceremony'` (joining the existing catastrophic `'blocked'` and successful `'executed'`). Boundary behavior is unchanged (nothing new runs or is denied); only observability improves, consistently across both doors. Red→green (2 tests), integration-smoked against the real audit dep.
+
+### Changed — M9 intent-first dispatch: one governed core (increments 1 & 2)
+
+Host and app actions now resolve to a **declared capability** (a capability registry where each entry declares `args + scope + severity`) and run through a single `runGovernedAction` core — the only place auth, ceremony, and audit happen. The flow is: owner-floor → schema arg-validation → Axis-A floor (bareguard's deterministic boundary) → severity classify → ceremony (benign runs free · destructive → PIN · catastrophic → PIN+CONFIRM, with verbatim-arg echo) → execute → record plain-language intent.
+
+- **Increment 1 — slash door.** `/exec`→`run_shell`, `/read`→`read_file`, `/index`→`index` flow through the core. **Removed** the router-level `PIN_PROTECTED` double-path, the orphaned `pin_command` resume case, the dead `enforceGate`, and the unused `execCommand`/`readFile` imports. **Fixes the dead-3-tier bug:** the core returns an explicit `{ok:true}` allow signal instead of the old `null` (which `bare-agent`'s Loop read as DENY — so a destructive command was denied even after a correct PIN). The Axis-A floor runs *inside* the core (single-sourced for both doors), mutation-proven load-bearing (a bypass would have leaked `/etc/passwd` / run `rm`).
+- **Increment 2 — app-verb door.** `/forget` now requires the **PIN** before wiping a chat's memory; `/mode … off` (per-chat) requires the PIN before turning a chat off — both via one `commitMode` helper that funnels every mode-commit site (including the interactive picker-resume) through the core. `/remember` and `/memory` run through the core too (benign, audited). The picker clears its pending *before* the ceremony so a PIN reply routes to the gate waiter, not back into the picker.
+- **Increment 3 — LLM door.** The bare-agent tool path now runs a ceremony-bearing tool's `execute` through the same core: gate.js `policy` is reduced to the thin Axis-A floor (owner-bypass + bareguard's allowlist/fs.deny/secrets/budget/rounds), and the destructive ceremony lives once, in the core, for both doors. Fixes a **latent regression** found while building: the slash door (increment 1) silently *walled* every destructive command — they aren't allowlisted, so the floor denied them before the ceremony could run. Fix: `bash.allow = allowlist ∪ denylist` (the denylist is severity classification, not permission; its commands must pass the floor to *reach* the ceremony). Unknown commands (neither list) stay denied.
+
+### Changed — command governance simplified to 3 honest tiers (catastrophic is now a hard wall)
+
+The catastrophic tier (`rm -rf` of a root/home target, `dd` to a device, `mkfs`, fork bomb, `shutdown`) is now a **hard wall** — it never runs through the bot, with **no PIN+CONFIRM override** (the owner uses a real terminal). This replaces the previous "catastrophic → PIN + typed CONFIRM" tier: there's no legitimate automation need, the negative POC showed the model is hijackable, so the strongest catch (a wall) beats a ceremony. The wall lives in *our* core (`runGovernedAction`); bareguard's built-in `rm -rf /…` content-deny is complementary and **untouched**. The CONFIRM challenge (`createConfirmChallenge`, `confirmChallenge` plumbing) is removed entirely. Net tiers: **benign** (run free) · **destructive** (PIN speed bump — `rm <file>`, `rm -rf ./relative`, `sudo`, `chmod`, `kill`) · **catastrophic** (hard wall).
+
+### Removed — `/unpair`
+
+`/unpair` is gone. Removing a limited admin is already `/admin remove` (owner-only, and structurally cannot touch the owner); the only account in the paired list is the owner's, so a self-unpair would risk orphaning the bot with no owner left. Full teardown remains a CLI action (`multis stop` → `rm -rf ~/.multis`).
+
+### Removed — global `/mode off` (no target)
+
+Global `/mode off` is gone. It was both **redundant** (to halt the bot you stop the daemon — `multis stop` — which actually frees the process; a global off would keep it running but playing dead, with no way to re-enable from chat since `off` ignores incoming messages) and a **footgun** (it wrote `bot_mode='off'` directly, bypassing the governed core, and that value was inert — `getChatMode` mapped global `off`→`business`). `/mode off` with no target now refuses and points the owner at `multis stop` (to halt) or per-chat `/mode off <chat>` (to mute one conversation, unchanged). Global `business`/`silent`/`personal` defaults are untouched.
+
+### Tests — M0 door-convergence parity net + audit fidelity
+
+- **`test/e2e/parity.test.js`** — proves M9's load-bearing claim ("one governed core, both doors") *directly*: the **slash door** (`/exec`) and the **LLM door** (the model's `exec` tool call) are driven with the **same** command + governance and asserted to produce **byte-identical** governed records — same verbatim ceremony echo, same plain-language govern audit line, same PIN-gated execution, same catastrophic hard-wall. Mutation-proven (bypassing the LLM door's core routing turns all three red). The natural-language door (`"silence Amr"`→app-verb) is documented as a future third column — it was POC-validated but not wired (app-verbs aren't exposed to the LLM).
+- **Audit fidelity** — a catastrophic *blocked* action now records `status:'blocked'` (was hardcoded `'executed'`, ignoring the `blocked:true` the core already passed). The wall itself was always correct; only the audit label was wrong.
+
 ## [0.17.0] - 2026-06-19
 
 Baresuite migration milestone — M-B (beeperbox MCP swap) + M3 (litectx 0.18.0 doc index) + security overhaul + init rewrite. Merged behind a reduced `/security` + `/diff-review` gate; full LIVE‡ pass follows M9.
