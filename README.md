@@ -76,14 +76,13 @@ The map, not the manual — every command and its full options live in the **[Co
 | You say… | multis… |
 |----------|---------|
 | *plain text*, or `/ask` | Drives the full tool-using agent — searches your indexed documents (answering **with citations**), and when you ask it to *find a file, read something, or run a command* it uses its tools and does it rather than telling you to do it yourself |
-| `/index <path> public\|admin` | Ingests a PDF / DOCX / Markdown file (parsed + chunked via litectx), scoped so customers and admins see different knowledge |
+| `/index <path> public\|admin` | Ingests a PDF / DOCX / Markdown file (parsed + chunked via litectx), scoped to the public KB or your own private (owner-only) knowledge |
 | `/exec`, `/read` | Runs a shell command or reads a file **on your machine** — gated, PIN-protected, owner-only |
 | `/mode business` on a chat | Turns that chat into an auto-responder that answers from your KB and **escalates to you** when a human is needed |
 | `/remember`, `/memory` | Keeps durable notes per chat; recent context stays hot and old context fades, so it remembers what matters |
 | `/remind`, `/cron` | Schedules one-shot reminders and recurring tasks that survive restarts |
-| `/admin` | Lets you appoint **limited admins** — staff who can run the knowledge base but never touch your shell |
 
-Role-aware throughout: the **owner** can do everything, a **limited admin** gets the knowledge-base commands without host access, and a **customer** in a business chat just gets answers.
+Single-owner by design: the **owner** is one identity that can span any number of trusted devices sharing the account and can do everything; a **customer** in a business chat just gets answers and never reaches a host tool. Host actions resolve through one governed core (intent → declared capability → ceremony), so there's no raw-shell front door.
 
 ## Built on the bare ecosystem
 
@@ -122,9 +121,9 @@ If you'd rather not route through Beeper at all, you can start from scratch: run
 
 ## Status
 
-multis is **work in progress**. Built and tested today: Telegram + pairing, shell/file skills behind a single gate, PDF/DOCX/MD indexing and conversation memory on **litectx**, LLM RAG with chat modes and business escalation, the daemon + CLI + PIN auth, the baresuite migration (bare-agent + bareguard + litectx), Beeper via beeperbox, and the limited-admin (`/admin`) security batch.
+multis is **work in progress**. Built and tested today: Telegram + pairing, shell/file skills behind a single gate, PDF/DOCX/MD indexing and conversation memory on **litectx**, LLM RAG with chat modes and business escalation, the daemon + CLI + PIN auth, the baresuite migration (bare-agent + bareguard + litectx), Beeper via beeperbox, and **M9 intent-first dispatch** — one governed core (intent → declared capability → ceremony, no raw-shell front door) with the single-owner security model.
 
-**Before the first tagged release:** a live end-to-end verification pass, then merge to `main`. **Then:** the native litectx memory model (M4 promotion ladder) and `npm install -g` packaging. Full roadmap and per-POC status: **[PRD](docs/01-product/baresuite-migration-prd.md)**.
+**Latest (0.17.1):** M9 merged to `main` after a full LIVE‡ security gate (owner/customer boundary, governed-core ceremony, two pre-existing RCEs closed). **Next:** the native litectx memory model (M4 promotion ladder) and `npm install -g` packaging. Full roadmap and per-POC status: **[PRD](docs/01-product/baresuite-migration-prd.md)**.
 
 Stack: Node.js (vanilla, minimal deps) · Telegraf · bare-agent · bareguard · litectx (FTS5 + PDF/DOCX via pdfjs-dist/mammoth). Architecture and source map: **[system-state.md](docs/00-context/system-state.md)** · all docs: **[docs hub](docs/README.md)**.
 
