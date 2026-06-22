@@ -1632,7 +1632,10 @@ function disambiguateTitles(chats, config) {
     const t = baseTitle(c);
     if (counts.get(t) === 1) { labels.set(c.id, t); continue; }
     const last = config.chats?.[c.id]?.lastActive;
-    const when = last ? new Date(last).toISOString().slice(0, 10) : 'no activity';
+    const d = last ? new Date(last) : null;
+    // Guard a malformed/corrupted lastActive — new Date('garbage').toISOString()
+    // throws, and this runs inside the picker render (would crash the list).
+    const when = d && !Number.isNaN(d.getTime()) ? d.toISOString().slice(0, 10) : 'no activity';
     labels.set(c.id, `${t} · active ${when}`);
   }
   return labels;

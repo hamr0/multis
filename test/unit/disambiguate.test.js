@@ -57,6 +57,21 @@ describe('disambiguateTitles', () => {
     assert.notEqual(labels.get('!a'), labels.get('!b'));
   });
 
+  it('does not throw on a malformed lastActive — falls back to "no activity"', () => {
+    const chats = [
+      { id: '!a', title: 'Amr Hassan' },
+      { id: '!b', title: 'Amr Hassan' },
+    ];
+    const config = { chats: {
+      '!a': { lastActive: 'not-a-date' },        // corrupted / hand-edited
+      '!b': { lastActive: '2026-06-22T00:00:00.000Z' },
+    } };
+    let labels;
+    assert.doesNotThrow(() => { labels = disambiguateTitles(chats, config); });
+    assert.equal(labels.get('!a'), 'Amr Hassan · active no activity');
+    assert.equal(labels.get('!b'), 'Amr Hassan · active 2026-06-22');
+  });
+
   it('falls back to id when a chat has no title', () => {
     const chats = [{ id: '!only', network: 'whatsapp' }];
     const labels = disambiguateTitles(chats, { chats: {} });
