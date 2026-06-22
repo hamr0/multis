@@ -408,6 +408,39 @@ function roleLabel(botMode) {
   return ROLES[normalizeRole(botMode)].label;
 }
 
+// Init Step 1 maps a menu choice to a role. Single-sourced here so the wizard
+// (bin/multis.js) and its tests agree on the mapping.
+const ROLE_BY_CHOICE = { '1': 'personal-bot', '2': 'personal-assistant', '3': 'business' };
+
+/**
+ * The transport bound 1:1 to a role (PRD §3g): personal-bot → Telegram (owner-
+ * only); personal-assistant / business → Beeper (the only channel that can see
+ * and respond to the owner's real contacts across networks).
+ */
+function transportForRole(botMode) {
+  const useTelegram = normalizeRole(botMode) === 'personal-bot';
+  return { useTelegram, useBeeper: !useTelegram };
+}
+
+/**
+ * Apply a role to a config: canonicalize bot_mode and DISABLE the transport not
+ * bound to this role (the 1:1 flip — switching role cleanly flips transport).
+ * Enabling the bound transport is left to the connection step (it is network-
+ * gated: Telegram needs a verified token, Beeper needs a reachable beeperbox).
+ * Returns the binding so the caller can drive its connect branches.
+ */
+function applyRoleTransport(config, botMode) {
+  const role = normalizeRole(botMode);
+  config.bot_mode = role;
+  if (!config.platforms) config.platforms = {};
+  if (!config.platforms.telegram) config.platforms.telegram = {};
+  if (!config.platforms.beeper) config.platforms.beeper = {};
+  const { useTelegram, useBeeper } = transportForRole(role);
+  if (!useTelegram) config.platforms.telegram.enabled = false;
+  if (!useBeeper) config.platforms.beeper.enabled = false;
+  return { useTelegram, useBeeper };
+}
+
 module.exports = {
   loadConfig,
   saveConfig,
@@ -418,6 +451,9 @@ module.exports = {
   normalizeRole,
   defaultModeForRole,
   roleLabel,
+  ROLE_BY_CHOICE,
+  transportForRole,
+  applyRoleTransport,
   generatePairingCode,
   ensureMultisDir,
   getMultisDir,

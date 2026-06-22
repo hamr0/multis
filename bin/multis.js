@@ -6,7 +6,7 @@ const path = require('path');
 const readline = require('readline');
 const crypto = require('crypto');
 
-const { PATHS, getMultisDir, saveConfig, roleLabel, normalizeRole } = require('../src/config');
+const { PATHS, getMultisDir, saveConfig, roleLabel, normalizeRole, ROLE_BY_CHOICE, applyRoleTransport } = require('../src/config');
 const MULTIS_DIR = getMultisDir();
 const PID_PATH = PATHS.pid();
 const CONFIG_PATH = PATHS.config();
@@ -165,8 +165,7 @@ async function runInit() {
   let useTelegram = false;
   let useBeeper = false;
 
-  // choice → role → transport
-  const ROLE_BY_CHOICE = { '1': 'personal-bot', '2': 'personal-assistant', '3': 'business' };
+  // choice → role → transport (ROLE_BY_CHOICE single-sourced in config.js)
 
   // Check if we have a valid existing setup to offer Enter-to-keep
   const hasExistingSetup = hadSavedConfig && config.bot_mode &&
@@ -194,11 +193,10 @@ async function runInit() {
     console.log(c.ok(`Keeping: ${roleLabel(config.bot_mode)}`));
   } else {
     const role = ROLE_BY_CHOICE[roleChoice] || 'personal-bot';
-    config.bot_mode = role;
-    // role ⟺ transport. Step 2 connects the implied channel AND disables the
-    // other (its else-branches), so switching role cleanly flips transport.
-    if (role === 'personal-bot') useTelegram = true;
-    else useBeeper = true;
+    // role ⟺ transport. applyRoleTransport sets bot_mode and disables the
+    // non-selected platform; Step 2 then connects (and enables) the implied
+    // channel — so switching role cleanly flips transport.
+    ({ useTelegram, useBeeper } = applyRoleTransport(config, role));
     console.log(c.ok(`${roleLabel(role)} — ${useBeeper ? 'Beeper' : 'Telegram'}`));
   }
 

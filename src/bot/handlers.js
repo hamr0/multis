@@ -1368,14 +1368,10 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
       if (hasBeeperChats) {
         const allChats = await listBeeperChats(beeperPlatform, config);
         if (allChats && allChats.length > 0) {
-          const lines = allChats.map((c, i) => {
-            const m = getChatMode(config, c.id);
-            return `  ${i + 1}) ${c.title || c.id} [${m}]`;
-          });
-          statusMsg += `\n\nChat modes:\n${lines.join('\n')}`;
+          statusMsg += `\n\n${formatChatOverview(allChats, config)}`;
         }
       }
-      statusMsg += '\n\nUsage: /mode <business|silent|off> [chat name]';
+      statusMsg += `\n\n${MODE_FOOTER}`;
       await platform.send(msg.chatId, statusMsg);
       return;
     }
@@ -1402,7 +1398,8 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
         return;
       }
       if (match.length > 1) {
-        const list = match.map((c, i) => `  ${i + 1}) ${c.title || c.name || c.id}`).join('\n');
+        const labels = disambiguateTitles(match, config);
+        const list = match.map((c, i) => `  ${i + 1}) ${labels.get(c.id)}`).join('\n');
         pending.set(msg.chatId, msg.senderId, 'mode', {
           data: { mode, matches: match, agent: null },
           ttlMs: pickerTtlMs(config),
@@ -1456,11 +1453,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
         await platform.send(msg.chatId, 'No chats found.');
         return;
       }
-      const lines = allChats.map((c, i) => {
-        const m = getChatMode(config, c.id);
-        return `  ${i + 1}) ${c.title || c.id} [${m}]`;
-      });
-      await platform.send(msg.chatId, `Chat modes:\n${lines.join('\n')}`);
+      await platform.send(msg.chatId, `${formatChatOverview(allChats, config)}\n\n${MODE_FOOTER}`);
     } else {
       await platform.send(msg.chatId,
         'Usage: /mode <business|silent|off> [target]\n\n' +
@@ -1504,7 +1497,8 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
       return;
     }
     if (match.length > 1) {
-      const list = match.map((c, i) => `  ${i + 1}) ${c.title || c.name || c.id}`).join('\n');
+      const labels = disambiguateTitles(match, config);
+      const list = match.map((c, i) => `  ${i + 1}) ${labels.get(c.id)}`).join('\n');
       // Store pending mode selection (include agent for deferred assignment)
       pending.set(msg.chatId, msg.senderId, 'mode', {
         data: { mode, matches: match, agent: agentArg },
@@ -1539,9 +1533,10 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
     }
     // Exclude the current chat (command channel) from the picker
     const chats = allChats.filter(c => c.id !== msg.chatId);
+    const labels = disambiguateTitles(chats, config);
     const list = chats.map((c, i) => {
       const currentMode = getChatMode(config, c.id);
-      return `  ${i + 1}) ${c.title || c.name || c.id} [${currentMode}]`;
+      return `  ${i + 1}) ${labels.get(c.id)} [${currentMode}]`;
     }).join('\n');
     // Store pending mode selection (include agent for deferred assignment)
     pending.set(msg.chatId, msg.senderId, 'mode', {
@@ -1608,6 +1603,59 @@ async function listBeeperChats(platform, config) {
   }
 
   return [...byId.values()];
+}
+
+/**
+ * Same-titled chats (e.g. two WhatsApp rooms for one contact) are
+ * indistinguishable in a numbered picker — you can set a mode on the wrong room
+ * and get a SILENT no-op (the change lands on a different room than the one
+ * receiving messages, with no error). For colliding titles only, append the
+ * last-active date so you can tell which numbered entry is the live one; you
+ * still select by number. Returns id -> display label.
+ */
+function disambiguateTitles(chats, config) {
+  const baseTitle = (c) => c.title || c.name || c.id;
+  const counts = new Map();
+  for (const c of chats) counts.set(baseTitle(c), (counts.get(baseTitle(c)) || 0) + 1);
+  const labels = new Map();
+  for (const c of chats) {
+    const t = baseTitle(c);
+    if (counts.get(t) === 1) { labels.set(c.id, t); continue; }
+    const last = config.chats?.[c.id]?.lastActive;
+    const d = last ? new Date(last) : null;
+    // Guard a malformed/corrupted lastActive — new Date('garbage').toISOString()
+    // throws, and this runs inside the picker render (would crash the list).
+    const when = d && !Number.isNaN(d.getTime()) ? d.toISOString().slice(0, 10) : 'no activity';
+    labels.set(c.id, `${t} · active ${when}`);
+  }
+  return labels;
+}
+
+// Shown under the read-only `/mode` overview — the teachable moment (you typed
+// /mode to look; here's how to act). The overview is NOT a numbered picker: a
+// number reply there isn't captured (it falls through to the agent), so it must
+// not LOOK selectable. To act you use one of these forms.
+const MODE_FOOTER =
+  'Change a chat:\n' +
+  ' /mode silent <name>   — set one by name\n' +
+  ' /mode silent          — pick from a list\n' +
+  'modes: business · silent · off';
+
+/**
+ * Read-only `/mode` overview body. Leads with the chats the bot is actually
+ * engaging (business/silent) and collapses the off ones to a count — a 40-row
+ * dump of mostly-off chats is noise, not status. De-numbered on purpose (the
+ * overview is not a picker; browse/act via `/mode <mode>` or `… <name>`).
+ */
+function formatChatOverview(allChats, config) {
+  const labels = disambiguateTitles(allChats, config);
+  const withMode = allChats.map((c) => ({ c, mode: getChatMode(config, c.id) }));
+  const engaged = withMode.filter((x) => x.mode !== 'off');
+  const offCount = withMode.length - engaged.length;
+  if (engaged.length === 0) return `No chats engaged (all ${withMode.length} off).`;
+  let body = 'Engaged chats:\n' + engaged.map((x) => ` – ${labels.get(x.c.id)} — ${x.mode}`).join('\n');
+  if (offCount > 0) body += `\n (${offCount} other${offCount !== 1 ? 's' : ''}: off)`;
+  return body;
 }
 
 /**
@@ -2019,9 +2067,10 @@ async function handleBusinessMenuReply(msg, platform, config, input, agentRegist
         return true;
       }
       const chats = allChats.filter(c => c.id !== msg.chatId);
+      const labels = disambiguateTitles(chats, config);
       const list = chats.map((c, i) => {
         const currentMode = getChatMode(config, c.id);
-        return `  ${i + 1}) ${c.title || c.name || c.id} [${currentMode}]`;
+        return `  ${i + 1}) ${labels.get(c.id)} [${currentMode}]`;
       }).join('\n');
       registry.set(msg.chatId, msg.senderId, 'mode', {
         data: { mode: 'business', matches: chats, agent: null },
@@ -2229,7 +2278,7 @@ const HELP_COMMANDS = [
   { name: 'plan',     group: 'RUN',      role: 'owner', usage: '/plan <goal>',                    summary: 'break a goal into steps & run them' },
   // MANAGE
   { name: 'mode',     group: 'MANAGE',   role: 'owner', usage: '/mode [business|silent|off] [chat]', summary: 'how I respond in a chat',
-    detail: 'No target → this chat (or, with no Beeper, the global default). With a chat name → that Beeper chat (interactive picker on multiple matches). `/mode business` opens the business-persona menu. silent = archive only; off = ignore.' },
+    detail: 'Bare `/mode` → a read-only overview of which chats are engaged, plus how to change one (it is not a picker — to act you give a mode). `/mode <mode>` → pick a chat from a list. `/mode <mode> <name>` → set that Beeper chat directly (picker on multiple matches). `/mode business` opens the business-persona menu. silent = archive only; off = ignore.' },
   { name: 'agent',    group: 'MANAGE',   role: 'owner', usage: '/agent [name]',                   summary: "show or set this chat's agent" },
   { name: 'agents',   group: 'MANAGE',   role: 'owner', usage: '/agents',                         summary: 'list all agents' },
   { name: 'pin',      group: 'MANAGE',   role: 'owner', usage: '/pin',                            summary: 'set or change your PIN' },
@@ -2409,5 +2458,7 @@ module.exports = {
   buildAgentRegistry,
   resolveAgent,
   clearAdminPauses,
+  disambiguateTitles,
+  formatChatOverview,
   isPaired
 };

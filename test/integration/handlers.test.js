@@ -1931,7 +1931,7 @@ describe('/mode chat directory is beeperbox-live, not config-bloating', () => {
     const text = tg.lastTo('oc').text;
     assert.match(text, /OldFriend/, 'a configured chat not in the live window still shows');
     assert.match(text, /Alice/, 'live chats appear too');
-    assert.match(text, /OldFriend.*\[business\]/, 'its configured mode is shown');
+    assert.match(text, /OldFriend.*business/, 'its configured mode is shown');
   });
 });
 
