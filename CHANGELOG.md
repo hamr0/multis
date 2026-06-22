@@ -4,6 +4,10 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+## [0.17.1] — 2026-06-22
+
+M9 — intent-first command dispatch + the single-owner model. Host/app actions now resolve to a declared capability and run through one `runGovernedAction` core (intent → arg-validation → Axis-A floor → ceremony → execute → audit); the limited-admin tier is gone (single owner + customers). Merged to `main` after the full LIVE‡ security gate (C1 + SEC1–SEC12 + P1/P3) and a pre-merge `/security` pass.
+
 ### Security — pre-merge `/security` + `/diff-review` pass (6 fixes, all mutation-proven)
 
 A four-domain security audit of the M9 branch before merge found the M9 core itself clean (auth boundary tightens, governed-core ceremony holds, secrets scrubbed, approvals route to owner), and surfaced two **pre-existing, live** RCEs in the desktop tools plus four hardenings. All fixed red→green:
