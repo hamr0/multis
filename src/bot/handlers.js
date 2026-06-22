@@ -1368,9 +1368,10 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
       if (hasBeeperChats) {
         const allChats = await listBeeperChats(beeperPlatform, config);
         if (allChats && allChats.length > 0) {
+          const labels = disambiguateTitles(allChats, config);
           const lines = allChats.map((c, i) => {
             const m = getChatMode(config, c.id);
-            return `  ${i + 1}) ${c.title || c.id} [${m}]`;
+            return `  ${i + 1}) ${labels.get(c.id)} [${m}]`;
           });
           statusMsg += `\n\nChat modes:\n${lines.join('\n')}`;
         }
@@ -1402,7 +1403,8 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
         return;
       }
       if (match.length > 1) {
-        const list = match.map((c, i) => `  ${i + 1}) ${c.title || c.name || c.id}`).join('\n');
+        const labels = disambiguateTitles(match, config);
+        const list = match.map((c, i) => `  ${i + 1}) ${labels.get(c.id)}`).join('\n');
         pending.set(msg.chatId, msg.senderId, 'mode', {
           data: { mode, matches: match, agent: null },
           ttlMs: pickerTtlMs(config),
@@ -1456,9 +1458,10 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
         await platform.send(msg.chatId, 'No chats found.');
         return;
       }
+      const labels = disambiguateTitles(allChats, config);
       const lines = allChats.map((c, i) => {
         const m = getChatMode(config, c.id);
-        return `  ${i + 1}) ${c.title || c.id} [${m}]`;
+        return `  ${i + 1}) ${labels.get(c.id)} [${m}]`;
       });
       await platform.send(msg.chatId, `Chat modes:\n${lines.join('\n')}`);
     } else {
@@ -1504,7 +1507,8 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
       return;
     }
     if (match.length > 1) {
-      const list = match.map((c, i) => `  ${i + 1}) ${c.title || c.name || c.id}`).join('\n');
+      const labels = disambiguateTitles(match, config);
+      const list = match.map((c, i) => `  ${i + 1}) ${labels.get(c.id)}`).join('\n');
       // Store pending mode selection (include agent for deferred assignment)
       pending.set(msg.chatId, msg.senderId, 'mode', {
         data: { mode, matches: match, agent: agentArg },
@@ -1539,9 +1543,10 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
     }
     // Exclude the current chat (command channel) from the picker
     const chats = allChats.filter(c => c.id !== msg.chatId);
+    const labels = disambiguateTitles(chats, config);
     const list = chats.map((c, i) => {
       const currentMode = getChatMode(config, c.id);
-      return `  ${i + 1}) ${c.title || c.name || c.id} [${currentMode}]`;
+      return `  ${i + 1}) ${labels.get(c.id)} [${currentMode}]`;
     }).join('\n');
     // Store pending mode selection (include agent for deferred assignment)
     pending.set(msg.chatId, msg.senderId, 'mode', {
@@ -1608,6 +1613,29 @@ async function listBeeperChats(platform, config) {
   }
 
   return [...byId.values()];
+}
+
+/**
+ * Same-titled chats (e.g. two WhatsApp rooms for one contact) are
+ * indistinguishable in a numbered picker — you can set a mode on the wrong room
+ * and get a SILENT no-op (the change lands on a different room than the one
+ * receiving messages, with no error). For colliding titles only, append the
+ * last-active date so you can tell which numbered entry is the live one; you
+ * still select by number. Returns id -> display label.
+ */
+function disambiguateTitles(chats, config) {
+  const baseTitle = (c) => c.title || c.name || c.id;
+  const counts = new Map();
+  for (const c of chats) counts.set(baseTitle(c), (counts.get(baseTitle(c)) || 0) + 1);
+  const labels = new Map();
+  for (const c of chats) {
+    const t = baseTitle(c);
+    if (counts.get(t) === 1) { labels.set(c.id, t); continue; }
+    const last = config.chats?.[c.id]?.lastActive;
+    const when = last ? new Date(last).toISOString().slice(0, 10) : 'no activity';
+    labels.set(c.id, `${t} · active ${when}`);
+  }
+  return labels;
 }
 
 /**
@@ -2019,9 +2047,10 @@ async function handleBusinessMenuReply(msg, platform, config, input, agentRegist
         return true;
       }
       const chats = allChats.filter(c => c.id !== msg.chatId);
+      const labels = disambiguateTitles(chats, config);
       const list = chats.map((c, i) => {
         const currentMode = getChatMode(config, c.id);
-        return `  ${i + 1}) ${c.title || c.name || c.id} [${currentMode}]`;
+        return `  ${i + 1}) ${labels.get(c.id)} [${currentMode}]`;
       }).join('\n');
       registry.set(msg.chatId, msg.senderId, 'mode', {
         data: { mode: 'business', matches: chats, agent: null },
@@ -2409,5 +2438,6 @@ module.exports = {
   buildAgentRegistry,
   resolveAgent,
   clearAdminPauses,
+  disambiguateTitles,
   isPaired
 };
