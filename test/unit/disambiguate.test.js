@@ -1,7 +1,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
 
-const { disambiguateTitles } = require('../../src/bot/handlers');
+const { disambiguateTitles, formatChatOverview } = require('../../src/bot/handlers');
 
 // Two WhatsApp rooms for one contact share a title — in a numbered picker they
 // look identical, so a mode set lands on the wrong room with no error (the
@@ -76,5 +76,46 @@ describe('disambiguateTitles', () => {
     const chats = [{ id: '!only', network: 'whatsapp' }];
     const labels = disambiguateTitles(chats, { chats: {} });
     assert.equal(labels.get('!only'), '!only');
+  });
+});
+
+// The read-only /mode overview: leads with engaged (business/silent) chats,
+// collapses off ones to a count, and is NOT numbered (numbered-but-inert was the
+// trap that sent a stray "2" to the agent).
+describe('formatChatOverview', () => {
+  const cfg = (modes) => ({ chats: Object.fromEntries(Object.entries(modes).map(([id, mode]) => [id, { mode }])) });
+
+  it('leads with engaged chats, collapses off to a count, and is NOT numbered', () => {
+    const chats = [
+      { id: '!a', title: 'Amora' },
+      { id: '!b', title: 'Amr Hassan' },
+      { id: '!c', title: 'Mum' },
+      { id: '!d', title: 'BotFather' },
+    ];
+    const out = formatChatOverview(chats, cfg({ '!a': 'silent', '!b': 'business', '!c': 'off', '!d': 'off' }));
+
+    assert.match(out, /Engaged chats:/);
+    assert.match(out, /Amora — silent/);
+    assert.match(out, /Amr Hassan — business/);
+    assert.match(out, /\(2 others: off\)/);
+    assert.doesNotMatch(out, /Mum|BotFather/);   // off chats collapsed, not listed
+    assert.doesNotMatch(out, /\d+\)/);            // no "1)" numbering — the false affordance is gone
+  });
+
+  it('reports all-off cleanly (no engaged section)', () => {
+    const chats = [{ id: '!a', title: 'X' }, { id: '!b', title: 'Y' }];
+    const out = formatChatOverview(chats, cfg({ '!a': 'off', '!b': 'off' }));
+    assert.match(out, /No chats engaged \(all 2 off\)/);
+  });
+
+  it('disambiguates same-named engaged chats by date', () => {
+    const chats = [{ id: '!a', title: 'Amr Hassan' }, { id: '!b', title: 'Amr Hassan' }];
+    const config = { chats: {
+      '!a': { mode: 'business', lastActive: '2026-06-22T00:00:00.000Z' },
+      '!b': { mode: 'silent', lastActive: '2026-06-19T00:00:00.000Z' },
+    } };
+    const out = formatChatOverview(chats, config);
+    assert.match(out, /Amr Hassan · active 2026-06-22 — business/);
+    assert.match(out, /Amr Hassan · active 2026-06-19 — silent/);
   });
 });

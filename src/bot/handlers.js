@@ -1368,15 +1368,10 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
       if (hasBeeperChats) {
         const allChats = await listBeeperChats(beeperPlatform, config);
         if (allChats && allChats.length > 0) {
-          const labels = disambiguateTitles(allChats, config);
-          const lines = allChats.map((c, i) => {
-            const m = getChatMode(config, c.id);
-            return `  ${i + 1}) ${labels.get(c.id)} [${m}]`;
-          });
-          statusMsg += `\n\nChat modes:\n${lines.join('\n')}`;
+          statusMsg += `\n\n${formatChatOverview(allChats, config)}`;
         }
       }
-      statusMsg += '\n\nUsage: /mode <business|silent|off> [chat name]';
+      statusMsg += `\n\n${MODE_FOOTER}`;
       await platform.send(msg.chatId, statusMsg);
       return;
     }
@@ -1458,12 +1453,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
         await platform.send(msg.chatId, 'No chats found.');
         return;
       }
-      const labels = disambiguateTitles(allChats, config);
-      const lines = allChats.map((c, i) => {
-        const m = getChatMode(config, c.id);
-        return `  ${i + 1}) ${labels.get(c.id)} [${m}]`;
-      });
-      await platform.send(msg.chatId, `Chat modes:\n${lines.join('\n')}`);
+      await platform.send(msg.chatId, `${formatChatOverview(allChats, config)}\n\n${MODE_FOOTER}`);
     } else {
       await platform.send(msg.chatId,
         'Usage: /mode <business|silent|off> [target]\n\n' +
@@ -1639,6 +1629,33 @@ function disambiguateTitles(chats, config) {
     labels.set(c.id, `${t} · active ${when}`);
   }
   return labels;
+}
+
+// Shown under the read-only `/mode` overview — the teachable moment (you typed
+// /mode to look; here's how to act). The overview is NOT a numbered picker: a
+// number reply there isn't captured (it falls through to the agent), so it must
+// not LOOK selectable. To act you use one of these forms.
+const MODE_FOOTER =
+  'Change a chat:\n' +
+  ' /mode silent <name>   — set one by name\n' +
+  ' /mode silent          — pick from a list\n' +
+  'modes: business · silent · off';
+
+/**
+ * Read-only `/mode` overview body. Leads with the chats the bot is actually
+ * engaging (business/silent) and collapses the off ones to a count — a 40-row
+ * dump of mostly-off chats is noise, not status. De-numbered on purpose (the
+ * overview is not a picker; browse/act via `/mode <mode>` or `… <name>`).
+ */
+function formatChatOverview(allChats, config) {
+  const labels = disambiguateTitles(allChats, config);
+  const withMode = allChats.map((c) => ({ c, mode: getChatMode(config, c.id) }));
+  const engaged = withMode.filter((x) => x.mode !== 'off');
+  const offCount = withMode.length - engaged.length;
+  if (engaged.length === 0) return `No chats engaged (all ${withMode.length} off).`;
+  let body = 'Engaged chats:\n' + engaged.map((x) => ` – ${labels.get(x.c.id)} — ${x.mode}`).join('\n');
+  if (offCount > 0) body += `\n (${offCount} other${offCount !== 1 ? 's' : ''}: off)`;
+  return body;
 }
 
 /**
@@ -2261,7 +2278,7 @@ const HELP_COMMANDS = [
   { name: 'plan',     group: 'RUN',      role: 'owner', usage: '/plan <goal>',                    summary: 'break a goal into steps & run them' },
   // MANAGE
   { name: 'mode',     group: 'MANAGE',   role: 'owner', usage: '/mode [business|silent|off] [chat]', summary: 'how I respond in a chat',
-    detail: 'No target → this chat (or, with no Beeper, the global default). With a chat name → that Beeper chat (interactive picker on multiple matches). `/mode business` opens the business-persona menu. silent = archive only; off = ignore.' },
+    detail: 'Bare `/mode` → a read-only overview of which chats are engaged, plus how to change one (it is not a picker — to act you give a mode). `/mode <mode>` → pick a chat from a list. `/mode <mode> <name>` → set that Beeper chat directly (picker on multiple matches). `/mode business` opens the business-persona menu. silent = archive only; off = ignore.' },
   { name: 'agent',    group: 'MANAGE',   role: 'owner', usage: '/agent [name]',                   summary: "show or set this chat's agent" },
   { name: 'agents',   group: 'MANAGE',   role: 'owner', usage: '/agents',                         summary: 'list all agents' },
   { name: 'pin',      group: 'MANAGE',   role: 'owner', usage: '/pin',                            summary: 'set or change your PIN' },
@@ -2442,5 +2459,6 @@ module.exports = {
   resolveAgent,
   clearAdminPauses,
   disambiguateTitles,
+  formatChatOverview,
   isPaired
 };
