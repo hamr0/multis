@@ -415,7 +415,6 @@ module.exports = {
   updateChatMeta,
   addAllowedUser,
   isOwner,
-  ROLES,
   normalizeRole,
   defaultModeForRole,
   roleLabel,
