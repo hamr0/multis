@@ -1,4 +1,4 @@
-const { describe, it, beforeEach } = require('node:test');
+const { describe, it, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
@@ -8,7 +8,27 @@ const { getPlatform } = require('../src/tools/platform');
 const { TOOLS } = require('../src/tools/definitions');
 const { buildToolRegistry, getToolsForUser, DEFAULT_OWNER_ONLY } = require('../src/tools/registry');
 const { adaptTools } = require('../src/tools/adapter');
-const { setMultisDir } = require('../src/config');
+const { setMultisDir, PATHS } = require('../src/config');
+
+// Tool executions audit-log (open_url/clipboard/exec/...). Without this redirect
+// they resolve to the REAL ~/.multis/logs/audit.log and pollute the live account
+// (the desktop-injection test below alone wrote hundreds of lines). Sandbox the
+// whole file so any audit write during tests lands in a throwaway dir.
+let _toolsSandbox;
+before(() => { _toolsSandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-tools-sandbox-')); setMultisDir(_toolsSandbox); });
+after(() => { setMultisDir(null); fs.rmSync(_toolsSandbox, { recursive: true, force: true }); });
+
+// Regression guard: kept FIRST so it runs with only the file-level redirect
+// active. If that redirect is ever removed, audit paths resolve back to the real
+// home and this fails — exactly the leak we are closing.
+describe('test isolation — audit writes stay out of the real ~/.multis', () => {
+  it('resolves the audit log under the sandbox, never the real home', () => {
+    const real = path.join(os.homedir(), '.multis');
+    const auditPath = PATHS.auditLog();
+    assert.ok(!auditPath.startsWith(real), `audit log must not resolve to the real home, got ${auditPath}`);
+    assert.ok(auditPath.startsWith(_toolsSandbox), `audit log should be under the sandbox, got ${auditPath}`);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Platform detection
