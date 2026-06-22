@@ -4,6 +4,8 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+## [0.17.2] — 2026-06-22
+
 ### Changed — init wizard is intent-first; role ⟺ transport bound 1:1 (PRD §3g)
 
 `multis init` no longer forks Personal/Business up front and sub-branches the platform choice. Step 1 is now a single 3-way intent question, and the role determines the channel:
