@@ -4,9 +4,15 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+## [0.17.3] — 2026-06-22
+
+### Changed — `/mode` is one model: a read-only overview + explicit actions
+
+The bare `/mode` list was numbered (`1) 2) 3)`) but **not** selectable — a stray number reply wasn't captured and fell through to the agent (answering a random RAG query). `/mode` is now a read-only **overview**: it leads with the chats the bot is actively engaging (business/silent) and collapses the `off` ones to a count (a long mostly-`off` dump is noise, not status), de-numbered so nothing *looks* pickable that isn't, with a footer showing the two real ways to act — `/mode silent <name>` (by name) or `/mode silent` (pick from a list). One mental model: **`/mode` shows and teaches; `/mode <mode> [name]` acts.**
+
 ### Fixed — `/mode` picker disambiguates same-titled chats
 
-When two chats share a title (e.g. two WhatsApp rooms for one contact, both shown as "Amr Hassan"), the numbered `/mode` picker rendered identical lines — so setting a mode could land on the *wrong* room with no error: a **silent no-op** (a business chat that never responds, because the room actually receiving messages stayed `off`). Colliding titles now carry their **last-active date** (`Amr Hassan · active 2026-06-22`) so the live room is obvious; selection stays by number, and uniquely-named chats are unchanged. Applies to every `/mode` list — the no-arg view, the "multiple matches" lists, the self-chat picker, and the business assign-chats picker.
+When two chats share a title (e.g. two WhatsApp rooms for one contact, both shown as "Amr Hassan"), the numbered `/mode` picker rendered identical lines — so setting a mode could land on the *wrong* room with no error: a **silent no-op** (a business chat that never responds, because the room actually receiving messages stayed `off`). Colliding titles now carry their **last-active date** (`Amr Hassan · active 2026-06-22`) so the live room is obvious; selection stays by number, and uniquely-named chats are unchanged. Applies to every `/mode` list — the no-arg view, the "multiple matches" lists, the self-chat picker, and the business assign-chats picker. (A malformed/corrupted `lastActive` no longer throws — it falls back to "no activity".)
 
 ### Added — test coverage (internal)
 
