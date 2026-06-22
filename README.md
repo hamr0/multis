@@ -79,6 +79,7 @@ The map, not the manual — every command and its full options live in the **[Co
 | `/index <path> public\|admin` | Ingests a PDF / DOCX / Markdown file (parsed + chunked via litectx), scoped to the public KB or your own private (owner-only) knowledge |
 | `/exec`, `/read` | Runs a shell command or reads a file **on your machine** — gated, PIN-protected, owner-only |
 | `/mode business` on a chat | Turns that chat into an auto-responder that answers from your KB and **escalates to you** when a human is needed |
+| `/mode` (no target) | Lists your recent chats with their current mode to pick from — same-named chats are tagged with their last-active date so you set the right one |
 | `/remember`, `/memory` | Keeps durable notes per chat; recent context stays hot and old context fades, so it remembers what matters |
 | `/remind`, `/cron` | Schedules one-shot reminders and recurring tasks that survive restarts |
 

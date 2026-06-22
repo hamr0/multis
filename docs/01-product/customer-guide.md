@@ -372,7 +372,7 @@ The bot completely ignores messages in this chat. No archiving, no logs, no memo
 /mode off "WhatsApp Group"      # Set a specific chat to off
 ```
 
-`/mode` with no target lists your **recent** chats live from Beeper (the most recent ~24), each with its current mode — plus any chat you've already set a mode on, so it stays visible even after it drops out of the recent list. A chat that's neither recent nor already configured won't appear; set it by name with `/mode <mode> <name>`, which finds it live.
+`/mode` with no target lists your **recent** chats live from Beeper (the most recent ~24), each with its current mode — plus any chat you've already set a mode on, so it stays visible even after it drops out of the recent list. A chat that's neither recent nor already configured won't appear; set it by name with `/mode <mode> <name>`, which finds it live. If two chats share the same name (e.g. two messaging threads for one contact), each is tagged with its **last-active date** so you can tell which numbered entry is the live one — you still reply with the number.
 
 You manage Beeper chat modes from your command channel — your Beeper Note-to-self chat (and, if your setup also has a Telegram bot, from Telegram too):
 

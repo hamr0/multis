@@ -4,6 +4,15 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+### Fixed — `/mode` picker disambiguates same-titled chats
+
+When two chats share a title (e.g. two WhatsApp rooms for one contact, both shown as "Amr Hassan"), the numbered `/mode` picker rendered identical lines — so setting a mode could land on the *wrong* room with no error: a **silent no-op** (a business chat that never responds, because the room actually receiving messages stayed `off`). Colliding titles now carry their **last-active date** (`Amr Hassan · active 2026-06-22`) so the live room is obvious; selection stays by number, and uniquely-named chats are unchanged. Applies to every `/mode` list — the no-arg view, the "multiple matches" lists, the self-chat picker, and the business assign-chats picker.
+
+### Added — test coverage (internal)
+
+- Init **role ⟺ transport** binding + the role-switch flip, and `saveConfig` secret-file perms (`~/.multis` 0700, `config.json` 0600) — the 0.17.2 wizard had only mode-mapping coverage.
+- `tools.test.js` now sandboxes `setMultisDir` for the whole file, so tool-execution audit writes never touch the real `~/.multis/logs/audit.log` (the suite had been polluting the live account).
+
 ## [0.17.2] — 2026-06-22
 
 ### Changed — init wizard is intent-first; role ⟺ transport bound 1:1 (PRD §3g)
