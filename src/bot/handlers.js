@@ -1,6 +1,6 @@
 const path = require('path');
 const { logAudit } = require('../governance/audit');
-const { addAllowedUser, isOwner, saveConfig, backupConfig, updateChatMeta, getMultisDir, PATHS } = require('../config');
+const { addAllowedUser, isOwner, saveConfig, backupConfig, updateChatMeta, getMultisDir, PATHS, defaultModeForRole, roleLabel, normalizeRole } = require('../config');
 const { listSkills } = require('../skills/executor');
 const context = require('../context');
 const { createProvider, simpleGenerate } = require('../llm/provider-adapter');
@@ -1364,8 +1364,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
     const hasBeeperChats = beeperPlatform && config.platforms?.beeper?.enabled;
 
     if (!mode) {
-      const current = config.bot_mode || 'personal';
-      let statusMsg = `Bot mode: ${current}`;
+      let statusMsg = `Bot mode: ${roleLabel(config.bot_mode)}`;
       if (hasBeeperChats) {
         const allChats = await listBeeperChats(beeperPlatform, config);
         if (allChats && allChats.length > 0) {
@@ -1439,11 +1438,13 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
       return;
     }
 
-    // No target → set global bot_mode
-    config.bot_mode = mode;
+    // No target → change the global role. bot_mode is a ROLE (§3g), so store the
+    // canonical role, not the raw chat-mode word (only 'silent' reaches here —
+    // 'business' shows the menu, 'off' is blocked above). silent → personal-assistant.
+    config.bot_mode = normalizeRole(mode);
     saveConfig(config);
-    await platform.send(msg.chatId, `Bot mode set to: ${mode}`);
-    logAudit({ action: 'mode', user_id: msg.senderId, mode, scope: 'global' });
+    await platform.send(msg.chatId, `Bot mode set to: ${roleLabel(config.bot_mode)}`);
+    logAudit({ action: 'mode', user_id: msg.senderId, mode: config.bot_mode, scope: 'global' });
     return;
   }
 
@@ -1569,9 +1570,9 @@ function getChatMode(config, chatId) {
   // Ignore stale 'personal' values (was renamed to profile, not a valid mode)
   if (stored && stored !== 'personal') return stored;
   if (config.platforms?.beeper?.default_mode) return config.platforms.beeper.default_mode;
-  // Default: personal profile → silent, business profile → business
-  const botMode = config.bot_mode || 'personal';
-  return botMode === 'personal' ? 'silent' : 'business';
+  // Default mode for a non-owner chat is derived from the owner's role (§3g):
+  // business→business, personal-assistant(+legacy 'personal')→silent, personal-bot→off.
+  return defaultModeForRole(config.bot_mode);
 }
 
 /**

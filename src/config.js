@@ -378,6 +378,36 @@ function isOwner(userId, config, msg) {
   return String(config.owner_id) === String(userId);
 }
 
+// ---------------------------------------------------------------------------
+// Role ↔ mode (PRD §3g). `bot_mode` is the owner's choice of how the bot treats
+// NON-owner chats by default — the owner is always served regardless. Three
+// roles map to a default mode; the legacy 2-value `personal` is an alias for
+// `personal-assistant` (its old behavior was already "silent"), so existing
+// configs keep working with no migration.
+// ---------------------------------------------------------------------------
+const ROLES = {
+  'business':           { label: 'Business chatbot',   mode: 'business' }, // auto-respond to contacts
+  'personal-assistant': { label: 'Personal assistant', mode: 'silent' },   // log contacts, never reply; owner served fully
+  'personal-bot':       { label: 'Personal bot',       mode: 'off' },      // ignore contacts; owner-only
+};
+
+/** Normalize a stored bot_mode to a canonical role key (legacy 'personal' → assistant). */
+function normalizeRole(botMode) {
+  if (botMode === 'business') return 'business';
+  if (botMode === 'personal-bot') return 'personal-bot';
+  return 'personal-assistant'; // 'personal-assistant', legacy 'personal', or unset
+}
+
+/** Default mode applied to a non-owner chat for the given role. */
+function defaultModeForRole(botMode) {
+  return ROLES[normalizeRole(botMode)].mode;
+}
+
+/** Human label for a role (init/status/doctor display). */
+function roleLabel(botMode) {
+  return ROLES[normalizeRole(botMode)].label;
+}
+
 module.exports = {
   loadConfig,
   saveConfig,
@@ -385,6 +415,10 @@ module.exports = {
   updateChatMeta,
   addAllowedUser,
   isOwner,
+  ROLES,
+  normalizeRole,
+  defaultModeForRole,
+  roleLabel,
   generatePairingCode,
   ensureMultisDir,
   getMultisDir,

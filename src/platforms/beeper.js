@@ -8,7 +8,7 @@ const DEFAULT_MCP_URL = 'http://localhost:23375';  // beeperbox MCP transport (w
 const DEFAULT_POLL_INTERVAL = 3000;
 const MAX_PAGES_PER_TICK = 10; // has_more drain cap so one tick can't starve the loop
 const MAX_ASSET_BYTES = 25 * 1024 * 1024; // hard ceiling on a downloaded attachment (DoS guard)
-const { PATHS } = require('../config');
+const { PATHS, defaultModeForRole } = require('../config');
 
 /**
  * Beeper platform adapter — consumes beeperbox's MCP watch/send verbs.
@@ -346,8 +346,8 @@ class BeeperPlatform extends Platform {
     if (this.config.platforms?.beeper?.default_mode) return this.config.platforms.beeper.default_mode;
     // Personal chats (note-to-self) are admin command channels — never restrict
     if (this._personalChats.has(chatId)) return 'personal';
-    const botMode = this.config.bot_mode || 'personal';
-    return botMode === 'personal' ? 'silent' : 'business';
+    // Non-owner default mode is derived from the owner's role (§3g).
+    return defaultModeForRole(this.config.bot_mode);
   }
 
 }
