@@ -39,6 +39,66 @@ function makeClient({ url, token } = {}) {
   return new BeeperboxMcpClient({ url: url || DEFAULT_MCP_URL, token: token || null });
 }
 
+// ---------------------------------------------------------------------------
+// Deploy-shape detection (PRD §3f). multis talks to beeperbox over the MCP
+// verb surface only; lite and container are the SAME binary with an identical
+// surface, so they are wire-indistinguishable — we report local vs remote (the
+// honest signal) and cleanly reject a mis-pointed raw Beeper Desktop. The
+// discriminator was validated live: beeperbox → JSON-RPC result; raw Beeper
+// (:23373) → HTTP 404; nothing → ECONNREFUSED.
+// ---------------------------------------------------------------------------
+
+// Known raw Beeper Desktop ports (NOT a beeperbox). 23373/23374 = Desktop API,
+// 23380 = the container's internal Beeper API (host-mapped in some setups).
+const RAW_BEEPER_PORTS = new Set(['23373', '23374', '23380']);
+
+/** Where a beeperbox lives, from its URL host: 'local' (loopback) or 'remote'. */
+function deployLocation(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, '');
+    return (host === 'localhost' || host === '127.0.0.1' || host === '::1') ? 'local' : 'remote';
+  } catch {
+    return 'remote'; // unparseable → fail safe to the more cautious label
+  }
+}
+
+/** True if the URL points at a known raw Beeper Desktop port (not a beeperbox). */
+function isRawBeeperUrl(url) {
+  try {
+    return RAW_BEEPER_PORTS.has(new URL(url).port);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Classify a failed listAccounts() probe for UX messaging:
+ *   'needs-token'   — HTTP 401/403: a real (usually remote) beeperbox guarded by a token
+ *   'not-beeperbox' — a structured HTTP/JSON-RPC response that isn't beeperbox MCP
+ *                     (raw Beeper Desktop answers POST / with HTTP 404) → wrong service
+ *   'unreachable'   — no response at all (ECONNREFUSED / DNS / timeout: err carries no code)
+ */
+function classifyProbeFailure(err) {
+  const code = err && err.code;
+  if (code === 401 || code === 403) return 'needs-token';
+  if (code !== undefined) return 'not-beeperbox';
+  return 'unreachable';
+}
+
+/** A one-line, shape-aware hint for a failed probe (init + doctor share it). */
+function probeHint(err, url) {
+  const shape = classifyProbeFailure(err);
+  if (shape === 'needs-token') return 'auth failed — check the MCP token';
+  if (isRawBeeperUrl(url)) {
+    let port = '';
+    try { port = new URL(url).port; } catch { /* keep generic */ }
+    return `that looks like raw Beeper Desktop${port ? ` (port ${port})` : ''}, not a beeperbox — `
+      + 'multis only talks to beeperbox; run one in front (see https://github.com/hamr0/beeperbox)';
+  }
+  if (shape === 'not-beeperbox') return 'reachable, but that is not a beeperbox MCP endpoint — check the URL/port';
+  return 'unreachable — is beeperbox running at that URL?';
+}
+
 /**
  * Reachability + account list against beeperbox. Throws if unreachable
  * (caller decides retry/abort). Returns the normalized accounts array.
@@ -151,7 +211,10 @@ async function main() {
 }
 
 // Named exports for reuse in the init wizard (bin/multis.js)
-module.exports = { makeClient, listAccounts, accountLabel, findBotChat, updateConfig, DEFAULT_MCP_URL };
+module.exports = {
+  makeClient, listAccounts, accountLabel, findBotChat, updateConfig, DEFAULT_MCP_URL,
+  deployLocation, isRawBeeperUrl, classifyProbeFailure, probeHint,
+};
 
 // Run standalone if called directly
 if (require.main === module) {

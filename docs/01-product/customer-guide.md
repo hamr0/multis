@@ -127,27 +127,28 @@ multis init
 
 Run `multis init` to set everything up interactively. The wizard walks through four steps and can be re-run at any time to change settings.
 
-### Step 1: What do you want?
+### Step 1: What do you want multis to be?
 
-First, pick what the bot is *for*:
+One question picks both the role and the channel — they go together, so there's nothing else to choose:
 
 ```
-What do you need?
-  1) Personal assistant   — your private AI: commands, your docs, search
-  2) Business chatbot     — auto-responds to customers, escalates to you
+What do you want multis to be?
+  1) Personal bot        — just for you, on Telegram. Runs commands, searches your docs.
+  2) Personal assistant  — on Beeper. Runs stuff for you AND keeps up with your messengers
+                           (WhatsApp, Signal, +50) — logs your contacts, never replies to them.
+  3) Business chatbot    — on Beeper. Auto-responds to customers across every channel, escalates to you.
 ```
 
-Then the wizard branches on that choice:
+- **Personal bot → Telegram.** Just a Telegram bot, owner-only. Nothing else to install.
+- **Personal assistant → Beeper** and **Business chatbot → Beeper.** Beeper is the only channel that can *see and respond to your real contacts* across networks — a Telegram bot only sees people who message the bot directly. So both of these run through Beeper, controlled from your Note-to-self chat.
 
-**Personal — how do you want to run it?**
-- **1) Your personal bot** — just a Telegram bot. Nothing else to install.
-- **2) Personal bot + messenger assistant** — Telegram **+** Beeper, connecting all your messengers (WhatsApp · Signal · Telegram · Messenger + 50 more). Command it from Telegram or your Beeper Note-to-self.
-
-**Business — runs through Beeper.** A Telegram *bot* only sees people who message the bot directly — it can't reach your real contacts. To answer customers on their own channels you bridge them through Beeper, so business always uses Beeper, controlled from your Beeper Note-to-self. The wizard offers to also add Telegram as a backup admin channel.
+The difference between the two Beeper roles is purely how the bot treats **other people's** messages by default — *assistant* logs them so you can ask about them but never replies; *business* auto-responds. You're always served fully either way, and you can flip any single chat with `/mode` (e.g. tell the assistant to start replying to one person). Re-running `init` keeps your current choice unless you change it.
 
 ### Step 2: Connect Platforms
 
-**Telegram** (your personal bot, or a business admin channel):
+The wizard connects the channel your role implies — Telegram for *personal bot*, Beeper for *assistant*/*business*.
+
+**Telegram** (your personal bot):
 1. Open Telegram, search for `@BotFather`
 2. Send `/newbot`, pick a name and username
 3. Copy the bot token (looks like `123456:ABC-DEF...`) and paste it in
@@ -286,11 +287,11 @@ Changes made via bot commands (`/mode business`, `/mode`, `/agent`, `/pin`) are 
 
 ### Using Both Together
 
-The recommended setup for business use:
-- **Telegram** as your admin channel — manage the bot, run commands, monitor escalations
-- **Beeper** as the customer-facing channel — customers message via WhatsApp/Signal/etc., the bot auto-responds
+The setup for business use is a single channel — **Beeper**:
+- Customers message via WhatsApp/Signal/etc. and the bot auto-responds
+- You manage the bot, run commands, and receive escalations from your Beeper **Note-to-self** chat
 
-Set this up with `multis init` option 3 (Business chatbot).
+Set this up with `multis init` option 3 (Business chatbot). A Telegram bot can't see your real contacts, so business doesn't use one — your Note-to-self is the control channel.
 
 ---
 
@@ -373,7 +374,7 @@ The bot completely ignores messages in this chat. No archiving, no logs, no memo
 
 `/mode` with no target lists your **recent** chats live from Beeper (the most recent ~24), each with its current mode — plus any chat you've already set a mode on, so it stays visible even after it drops out of the recent list. A chat that's neither recent nor already configured won't appear; set it by name with `/mode <mode> <name>`, which finds it live.
 
-From Telegram (admin channel), you can manage Beeper chat modes remotely:
+You manage Beeper chat modes from your command channel — your Beeper Note-to-self chat (and, if your setup also has a Telegram bot, from Telegram too):
 
 ```
 /mode business Acme Corp        # Set Acme Corp's Beeper chat to business
@@ -414,7 +415,7 @@ Type "cancel" at any step to abort. Any `/command` typed during the wizard cance
 
 Interactive prompts don't wait forever: a numbered picker (mode/index/business menu) lapses after a few minutes and the setup wizard after a longer window, after which the bot tells you the prompt expired and to re-run the command rather than treating a late reply as a question. Tune the windows under `interaction` in `~/.multis/config.json` (`picker_ttl_minutes`, `wizard_ttl_minutes`). Pending prompts are in-memory only, so restarting multis cancels any half-finished picker.
 
-Escalation notifications are sent automatically to all admin channels (Telegram + Beeper Note-to-self) — no manual configuration needed.
+Escalation notifications are sent automatically to the owner's command channel — your Beeper Note-to-self (and Telegram too, if your setup has a bot) — no manual configuration needed.
 
 ### How It Works
 

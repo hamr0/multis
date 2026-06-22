@@ -173,6 +173,22 @@ describe('BeeperPlatform', () => {
       assert.strictEqual(bp._getChatMode('selfChat'), 'personal');
     });
 
+    it('returns off when bot_mode is personal-bot (§3g — owner-only role)', () => {
+      const { BeeperPlatform } = loadBeeper();
+      const cfg = makeConfig();
+      cfg.bot_mode = 'personal-bot';
+      const bp = new BeeperPlatform(cfg);
+      assert.strictEqual(bp._getChatMode('chat1'), 'off');
+    });
+
+    it('returns business when bot_mode is business', () => {
+      const { BeeperPlatform } = loadBeeper();
+      const cfg = makeConfig();
+      cfg.bot_mode = 'business';
+      const bp = new BeeperPlatform(cfg);
+      assert.strictEqual(bp._getChatMode('chat1'), 'business');
+    });
+
     it('uses default_mode from config', () => {
       const { BeeperPlatform } = loadBeeper();
       const bp = new BeeperPlatform(makeConfig({ default_mode: 'business' }));

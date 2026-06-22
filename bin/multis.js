@@ -6,7 +6,7 @@ const path = require('path');
 const readline = require('readline');
 const crypto = require('crypto');
 
-const { PATHS, getMultisDir, saveConfig } = require('../src/config');
+const { PATHS, getMultisDir, saveConfig, roleLabel, normalizeRole } = require('../src/config');
 const MULTIS_DIR = getMultisDir();
 const PID_PATH = PATHS.pid();
 const CONFIG_PATH = PATHS.config();
@@ -140,7 +140,7 @@ async function runInit() {
   const templatePath = path.join(__dirname, '..', '.multis-template', 'config.json');
   if (hadSavedConfig) {
     config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
-    const profile = config.bot_mode === 'business' ? 'Business chatbot' : 'Personal assistant';
+    const profile = roleLabel(config.bot_mode);
     const plats = [
       config.platforms?.telegram?.enabled && 'Telegram',
       config.platforms?.beeper?.enabled && 'Beeper',
@@ -152,70 +152,54 @@ async function runInit() {
   }
 
   // -----------------------------------------------------------------------
-  // Step 1: What do you need?
+  // Step 1: What do you want multis to be?
+  //
+  // Intent-first (§3g): the role IS the choice, and role ⟺ transport is bound
+  // 1:1 — Personal bot = Telegram (owner-only), Personal assistant / Business =
+  // Beeper (the only channel that can see + respond to the owner's real contacts
+  // across networks). So the intent uniquely determines the channel; there's no
+  // separate platform question, no orphan combos.
   // -----------------------------------------------------------------------
-  step(1, TOTAL_STEPS, 'What do you need?');
+  step(1, TOTAL_STEPS, 'What do you want multis to be?');
 
   let useTelegram = false;
   let useBeeper = false;
+
+  // choice → role → transport
+  const ROLE_BY_CHOICE = { '1': 'personal-bot', '2': 'personal-assistant', '3': 'business' };
 
   // Check if we have a valid existing setup to offer Enter-to-keep
   const hasExistingSetup = hadSavedConfig && config.bot_mode &&
     (config.platforms?.telegram?.enabled || config.platforms?.beeper?.enabled);
 
   if (hasExistingSetup) {
-    const profile = config.bot_mode === 'business' ? 'Business chatbot' : 'Personal assistant';
-    const plats = [
-      config.platforms?.telegram?.enabled && 'Telegram',
-      config.platforms?.beeper?.enabled && 'Beeper',
-    ].filter(Boolean).join(' + ');
-    console.log(`  Current: ${profile} (${plats})`);
-    console.log('');
+    const chan = config.platforms?.beeper?.enabled ? 'Beeper' : 'Telegram';
+    console.log(`  Current: ${roleLabel(config.bot_mode)} (${chan})\n`);
   }
 
-  console.log('  1) Personal assistant   ' + c.dim('— your private AI: commands, your docs, search'));
-  console.log('  2) Business chatbot      ' + c.dim('— auto-responds to customers, escalates to you'));
+  console.log('  1) Personal bot        ' + c.dim('— just for you, on Telegram. Runs commands, searches your docs.'));
+  console.log('  2) Personal assistant  ' + c.dim('— on Beeper. Runs stuff for you AND keeps up with your messengers'));
+  console.log('                         ' + c.dim('  (WhatsApp, Signal, +50) — logs your contacts, never replies to them.'));
+  console.log('  3) Business chatbot    ' + c.dim('— on Beeper. Auto-responds to customers across every channel, escalates to you.'));
 
-  const modeDefault = hasExistingSetup ? '' : '1';
-  const modeHint = hasExistingSetup ? 'Enter to keep current, or 1/2' : '1/2';
-  const modeChoice = (await ask(`\nChoose (${modeHint}) [${modeDefault || 'keep'}]: `)).trim() || modeDefault;
+  const roleDefault = hasExistingSetup ? '' : '1';
+  const roleHint = hasExistingSetup ? 'Enter to keep current, or 1/2/3' : '1/2/3';
+  const roleChoice = (await ask(`\nChoose (${roleHint}) [${roleDefault || 'keep'}]: `)).trim() || roleDefault;
 
-  if (!modeChoice && hasExistingSetup) {
-    // Keep existing setup entirely
+  if (!roleChoice && hasExistingSetup) {
+    // Keep the existing role + channel; canonicalize a legacy 'personal' value.
+    config.bot_mode = normalizeRole(config.bot_mode);
     useTelegram = !!config.platforms?.telegram?.enabled;
     useBeeper = !!config.platforms?.beeper?.enabled;
-    const profile = config.bot_mode === 'business' ? 'Business chatbot' : 'Personal assistant';
-    const plats = [useTelegram && 'Telegram', useBeeper && 'Beeper'].filter(Boolean).join(' + ');
-    console.log(c.ok(`Keeping: ${profile} (${plats})`));
+    console.log(c.ok(`Keeping: ${roleLabel(config.bot_mode)}`));
   } else {
-    config.bot_mode = modeChoice === '2' ? 'business' : 'personal';
-
-    if (config.bot_mode === 'personal') {
-      // Branch: Telegram-only bot, or Telegram + Beeper (messenger reach)
-      console.log(`\n${c.bold('Personal')} — how do you want to run it?`);
-      console.log('  1) Your personal bot');
-      console.log('     ' + c.dim('Just a Telegram bot. Nothing else to install.'));
-      console.log('  2) Personal bot + messenger assistant');
-      console.log('     ' + c.dim('Telegram + Beeper — connects all your messengers:'));
-      console.log('     ' + c.dim('WhatsApp · Signal · Telegram · Messenger + 50 more.'));
-      console.log('     ' + c.dim('Command it from Telegram or your Beeper Note-to-self.'));
-      const pChoice = (await ask('\nChoose (1/2) [1]: ')).trim() || '1';
-      useTelegram = true;            // both personal paths include the Telegram bot
-      useBeeper = pChoice === '2';   // option 2 adds Beeper for messenger reach
-    } else {
-      // Business runs through Beeper — a Telegram bot can't see your real contacts,
-      // so reaching customers on their own channels requires the Beeper bridge.
-      console.log(`\n${c.bold('Business')} — runs through Beeper`);
-      console.log('  ' + c.dim('Reaches customers across every channel you\'ve bridged:'));
-      console.log('  ' + c.dim('WhatsApp · Signal · Telegram · Messenger + 50 more.'));
-      console.log('  ' + c.dim('You control it from your Beeper Note-to-self.'));
-      useBeeper = true;
-      const addTg = (await ask('\nAlso add Telegram as a backup admin channel? (y/n) [n]: ')).trim().toLowerCase();
-      if (addTg === 'y' || addTg === 'yes') useTelegram = true;
-    }
-
-    const platformNames = [useTelegram && 'Telegram', useBeeper && 'Beeper'].filter(Boolean).join(' + ');
-    console.log(c.ok(`${config.bot_mode} mode — ${platformNames}`));
+    const role = ROLE_BY_CHOICE[roleChoice] || 'personal-bot';
+    config.bot_mode = role;
+    // role ⟺ transport. Step 2 connects the implied channel AND disables the
+    // other (its else-branches), so switching role cleanly flips transport.
+    if (role === 'personal-bot') useTelegram = true;
+    else useBeeper = true;
+    console.log(c.ok(`${roleLabel(role)} — ${useBeeper ? 'Beeper' : 'Telegram'}`));
   }
 
   if (!config.platforms) config.platforms = {};
@@ -375,7 +359,7 @@ async function runInit() {
 
       if (list) {
         const accts = list.map(beeper.accountLabel).join(', ') || 'no accounts linked yet';
-        console.log(c.ok(`Found beeperbox — ${list.length} account${list.length !== 1 ? 's' : ''} (${accts})`));
+        console.log(c.ok(`Found beeperbox (${beeper.deployLocation(mcpUrl)}) — ${list.length} account${list.length !== 1 ? 's' : ''} (${accts})`));
         const ans = (await ask(`Use this one? ${c.dim('[Enter = yes · or paste a different URL]')} `)).trim();
         if (/^https?:\/\//i.test(ans)) {
           mcpUrl = ans;          // a different endpoint — re-resolve below
@@ -402,17 +386,14 @@ async function runInit() {
         try {
           list = await beeper.listAccounts(client);
         } catch (err) {
-          const hint = (err.code === 401 || err.code === 403)
-            ? 'auth failed — check the MCP token'
-            : 'unreachable — is beeperbox running at that URL?';
-          console.log(c.warn(hint));
+          console.log(c.warn(beeper.probeHint(err, mcpUrl)));
           await ask('Press Enter to retry...');
           try { list = await beeper.listAccounts(client); } catch { /* handled below */ }
         }
       }
 
       if (list) {
-        console.log(c.ok(`beeperbox reachable — ${list.length} account${list.length !== 1 ? 's' : ''}`));
+        console.log(c.ok(`beeperbox reachable (${beeper.deployLocation(mcpUrl)}) — ${list.length} account${list.length !== 1 ? 's' : ''}`));
         for (const acc of list) summary.beeperAccounts.push(beeper.accountLabel(acc));
 
         if (!config.platforms) config.platforms = {};
@@ -670,7 +651,7 @@ async function runInit() {
   console.log(`\n${c.bold('Setup Complete')}\n`);
 
   const rows = [];
-  rows.push(['Mode', config.bot_mode]);
+  rows.push(['Mode', roleLabel(config.bot_mode)]);
 
   // Telegram
   if (summary.telegram) {
@@ -891,7 +872,7 @@ async function runDoctor() {
   }
 
   // Mode
-  profileRows.push(['Mode', config?.bot_mode || yellow('not set')]);
+  profileRows.push(['Mode', config?.bot_mode ? roleLabel(config.bot_mode) : yellow('not set')]);
 
   // Telegram
   if (config?.platforms?.telegram?.enabled) {
@@ -918,15 +899,17 @@ async function runDoctor() {
       }
     }
     const netStr = networks.size > 0 ? ` (${[...networks].join(', ')})` : '';
-    let beeperReachable = false;
+    const { makeClient, listAccounts, deployLocation, probeHint } = require('../src/cli/setup-beeper');
+    const fullUrl = url.startsWith('http') ? url : `http://${url}`;
+    let beeperVal;
     try {
-      const { makeClient, listAccounts } = require('../src/cli/setup-beeper');
-      const fullUrl = url.startsWith('http') ? url : `http://${url}`;
       await listAccounts(makeClient({ url: fullUrl, token: config.platforms.beeper.mcp_token }));
-      beeperReachable = true;
-    } catch { /* beeperbox not reachable */ }
-    const beeperStatus = beeperReachable ? ok : fail;
-    profileRows.push(['Beeper', `${host}${netStr} ${beeperStatus}`]);
+      beeperVal = `${host}${netStr} ${dim(`(${deployLocation(fullUrl)})`)} ${ok}`;
+    } catch (err) {
+      // Reachable-but-not-a-beeperbox / raw Beeper / unreachable — say which.
+      beeperVal = `${host}${netStr} ${fail} ${dim(probeHint(err, fullUrl))}`;
+    }
+    profileRows.push(['Beeper', beeperVal]);
   } else {
     profileRows.push(['Beeper', dim('disabled')]);
   }

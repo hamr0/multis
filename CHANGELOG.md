@@ -4,6 +4,28 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+## [0.17.2] — 2026-06-22
+
+### Changed — init wizard is intent-first; role ⟺ transport bound 1:1 (PRD §3g)
+
+`multis init` no longer forks Personal/Business up front and sub-branches the platform choice. Step 1 is now a single 3-way intent question, and the role determines the channel:
+
+- **Personal bot → Telegram** (just for you; runs commands, searches your docs)
+- **Personal assistant → Beeper** (runs stuff for you AND keeps up with your messengers — logs contacts, never replies to them)
+- **Business chatbot → Beeper** (auto-responds to customers across every channel, escalates to you)
+
+Rationale: a Telegram-only "admin" can't *see* your real contacts and a secondary admin channel is useless, so transport is bound to role rather than offered as a matrix. With the binding, the intent uniquely determines the channel — so the cleanest flow is intent-first (no role-at-the-end step, no orphan combos, no "business-without-Beeper" warning). Re-running `init` is update-in-place (shows the current role, Enter to keep, overrides only what changes; never wipes).
+
+- `config.bot_mode` is now **3-valued** (`business` / `personal-assistant` / `personal-bot`) via one shared `defaultModeForRole` helper driving both `getChatMode` sites (handlers + beeper): business→business, assistant→silent, bot→off. Legacy `personal` is aliased to `personal-assistant` — **no migration**, existing configs keep their behavior.
+- Cleaned the M9-flagged global-`/mode` footgun: it now stores a canonical role, not a raw chat-mode word.
+
+### Added — init/doctor beeperbox deploy-shape clarity (PRD §3f)
+
+- `init` and `doctor` now label a discovered beeperbox as **local** vs **remote** (from the URL).
+- Pointing setup at a **raw Beeper Desktop** port (`:23373`/`:23374`/`:23380`) is detected and clearly rejected (*"that's raw Beeper Desktop, not a beeperbox — run one in front"*) instead of a generic "unreachable".
+- Failure copy distinguishes *reachable-but-not-a-beeperbox* from *nothing-there* (connection refused). Discriminator validated live against `:23375` (beeperbox), `:23373` (raw Beeper), and a dead port.
+- *Note:* lite-vs-docker is **not** detected — they are the same binary with an identical MCP verb surface, so a true distinction would need a new beeperbox server-info field (not faked, no cosmetic prompt).
+
 ## [0.17.1] — 2026-06-22
 
 M9 — intent-first command dispatch + the single-owner model. Host/app actions now resolve to a declared capability and run through one `runGovernedAction` core (intent → arg-validation → Axis-A floor → ceremony → execute → audit); the limited-admin tier is gone (single owner + customers). Merged to `main` after the full LIVE‡ security gate (C1 + SEC1–SEC12 + P1/P3) and a pre-merge `/security` pass.

@@ -183,3 +183,35 @@ describe('loadConfig — default merging', () => {
     assert.match(code, /^[0-9A-F]{6}$/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Role ↔ default mode (PRD §3g). The owner's role sets how non-owner chats are
+// treated by default. The legacy 2-value `personal` MUST stay an alias for
+// personal-assistant so existing configs keep their behavior (no migration).
+// ---------------------------------------------------------------------------
+describe('role ↔ mode (§3g)', () => {
+  const { defaultModeForRole, roleLabel, normalizeRole } = require('../src/config');
+
+  it('maps the three roles to their non-owner default mode', () => {
+    assert.equal(defaultModeForRole('business'), 'business');
+    assert.equal(defaultModeForRole('personal-assistant'), 'silent');
+    assert.equal(defaultModeForRole('personal-bot'), 'off');
+  });
+
+  it('treats legacy "personal" as personal-assistant (silent) — back-compat', () => {
+    assert.equal(defaultModeForRole('personal'), 'silent');
+    assert.equal(normalizeRole('personal'), 'personal-assistant');
+  });
+
+  it('defaults an unset/unknown role to personal-assistant (silent), never auto-respond', () => {
+    assert.equal(defaultModeForRole(undefined), 'silent');
+    assert.equal(defaultModeForRole('garbage'), 'silent');
+  });
+
+  it('gives a human label per role', () => {
+    assert.equal(roleLabel('business'), 'Business chatbot');
+    assert.equal(roleLabel('personal-assistant'), 'Personal assistant');
+    assert.equal(roleLabel('personal-bot'), 'Personal bot');
+    assert.equal(roleLabel('personal'), 'Personal assistant'); // legacy
+  });
+});
