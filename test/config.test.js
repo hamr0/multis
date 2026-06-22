@@ -215,3 +215,82 @@ describe('role ↔ mode (§3g)', () => {
     assert.equal(roleLabel('personal'), 'Personal assistant'); // legacy
   });
 });
+
+// The init wizard binds role ⟺ transport 1:1 (PRD §3g): personal-bot = Telegram,
+// personal-assistant / business = Beeper. These functions ARE the wizard's Step-1
+// logic (bin/multis.js routes through applyRoleTransport), so a regression in the
+// binding — or in the role-switch flip — fails here.
+describe('role ⟺ transport binding (§3g, init Step 1)', () => {
+  const { transportForRole, applyRoleTransport, ROLE_BY_CHOICE } = require('../src/config');
+
+  it('binds personal-bot to Telegram, the other roles to Beeper', () => {
+    assert.deepEqual(transportForRole('personal-bot'), { useTelegram: true, useBeeper: false });
+    assert.deepEqual(transportForRole('personal-assistant'), { useTelegram: false, useBeeper: true });
+    assert.deepEqual(transportForRole('business'), { useTelegram: false, useBeeper: true });
+  });
+
+  it('canonicalizes legacy/unknown roles before binding (never Telegram by accident)', () => {
+    assert.deepEqual(transportForRole('personal'), { useTelegram: false, useBeeper: true }); // legacy → assistant → Beeper
+    assert.deepEqual(transportForRole('garbage'), { useTelegram: false, useBeeper: true });  // unknown → assistant → Beeper
+  });
+
+  it('maps the init menu choices to the three roles', () => {
+    assert.equal(ROLE_BY_CHOICE['1'], 'personal-bot');
+    assert.equal(ROLE_BY_CHOICE['2'], 'personal-assistant');
+    assert.equal(ROLE_BY_CHOICE['3'], 'business');
+  });
+
+  it('switching to personal-bot flips OFF Beeper, leaves Telegram for the connect step', () => {
+    // Start from a Beeper-role config with Beeper live (the assistant→bot switch).
+    const config = { bot_mode: 'personal-assistant', platforms: { beeper: { enabled: true }, telegram: { enabled: false } } };
+    const binding = applyRoleTransport(config, 'personal-bot');
+
+    assert.equal(config.bot_mode, 'personal-bot');
+    assert.equal(config.platforms.beeper.enabled, false, 'old Beeper transport is disabled');
+    assert.deepEqual(binding, { useTelegram: true, useBeeper: false });
+    // It must NOT pre-enable Telegram — that is the network-gated connect step's job.
+    assert.notEqual(config.platforms.telegram.enabled, true, 'selected transport is left for the connect step');
+  });
+
+  it('switching to a Beeper role flips OFF Telegram', () => {
+    const config = { bot_mode: 'personal-bot', platforms: { telegram: { enabled: true }, beeper: { enabled: false } } };
+    const binding = applyRoleTransport(config, 'business');
+
+    assert.equal(config.bot_mode, 'business');
+    assert.equal(config.platforms.telegram.enabled, false, 'old Telegram transport is disabled');
+    assert.deepEqual(binding, { useTelegram: false, useBeeper: true });
+    assert.notEqual(config.platforms.beeper.enabled, true, 'selected transport is left for the connect step');
+  });
+
+  it('creates missing platform objects so the flip never throws on a bare config', () => {
+    const config = {};
+    applyRoleTransport(config, 'personal-bot');
+    assert.equal(config.platforms.beeper.enabled, false);
+    assert.equal(config.bot_mode, 'personal-bot');
+  });
+});
+
+// init saves via saveConfig so the secret-bearing files land owner-only
+// immediately (config.json holds the PIN hash + LLM API key + bot/MCP tokens).
+describe('saveConfig — secret-file perms (init §10 S1)', () => {
+  const { saveConfig, setMultisDir, PATHS } = require('../src/config');
+  let parent, tmpDir;
+
+  before(() => {
+    parent = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-perms-test-'));
+    // A subdir saveConfig CREATES itself — so it lands at the default 0755 and the
+    // assertion below actually proves the chmod-to-0700 (not mkdtemp's own 0700).
+    tmpDir = path.join(parent, 'multis-home');
+    setMultisDir(tmpDir);
+  });
+  after(() => { setMultisDir(null); fs.rmSync(parent, { recursive: true, force: true }); });
+
+  it('writes ~/.multis at 0700 and config.json at 0600', () => {
+    saveConfig({ owner_id: '1', security: { pin_hash: 'deadbeef' }, llm: { apiKey: 'sk-secret' } });
+
+    const dirMode = fs.statSync(tmpDir).mode & 0o777;
+    const cfgMode = fs.statSync(PATHS.config()).mode & 0o777;
+    assert.equal(dirMode, 0o700, `~/.multis should be 0700, got ${dirMode.toString(8)}`);
+    assert.equal(cfgMode, 0o600, `config.json should be 0600, got ${cfgMode.toString(8)}`);
+  });
+});
