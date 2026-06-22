@@ -79,6 +79,11 @@ async function runGovernedAction({ capability, args = {}, ctx = {}, deps = {} })
   if (deps.floor) {
     const verdict = await deps.floor(cap, args, ctx);
     if (verdict !== true) {
+      // Audit parity: like denied-owner above, a floor deny must leave an
+      // audit.log trace. The slash door's bareguard policy also records it to
+      // gate.jsonl; this keeps both logs in sync so a denied attempt is never
+      // invisible to an audit.log reader.
+      if (deps.audit) await deps.audit(plainIntent(cap, args, 'denied'), { capability: cap.name, ctx, status: 'denied-floor' }).catch(() => {});
       return { kind: RESULT.DENIED, ok: false, reason: 'floor', message: typeof verdict === 'string' ? verdict : undefined };
     }
   }

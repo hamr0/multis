@@ -20,6 +20,11 @@ const { execCommand, execArgv, readFile } = require('../skills/executor');
 // Prefer execArgv (no shell at all) wherever a single command suffices.
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
+// Allowed media_control actions — single-sourced into both the schema enum and
+// the runtime guard. The schema enum is advisory only (the adapter does not
+// enforce it), so the execute fn MUST re-check before the value reaches a command.
+const MEDIA_ACTIONS = ['play', 'pause', 'play-pause', 'next', 'previous', 'stop'];
+
 const TOOLS = [
   // -------------------------------------------------------------------------
   // Universal tools (all platforms)
@@ -94,8 +99,12 @@ const TOOLS = [
       const dir = (searchPath || '~').replace(/^~/, process.env.HOME || '');
       // argv, no shell: pattern/dir/flags reach grep literally, so `$()`, `;`,
       // backticks etc. cannot inject. `--` terminates flags so a pattern
-      // starting with `-` is treated as the pattern, not an option.
+      // starting with `-` is treated as the pattern, not an option. Still
+      // allowlist the flags: an arbitrary grep option (`-f <file>`, `--include`,
+      // `-r /`) is a read-amplification / behavior-change vector. Permit only the
+      // safe short flags (combinable, e.g. `-rn`, `-rni`).
       const optArgs = (flags || '-rn').split(/\s+/).filter(Boolean);
+      if (!optArgs.every((f) => /^-[rniwlcH]+$/.test(f))) return 'Unsupported grep option.';
       const result = await execArgv('grep', [...optArgs, '--', pattern, dir], ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.output || 'No matches found.';
@@ -115,12 +124,16 @@ const TOOLS = [
     },
     execute: async ({ name, path: searchPath }, ctx) => {
       const dir = (searchPath || '~').replace(/^~/, process.env.HOME || '');
+      // `find` has no `--`, and a leading-`-` argument is parsed as an EXPRESSION
+      // / action (`-delete`, `-fprint <file>`, …), not a path — a path-arg
+      // injection that turns this read tool into a destructive primitive. Reject
+      // any path that find could read as an option. (`$()`/backticks are already
+      // inert: execArgv runs no shell.)
+      if (/^-/.test(dir)) return 'Invalid path.';
       // Case-insensitive substring by default (-iname '*name*') so a partial name
       // matches the real file incl. its extension; honor an explicit glob as-is.
       const hasGlob = /[*?[\]]/.test(name);
       const pattern = hasGlob ? name : `*${name}*`;
-      // argv, no shell: dir/pattern reach find literally, so `$()`/backticks in
-      // the name cannot inject. (find has no `--`; dir is owner-supplied.)
       const result = await execArgv('find', [dir, '-maxdepth', '6', '-iname', pattern], ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.output || 'No files found.';
@@ -271,25 +284,32 @@ const TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['play', 'pause', 'play-pause', 'next', 'previous', 'stop'], description: 'Playback action' },
+        action: { type: 'string', enum: MEDIA_ACTIONS, description: 'Playback action' },
         volume: { type: 'number', description: 'Set volume percentage (0-100). Omit for playback actions.' }
       },
       required: []
     },
     execute: async ({ action, volume }, ctx) => {
       if (volume !== undefined) {
-        const cmd = ctx.runtimePlatform === 'linux'
-          ? `pactl set-sink-volume @DEFAULT_SINK@ ${Math.round(volume)}%`
-          : `osascript -e 'set volume output volume ${Math.round(volume)}'`;
-        const result = await execCommand(cmd, ctx.senderId);
+        // Clamp to a finite 0-100 integer — never interpolate a model-supplied
+        // value into a command; run via argv (no shell) for good measure.
+        const v = Math.round(Number(volume));
+        if (!Number.isFinite(v) || v < 0 || v > 100) return 'Volume must be 0-100.';
+        const result = ctx.runtimePlatform === 'linux'
+          ? await execArgv('pactl', ['set-sink-volume', '@DEFAULT_SINK@', `${v}%`], ctx.senderId)
+          : await execArgv('osascript', ['-e', `set volume output volume ${v}`], ctx.senderId);
         if (result.denied) return `Denied: ${result.reason}`;
-        return result.success ? `Volume set to ${Math.round(volume)}%` : result.output;
+        return result.success ? `Volume set to ${v}%` : result.output;
       }
       if (!action) return 'Specify an action (play, pause, next, previous) or a volume.';
-      const cmd = ctx.runtimePlatform === 'linux'
-        ? `playerctl ${action}`
-        : `osascript -e 'tell application "Music" to ${action === 'play-pause' ? 'playpause' : action}'`;
-      const result = await execCommand(cmd, ctx.senderId);
+      // The model is assumed compromised by content injection, and the schema enum
+      // is NOT enforced at the adapter — validate against the allowlist BEFORE the
+      // value reaches a command, and run via argv (no shell). Closes the prior
+      // `playerctl ${action}` injection (`action:"pause; touch X"` → RCE).
+      if (!MEDIA_ACTIONS.includes(action)) return `Invalid action. Use one of: ${MEDIA_ACTIONS.join(', ')}.`;
+      const result = ctx.runtimePlatform === 'linux'
+        ? await execArgv('playerctl', [action], ctx.senderId)
+        : await execArgv('osascript', ['-e', `tell application "Music" to ${action === 'play-pause' ? 'playpause' : action}`], ctx.senderId);
       if (result.denied) return `Denied: ${result.reason}`;
       return result.success ? `Media: ${action}` : result.output;
     }

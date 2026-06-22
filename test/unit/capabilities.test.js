@@ -79,6 +79,16 @@ test('shell severity is resolved per-command (3-tier)', () => {
   assert.strictEqual(classifyEffectiveSeverity(sh, { command: 'rm -rf ~/*' }, DENYLIST), SEVERITY.CATASTROPHIC);
 });
 
+test('F1: a chained destructive command classifies destructive, not benign (scan all segments)', () => {
+  // The destructive token is NOT the command head — without scanning every
+  // segment, commandHead reads `ls`/`echo` and the line misclassifies benign
+  // (then runs with no PIN if the metachar floor is ever relaxed).
+  const sh = getCapability('run_shell');
+  assert.strictEqual(classifyEffectiveSeverity(sh, { command: 'ls; rm -rf /tmp/x' }, DENYLIST), SEVERITY.DESTRUCTIVE);
+  assert.strictEqual(classifyEffectiveSeverity(sh, { command: 'echo hi && rm notes.txt' }, DENYLIST), SEVERITY.DESTRUCTIVE);
+  assert.strictEqual(classifyEffectiveSeverity(sh, { command: 'cat f | sudo tee g' }, DENYLIST), SEVERITY.DESTRUCTIVE);
+});
+
 test('set_mode(off) escalates to destructive; other modes stay benign', () => {
   const m = getCapability('set_mode');
   assert.strictEqual(classifyEffectiveSeverity(m, { target: 'Amr', mode: 'silent' }), SEVERITY.BENIGN);

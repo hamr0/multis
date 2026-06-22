@@ -202,6 +202,28 @@ describe('createGate — end-to-end with fileless audit', () => {
     assert.match(verdict, /\[deny:/);
   });
 
+  // Defense-in-depth: the secret-store / credential deny entries (shipped in the
+  // template) must actually fence the file tools — including when the model emits a
+  // `~`-form path, which the translator expands so it matches the (~-expanded) deny
+  // entry. Proves the expansion + prefix-deny combination, not just the mechanism.
+  it('fs.deny fences the secret store + ~/.ssh, even via a ~-form path', async () => {
+    const home = process.env.HOME;
+    const b = await createGate({
+      config: { security: { max_cost_per_run: 1.0, checkpoint_tools: [] } },
+      governance: { commands: GOV.commands, paths: { allowed: ['/'], denied: ['~/.multis/config.json', '~/.ssh', '/etc/shadow'] } },
+      fileless: true,
+      humanPrompt: async () => ({ decision: 'deny' }),
+    });
+    // ~-form read of the secret store → expanded → matches the deny entry.
+    assert.match(await b.policy('read_file', { path: '~/.multis/config.json' }, { isOwner: true }), /\[deny:/);
+    assert.match(await b.policy('read_file', { path: `${home}/.multis/config.json` }, { isOwner: true }), /\[deny:/);
+    // ~/.ssh fences files INSIDE it (prefix match), and grep_files (content read) too.
+    assert.match(await b.policy('read_file', { path: '~/.ssh/id_rsa' }, { isOwner: true }), /\[deny:/);
+    assert.match(await b.policy('grep_files', { pattern: 'x', path: '~/.ssh' }, { isOwner: true }), /\[deny:/);
+    // a NON-denied read still passes (the fence isn't over-broad).
+    assert.strictEqual(await b.policy('read_file', { path: `${home}/Documents/notes.txt` }, { isOwner: true }), true);
+  });
+
   it('audit captures gate decisions in-memory', () => {
     const lines = bundle.gate.audit.entries;
     assert.ok(lines.length > 0);

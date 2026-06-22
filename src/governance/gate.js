@@ -116,10 +116,15 @@ function commandHead(cmd) {
   return head.toLowerCase();
 }
 // Destructive = the governance denylist (rm/mv-class, chmod, kill, …) + `sudo`
-// itself. PIN-gated (runs after a correct PIN).
+// itself. PIN-gated (runs after a correct PIN). Scans EVERY segment of a chained
+// command (`;`/`&&`/`||`/`|`), like isCatastrophic — so `ls; rm -rf x` classifies
+// destructive on the `rm`, not benign on the `ls` head. (Chained commands are
+// also denied outright by the bash metachar floor; scanning all segments keeps
+// classification from silently depending on that floor — defense-in-depth.)
 function makeDestructiveCheck(denylist) {
   const set = new Set((denylist || []).map((c) => String(c).toLowerCase()));
-  return (cmd) => set.has('sudo') && /^\s*sudo\b/i.test(cmd) ? true : set.has(commandHead(cmd));
+  const isSeg = (seg) => (set.has('sudo') && /^\s*sudo\b/i.test(seg) ? true : set.has(commandHead(seg)));
+  return (cmd) => String(cmd || '').split(/(?:;|&&|\|\||\|)/).some(isSeg);
 }
 
 /**

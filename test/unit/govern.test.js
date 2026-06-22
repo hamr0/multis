@@ -146,3 +146,25 @@ test('a declined destructive ceremony is audited as denied-ceremony', async () =
   assert.strictEqual(calls.audit.length, 1, 'the declined attempt MUST leave a trace');
   assert.strictEqual(calls.auditMeta[0].status, 'denied-ceremony');
 });
+
+// Audit parity (F5): an Axis-A floor (bareguard) deny on the slash door must ALSO
+// land in audit.log — without it the denial showed only in gate.jsonl, breaking
+// parity with the denied-owner / denied-ceremony traces above.
+test('an Axis-A floor deny is audited as denied-floor', async () => {
+  const audit = [];
+  const meta = [];
+  let ran = 0;
+  const deps = {
+    denylist: DENYLIST,
+    floor: async () => 'Denied: command not permitted',  // bareguard floor denies
+    execute: async () => { ran += 1; },
+    audit: async (line, m) => { audit.push(line); meta.push(m); },
+  };
+  const r = await runGovernedAction({ capability: 'run_shell', args: { command: 'make' }, ctx: OWNER, deps });
+  assert.strictEqual(r.kind, RESULT.DENIED);
+  assert.strictEqual(r.reason, 'floor');
+  assert.strictEqual(ran, 0, 'a floor deny runs nothing');
+  assert.strictEqual(audit.length, 1, 'the floor-denied attempt MUST leave a trace');
+  assert.match(audit[0], /run_shell/);
+  assert.strictEqual(meta[0].status, 'denied-floor');
+});

@@ -112,6 +112,55 @@ describe('Tool definitions', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it('media_control rejects a non-enum action and does NOT execute it (RCE regression)', async () => {
+    // Security regression: `playerctl ${action}` was interpolated into /bin/bash
+    // (execCommand), and the schema enum is not enforced at the adapter — so
+    // action:"pause; touch X" ran arbitrary commands. Now enum-validated + execArgv.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-media-'));
+    const sentinel = path.join(dir, 'pwned_media');
+    const media = TOOLS.find(t => t.name === 'media_control');
+    const ctx = { senderId: 'u', runtimePlatform: 'linux' };
+    const out = await media.execute({ action: `pause; touch ${sentinel}` }, ctx);
+    assert.ok(!fs.existsSync(sentinel), 'injected command in media_control action must NOT execute');
+    assert.match(out, /Invalid action/i, 'a non-enum action is rejected');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('find_files: a leading-dash path cannot become a find action (-delete regression)', async () => {
+    // Security regression: `dir` was find's first argv token with no `--`, so
+    // path:"-delete" parsed as the -delete ACTION (find with no path → cwd),
+    // recursively deleting. We sandbox cwd so the UNFIXED behavior (the red phase)
+    // only ever hits the throwaway tmp dir, never the repo.
+    const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-fdel-'));
+    const victim = path.join(sandbox, 'keep.txt');
+    fs.writeFileSync(victim, 'data');
+    const findFiles = TOOLS.find(t => t.name === 'find_files');
+    const origCwd = process.cwd();
+    try {
+      process.chdir(sandbox);
+      const out = await findFiles.execute({ name: '*', path: '-delete' }, { senderId: 'u' });
+      assert.match(out, /Invalid path/i, 'a path find could read as an option is rejected');
+    } finally {
+      process.chdir(origCwd);
+    }
+    assert.ok(fs.existsSync(victim), 'a -delete path must NOT delete files (find action injection)');
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  });
+
+  it('grep_files rejects an unsupported option flag (flag-injection regression)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-grepf-'));
+    fs.writeFileSync(path.join(dir, 'f.txt'), 'hello');
+    const grepFiles = TOOLS.find(t => t.name === 'grep_files');
+    // `-f <file>` / `--include` / `-r /` are read-amplification / behavior-change
+    // vectors; only the safe combinable short flags are permitted.
+    const bad = await grepFiles.execute({ pattern: 'x', path: dir, options: '-f /etc/passwd' }, { senderId: 'u' });
+    assert.match(bad, /Unsupported grep option/i);
+    // a normal flag still works
+    const ok = await grepFiles.execute({ pattern: 'hello', path: dir, options: '-rn' }, { senderId: 'u' });
+    assert.match(ok, /hello/);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it('desktop tools do not execute shell injection in their string args', async () => {
     // open_url/wifi go through execArgv (no shell); clipboard/screenshot use a
     // shell but shq()-quote the user value. Either way `$()` must stay inert.

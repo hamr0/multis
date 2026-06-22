@@ -4,6 +4,19 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+### Security — pre-merge `/security` + `/diff-review` pass (6 fixes, all mutation-proven)
+
+A four-domain security audit of the M9 branch before merge found the M9 core itself clean (auth boundary tightens, governed-core ceremony holds, secrets scrubbed, approvals route to owner), and surfaced two **pre-existing, live** RCEs in the desktop tools plus four hardenings. All fixed red→green:
+
+- **CRITICAL — `media_control` RCE.** `playerctl ${action}` was interpolated raw into `/bin/bash` and the schema `enum` is not enforced at the adapter, so `action: "pause; touch X"` ran arbitrary commands. Now validated against the action allowlist at runtime and executed via `execArgv` (no shell). The volume path is clamped to a 0-100 integer and also runs argv-only.
+- **HIGH — `find_files` `-delete`.** The model-controlled `path` was `find`'s first argv token with no `--`, so `path: "-delete"` was parsed as the `-delete` *action* (find with no path defaults to cwd) and recursively deleted. A path that `find` could read as an option (leading `-`) is now rejected.
+- **MEDIUM — audit parity.** An Axis-A floor deny in `runGovernedAction` left no `audit.log` trace (only `gate.jsonl`), breaking the parity the `denied-owner` fix intended. Floor denies now record `status:'denied-floor'`.
+- **MEDIUM — fs-floor secret fence.** `governance.json` shipped `paths.denied: []`. The file tools (read/find/grep) now deny `~/.multis/config.json`(+`.bak`), `~/.ssh`, and `/etc/shadow` — a defense-in-depth fence so a content-injection-hijacked model can't read the bot's own credentials back out (the app's internal `loadConfig` uses `fs` directly, never the gated tools, so it never self-locks).
+- **MEDIUM — destructive classifier.** `makeDestructiveCheck` inspected only the first command token, so `ls; rm -rf x` classified benign. It now scans every chained segment (`;`/`&&`/`||`/`|`) like the catastrophic check. (Contained today by the metachar floor; this stops classification silently depending on it.)
+- **LOW — `grep_files` flag allowlist.** The free-form `options` string accepted arbitrary `grep` flags (`-f <file>`, `--include`); now only the safe combinable short flags are permitted.
+
+The model layer is assumed compromised by content injection (M9 negative POC), so these owner-only tools matter: the safety can't rest on the model declining. Regression tests added for all six (the two RCEs run their exploit safely in a tmp sandbox to prove red→green); fs-deny proven against the real bareguard gate including `~`-form path expansion. 462/462 green, `npm audit` 0.
+
 ### Removed — the limited-admin tier (`/admin`, `admins[]`, `isAdmin`, `isAdminChat`)
 
 The second-tier "limited admin" principal is gone. It never fit the architecture: multis runs on the **owner's** machine watching the **owner's** Beeper inbox, so every Beeper chat is "owner ↔ someone" — a third party has no independent channel to the bot (only their conversation *with the owner*), making a Beeper "limited admin" circular ("which chat is admin? the one with me"). A Telegram-only admin is a half-operator (gets escalation pings but can't see or act in chats — those live in Beeper). A useful operator must SEE+ACT, which means the **Beeper account itself** (multi-device); at that point they *are* the owner identity, with nothing to designate. And the PIN can't separate shared-account operators — note-to-self is synced, so any PIN is visible to everyone on the account; the PIN's real job is a **destructive-action speed bump**, not access control.
