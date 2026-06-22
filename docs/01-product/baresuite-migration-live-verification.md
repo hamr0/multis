@@ -13,7 +13,7 @@
 
 ## 0. Harness setup (once)
 
-You need: a real LLM key, a real Telegram bot, a live beeperbox container, and **two identities** — the owner (you, via Telegram pairing + Beeper note-to-self) and a throwaway **"customer"** account in a separate Beeper chat. (The limited-admin tier was removed 2026-06-21, so no third identity is needed.)
+You need: a real LLM key, a real Telegram bot, a live beeperbox container, and **two identities** — the owner (you, via Telegram pairing + Beeper note-to-self) and a throwaway **"customer"**. Use your own **second WhatsApp** account for the customer: it appears in Beeper as a separate chat (*Amr Hassan*) and, because it is not the note-to-self chat, multis sees it as a non-owner — so you can drive the customer side without involving a real contact. (The limited-admin tier was removed 2026-06-21, so no third identity is needed.)
 
 > **⚠ Real-account harness hazard (2026-06-20).** This pass runs against your **real** Beeper account (owner `8503143603`, beeperbox `:23375` live, 7 real chats). The isolation guard is now applied: **`platforms.beeper.default_mode='off'`** — every un-named chat (incl. bridged mirrors of your own Telegram) resolves to `off` = zero I/O, so a real contact is never auto-answered. **Verified:** all 7 chats resolve to `off`; owner note-to-self still routes (off-mode lets self-messages through). A pre-isolation snapshot is at `~/.multis/config.json.bak`; the older real-config backup is `~/.multis.bak`.
 >
