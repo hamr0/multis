@@ -25,7 +25,7 @@
 
 const { TOOLS } = require('../tools/definitions');
 const { FORCE_OWNER_ONLY, DEFAULT_OWNER_ONLY } = require('../tools/registry');
-const { isCatastrophic, makeDestructiveCheck } = require('../governance/gate');
+const { isCatastrophic, makeDestructiveCheck, matchesAskEscalation } = require('../governance/gate');
 
 const SEVERITY = Object.freeze({
   BENIGN: 'benign',
@@ -204,16 +204,26 @@ function listCapabilities({ platform, isOwner } = {}) {
  */
 function classifyEffectiveSeverity(cap, args, denylist) {
   if (!cap) return SEVERITY.BENIGN;
+  let tier;
   if (cap.severity === SHELL_DYNAMIC) {
     const command = (args && (args.command ?? args.cmd)) || '';
     if (isCatastrophic(command)) return SEVERITY.CATASTROPHIC;
     const isDestructive = makeDestructiveCheck(denylist || []);
-    return isDestructive(command) ? SEVERITY.DESTRUCTIVE : SEVERITY.BENIGN;
+    tier = isDestructive(command) ? SEVERITY.DESTRUCTIVE : SEVERITY.BENIGN;
+  } else if (cap.destructiveWhen && cap.destructiveWhen(args)) {
+    tier = rankUp(cap.severity, SEVERITY.DESTRUCTIVE);
+  } else {
+    tier = cap.severity;
   }
-  if (cap.destructiveWhen && cap.destructiveWhen(args)) {
-    return rankUp(cap.severity, SEVERITY.DESTRUCTIVE);
+  // Folded from the removed interactive yes/no ask: a tool call carrying
+  // destructive-intent risk-words (delete/drop/truncate/force-push/…) or an
+  // injection pattern escalates to the destructive PIN tier — ONE operator gate
+  // (park-and-resume) instead of a separate ask that deadlocked Beeper. A
+  // catastrophic classification stays a hard wall (never softened to a PIN).
+  if (tier !== SEVERITY.CATASTROPHIC && matchesAskEscalation(args || {})) {
+    tier = rankUp(tier, SEVERITY.DESTRUCTIVE);
   }
-  return cap.severity;
+  return tier;
 }
 
 /** Returns whichever tier ranks higher. */

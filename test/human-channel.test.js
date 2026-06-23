@@ -25,39 +25,34 @@ function deliver(pending, chatId, senderId, text) {
   return true;
 }
 
-describe('createHumanPrompt — approvals route to the owner (#7)', () => {
+describe('createHumanPrompt — Beeper asks fail closed (serial-poll, no inline HITL)', () => {
   let pending;
   beforeEach(() => { pending = new PendingRegistry(); });
 
-  it('routes the prompt to the Telegram owner, not the requesting customer', async () => {
+  it('a Beeper-triggered ask is auto-declined and the owner is notified, not the customer (#7)', async () => {
     const tele = mockPlatform();
     const beeper = mockPlatform();
     const registry = new Map([['telegram', tele], ['beeper', beeper]]);
     const humanPrompt = createHumanPrompt({ platformRegistry: registry, config: { owner_id: 'owner1' }, pending, timeoutMs: 1000 });
 
-    // The request originates from an untrusted customer chat on Beeper.
-    const p = humanPrompt(askEvent({ senderId: 'cust', chatId: 'cust_chat', platform: 'beeper' }));
-    await tick();
-    // Only the OWNER can approve — a reply from the customer must do nothing:
-    // the waiter is parked under the owner's (chat, sender), not the customer's.
-    assert.strictEqual(deliver(pending, 'cust_chat', 'cust', 'yes'), false, 'customer cannot self-approve');
-    assert.ok(deliver(pending, 'owner1', 'owner1', 'yes'), 'owner reply is consumed');
-
-    assert.deepStrictEqual(await p, { decision: 'allow' });
-    assert.strictEqual(tele.sent.at(-1).chatId, 'owner1', 'prompt went to the owner');
-    assert.strictEqual(beeper.sent.length, 0, 'nothing sent to the customer chat');
+    // A customer on Beeper triggers an ask. Beeper's serial poll can't run an
+    // inline yes/no (it would freeze), so the ask fails closed: the customer
+    // cannot self-approve (nothing is parked), and the owner is notified rather
+    // than the loop frozen. (Risky actions now escalate to the PIN ceremony.)
+    const r = await humanPrompt(askEvent({ senderId: 'cust', chatId: 'cust_chat', platform: 'beeper' }));
+    assert.strictEqual(r.decision, 'deny', 'beeper-triggered ask is auto-denied');
+    assert.strictEqual(deliver(pending, 'cust_chat', 'cust', 'yes'), false, 'nothing parked — customer cannot self-approve');
+    assert.strictEqual(tele.sent.at(-1).chatId, 'owner1', 'owner notified (routed to the owner, not the requester)');
+    assert.strictEqual(beeper.sent.length, 0, 'customer chat untouched');
   });
 
-  it('falls back to the requester when there is no deterministic owner channel', async () => {
+  it('a Beeper-only ask still fails closed (requester is the owner; no inline HITL on serial poll)', async () => {
     const beeper = mockPlatform();
-    const registry = new Map([['beeper', beeper]]); // no Telegram → no owner route
+    const registry = new Map([['beeper', beeper]]); // no Telegram → requester IS the owner
     const humanPrompt = createHumanPrompt({ platformRegistry: registry, config: { owner_id: 'owner1' }, pending, timeoutMs: 1000 });
 
-    // On Beeper-only the requester (note-to-self) IS the owner.
-    const p = humanPrompt(askEvent({ senderId: 'self', chatId: 'self_chat', platform: 'beeper' }));
-    await tick();
-    deliver(pending, 'self_chat', 'self', 'no');
-    assert.deepStrictEqual(await p, { decision: 'deny' });
-    assert.strictEqual(beeper.sent.at(-1).chatId, 'self_chat');
+    const r = await humanPrompt(askEvent({ senderId: 'self', chatId: 'self_chat', platform: 'beeper' }));
+    assert.strictEqual(r.decision, 'deny', 'beeper ask fails closed even for the owner');
+    assert.strictEqual(beeper.sent.at(-1).chatId, 'self_chat', 'owner notified on their own chat');
   });
 });

@@ -4,6 +4,18 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+### Fixed — the approval prompt no longer deadlocks Beeper (the ceremony's latent twin)
+
+A second inline-blocking approval — bareguard's yes/no `ask`, fired when a tool call matched a risk-word or injection pattern — could freeze Beeper's serial poll loop for the full timeout (~60s), the same shape as the PIN ceremony before its park-and-resume fix. Proven reproducible with a regression test. (Found during Tier-A testing, 2026-06-23.)
+
+### Changed — one operator gate: everything risky goes through the PIN
+
+The interactive yes/no approval is **removed** — it deadlocked Beeper *and* was a vestigial 4th tier (M9 already collapsed to benign / destructive→PIN / catastrophic→wall). Its coverage folds into the destructive PIN tier: a tool call carrying destructive-intent risk-words (`delete`/`drop`/`truncate`/`destroy`/`remove`/`purge`/`revoke`/`force-push`) or an injection pattern now escalates to the **same PIN ceremony** (park-and-resume) as `rm`/`sudo`. One consistent gate on both transports; the deterministic deny-floor (`rm -rf /` etc.) and the round-cap halt are unchanged. As a backstop, any remaining ask path (the opt-in always-ask-before-exec) fails closed on Beeper instead of freezing.
+
+### Added — park-and-remind for the PIN ceremony
+
+While a PIN is pending, replying with something *other* than your PIN (or `cancel`) no longer burns the ceremony or leaks to the assistant as a query — you get a **`⏳ Still waiting for your PIN`** reminder, the action stays parked, and your correct PIN still runs it. `cancel` (or stop/abort/no) aborts it. One pending action per chat, so firing several queues the rest behind the reminder.
+
 ## [0.17.4] — 2026-06-23
 
 ### Security — Telegram is owner-only; a non-owner can't reach RAG, commands, or pairing

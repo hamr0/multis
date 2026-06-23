@@ -344,20 +344,39 @@ describe('PIN auth — governed-core ceremony (M9 slash door)', () => {
       'the ceremony-gated command executed exactly once');
   });
 
-  it('a stray message during the ceremony is consumed as a failed PIN, not routed to the LLM', async () => {
-    // The gate_reply waiter claims the NEXT message (no digit-match), so a stray
-    // reply is read as a PIN attempt and fails the ceremony — it must NOT leak
-    // through to the RAG pipeline as a query (the orphaned-reply class).
+  it('a stray message during the ceremony is reminded — not routed to the LLM, ceremony survives, PIN still runs it', async () => {
+    // A non-PIN reply during the ceremony must NOT leak to the RAG pipeline as a
+    // query (the orphaned-reply class) AND must NOT burn the ceremony. It gets a
+    // "still waiting" reminder, stays parked, and the correct PIN still runs it.
     const llm = mockLLM('RAG answer — must never be produced for a ceremony reply');
     const { platform, router } = build(DESTRUCTIVE_GOV, llm);
     const execP = router(msg('/exec echo should-not-run'), platform);
     await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
-
-    await router(msg('hello there', { routeAs: 'natural' }), platform);
     await execP;
+
+    // Stray message → reminded, not consumed, not routed to the LLM.
+    await router(msg('hello there', { routeAs: 'natural' }), platform);
     assert.strictEqual(llm.calls.length, 0, 'the stray reply never reached the LLM');
-    assert.ok(platform.sent.some((s) => /cancelled/i.test(s.text)), 'ceremony was cancelled');
-    assert.ok(!out(platform).some((s) => /should-not-run/.test(s.text)), 'command did not execute');
+    assert.ok(platform.sent.some((s) => /still waiting/i.test(s.text)), 'reminded that a PIN is pending');
+    assert.ok(!platform.sent.some((s) => /cancelled/i.test(s.text)), 'a stray message must NOT cancel the ceremony');
+    assert.ok(!out(platform).some((s) => /should-not-run/.test(s.text)), 'command did not execute yet');
+
+    // The ceremony survived → the correct PIN still runs it.
+    await router(msg('1234'), platform);
+    await waitFor(() => out(platform).some((s) => /should-not-run/.test(s.text)), 'command ran after the correct PIN');
+  });
+
+  it('"cancel" during the ceremony aborts it — command never runs', async () => {
+    const { platform, router } = build(DESTRUCTIVE_GOV);
+    const execP = router(msg('/exec echo should-not-run'), platform);
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
+    await execP;
+
+    await router(msg('cancel'), platform);
+    assert.ok(platform.sent.some((s) => /cancelled/i.test(s.text)), 'ceremony cancelled');
+    // A later PIN does nothing — the ceremony is gone, not merely paused.
+    await router(msg('1234'), platform);
+    assert.ok(!out(platform).some((s) => /should-not-run/.test(s.text)), 'command never ran after cancel');
   });
 });
 
