@@ -315,6 +315,12 @@ function createMessageRouter(config, deps = {}) {
   // Platform registry — populated via router.registerPlatform()
   const platformRegistry = new Map();
 
+  // Senders we've already audit-logged a Telegram owner-only reject for, so a
+  // non-owner spamming the bot writes ONE audit line (probing signal), not one
+  // per message (which would flood the append-only audit log). Per-process; a
+  // restart re-arms. Bounded in practice by distinct Telegram accounts seen.
+  const loggedTelegramRejects = new Set();
+
   const router = async (msg, platform) => {
     // Telegram is owner-only (personal-bot role). Reject every non-owner message —
     // even a paired one, even /start, even a file upload — before any routing, so
@@ -332,6 +338,12 @@ function createMessageRouter(config, deps = {}) {
     // / upload path that leaked. A message carrying a routeAs was classified by a
     // platform adapter and is governed by its own owner/customer logic below.
     if (msg.platform === 'telegram' && !msg.routeAs && config.owner_id && !isOwner(msg.senderId, config, msg)) {
+      // Audit the FIRST reject per sender so probing is visible, but dedupe so a
+      // spammer can't flood the append-only log (one line per sender, not per msg).
+      if (!loggedTelegramRejects.has(msg.senderId)) {
+        loggedTelegramRejects.add(msg.senderId);
+        logAudit({ action: 'telegram_reject', user_id: msg.senderId, sender_name: msg.senderName, chatId: msg.chatId, platform: 'telegram' });
+      }
       await platform.send(msg.chatId, 'This is a private assistant.');
       return;
     }

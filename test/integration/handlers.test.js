@@ -2,7 +2,7 @@ const fs = require('fs');
 const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert');
 const { createMessageRouter, buildAgentRegistry, resolveAgent, clearAdminPauses } = require('../../src/bot/handlers');
-const { updateChatMeta, backupConfig } = require('../../src/config');
+const { updateChatMeta, backupConfig, PATHS } = require('../../src/config');
 const { PinManager, hashPin } = require('../../src/security/pin');
 const { PendingRegistry } = require('../../src/bot/pending');
 const { createTestEnv, mockPlatform, mockLLM, msg } = require('../helpers/setup');
@@ -201,6 +201,53 @@ describe('Telegram owner-only (personal-bot)', () => {
 
     assert.strictEqual(indexer.searchCalls.length, 1, 'owner ask must reach RAG');
     assert.strictEqual(indexer.searchCalls[0].opts.scope, 'admin');
+  });
+
+  // The reject is audited so probing is visible — but deduped per sender so the
+  // observability hook can't itself become a log-flood DoS vector.
+  const rejectLines = () => {
+    const p = PATHS.auditLog();
+    return fs.existsSync(p)
+      ? fs.readFileSync(p, 'utf8').split('\n').filter((l) => l.includes('"action":"telegram_reject"'))
+      : [];
+  };
+
+  it('audits a non-owner reject ONCE per sender — a spammer cannot flood the log', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+    try {
+      for (let i = 0; i < 500; i++) {
+        await router(msg(`probe ${i}`, { senderId: 'spammer', chatId: 'spamchat' }), platform);
+      }
+      const rejects = rejectLines();
+      assert.strictEqual(rejects.length, 1, '500 spam messages → exactly 1 audit line');
+      assert.strictEqual(JSON.parse(rejects[0]).user_id, 'spammer');
+      // ...yet every message was still soft-rejected (dedup affects logging only).
+      assert.strictEqual(platform.sent.filter((s) => /private assistant/i.test(s.text)).length, 500);
+    } finally { env.cleanup(); }
+  });
+
+  it('audits each DISTINCT non-owner sender (probing signal preserved)', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+    try {
+      for (let i = 0; i < 20; i++) {
+        await router(msg('probe', { senderId: `prober${i}`, chatId: `c${i}` }), platform);
+      }
+      assert.strictEqual(rejectLines().length, 20, '20 distinct senders → 20 audit lines');
+    } finally { env.cleanup(); }
+  });
+
+  it('never audits a reject for the owner', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM('answer'), indexer: stubIndexer() });
+    try {
+      await router(msg('hello'), platform); // user1 = owner → passes the guard
+      assert.strictEqual(rejectLines().length, 0, 'owner is never rejected or logged');
+    } finally { env.cleanup(); }
   });
 });
 

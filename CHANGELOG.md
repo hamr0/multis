@@ -8,7 +8,7 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 On a Telegram bot, **only the owner** is served. Previously a second person who paired with the code could send a question and get a real answer from the assistant loop — and a query about owner-only material came back with a revealing *"you need owner privileges to access those details,"* which **confirmed that gated content existed**. (No document content leaked — owner material stays scope-fenced — but the existence hint, and the owner's tool-oriented prompt, should never reach a stranger.) Telegram is the **personal-bot** channel, bound to the owner; customers belong on Beeper.
 
-Now every non-owner Telegram message — a question, any command, `/start`, even a file upload — gets a flat `This is a private assistant.` **before** any routing, RAG, or pairing runs. The owner is unaffected, and the first-`/start`-becomes-owner bootstrap on a fresh install still works. (Found live during Tier-A testing, 2026-06-23.)
+Now every non-owner Telegram message — a question, any command, `/start`, even a file upload — gets a flat `This is a private assistant.` **before** any routing, RAG, or pairing runs. The owner is unaffected, and the first-`/start`-becomes-owner bootstrap on a fresh install still works. Each turned-away sender is recorded once in the audit log (`telegram_reject`, deduped per sender so a spammer can't flood it), so probing stays visible. (Found live during Tier-A testing, 2026-06-23.)
 
 ### Fixed — destructive ceremonies no longer deadlock the Beeper message loop
 
