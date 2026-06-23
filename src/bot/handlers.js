@@ -16,7 +16,7 @@ const { getPlatform } = require('../tools/platform');
 const { Loop, Retry, CircuitBreaker } = require('bare-agent');
 const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler');
 const { createGate } = require('../governance/gate');
-const { createHumanPrompt, createPinChallenge } = require('../governance/human-channel');
+const { createHumanPrompt, createCeremonyPrompt, createVerifyPin } = require('../governance/human-channel');
 const { PendingRegistry } = require('./pending');
 const { runGovernedAction, RESULT } = require('../capabilities/govern');
 const { buildGovernDeps } = require('../capabilities/deps');
@@ -112,18 +112,9 @@ function createGovernanceCarrier(config, opts = {}) {
           pending: opts.pending,
           timeoutMs: (config?.security?.checkpoint_timeout || 60) * 1000,
         });
-        // Capability-layer PIN (#5): privileged tools on the agent path prompt
-        // for PIN via the same reply-wait the approval flow uses.
-        const pinChallenge = opts.pinChallenge || createPinChallenge({
-          platformRegistry,
-          pinManager: opts.pinManager,
-          pending: opts.pending,
-          timeoutMs: (config?.security?.pin_prompt_timeout || 300) * 1000,
-        });
         // createGate no longer consumes the ceremony (the 3-tier moved to the M9
-        // core); pinChallenge is built here only to ride the bundle below. There is
-        // no CONFIRM tier — catastrophic commands are hard-walled in the core, never
-        // ceremonied.
+        // core). There is no CONFIRM tier — catastrophic commands are hard-walled in
+        // the core, never ceremonied.
         const built = await createGate({
           config,
           humanPrompt,
@@ -132,10 +123,15 @@ function createGovernanceCarrier(config, opts = {}) {
           fileless: opts.fileless,
           governance: opts.governance,
         });
-        // Expose the SAME PIN instance to the M9 governed core (both doors), so a
-        // single intent ceremonies once via one PendingRegistry — no second, parallel
-        // PIN path. denylist rides through from createGate's return.
-        resolved = { ...built, pinChallenge };
+        // Park-and-resume ceremony (M9 fix 2026-06-22): the governed core never
+        // blocks on an inline PIN await (a serial Beeper poll loop would deadlock).
+        // It returns NEEDS_CEREMONY; the caller prompts via `ceremonyPrompt`, parks
+        // the action, returns, and the PIN reply is verified by `verifyPin`. All share
+        // one pinManager → one PendingRegistry, no second parallel PIN path.
+        const ceremonyPrompt = createCeremonyPrompt({ platformRegistry, pinManager: opts.pinManager });
+        const verifyPin = createVerifyPin({ pinManager: opts.pinManager });
+        const pinConfigured = !!(opts.pinManager && opts.pinManager.isEnabled());
+        resolved = { ...built, ceremonyPrompt, verifyPin, pinConfigured };
         return resolved;
       })();
       // Self-heal on transient init failure (e.g. bareguard ESM import error).
@@ -320,6 +316,26 @@ function createMessageRouter(config, deps = {}) {
   const platformRegistry = new Map();
 
   const router = async (msg, platform) => {
+    // Telegram is owner-only (personal-bot role). Reject every non-owner message —
+    // even a paired one, even /start, even a file upload — before any routing, so
+    // admin-scoped content, the owner's tool-oriented base prompt, and customer
+    // pairing all stay closed (a paired non-owner previously reached RAG and the
+    // base prompt, leaking the existence of gated content). The owner always
+    // passes (owner_id match). Gated on owner_id existing so the
+    // first-/start-becomes-owner bootstrap on a fresh install is preserved —
+    // before an owner exists there is nothing to protect. The reject reveals
+    // nothing: no content, no "owner", no pairing hint.
+    //
+    // Scoped to un-routed traffic (`!routeAs`): a real Telegram message is never
+    // mode-classified (Telegram sets no routeAs — only Beeper's adapter does), so
+    // this fires for 100% of genuine Telegram traffic — the command / implicit-ask
+    // / upload path that leaked. A message carrying a routeAs was classified by a
+    // platform adapter and is governed by its own owner/customer logic below.
+    if (msg.platform === 'telegram' && !msg.routeAs && config.owner_id && !isOwner(msg.senderId, config, msg)) {
+      await platform.send(msg.chatId, 'This is a private assistant.');
+      return;
+    }
+
     // Handle Telegram document uploads
     if (msg._document) {
       if (isOwner(msg.senderId, config, msg)) {
@@ -373,6 +389,14 @@ function createMessageRouter(config, deps = {}) {
             // reply. Hand it the RAW text — the challenge interprets yes/no/PIN/
             // CONFIRM itself — and it self-clears via the resolver.
             entry.resolve(text);
+            return;
+          case 'ceremony_action':
+            // M9 park-and-resume: a destructive capability was deferred pending this
+            // PIN reply. One-shot — clear first, then resume (the resume re-runs the
+            // capability with `ceremonyReply`, which verifies the PIN, then executes
+            // and renders). A wrong PIN is rejected inside the resume.
+            pending.clear(msg.chatId, msg.senderId);
+            if (typeof entry.resume === 'function') await entry.resume(text);
             return;
           case 'pin_change':
             await handlePinChangeStep(msg, platform, config, pinManager, pending, t, entry);
@@ -574,7 +598,7 @@ function createMessageRouter(config, deps = {}) {
         }
       }
 
-      await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, gov });
+      await routeAsk(msg, platform, config, indexer, provider, msg.text, getMem, memCfg, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, gov, pending });
       return;
     }
 
@@ -811,11 +835,13 @@ async function routeStatus(msg, platform, config) {
  * a host action ceremonies exactly once, via one PendingRegistry — no second,
  * parallel PIN path. Returns the core's tagged result for the caller to render.
  */
-async function dispatchCapability(capName, args, msg, config, toolDeps = {}) {
+async function dispatchCapability(capName, args, msg, config, toolDeps = {}, ceremonyReply) {
   const { gov, indexer, getMem } = toolDeps;
   const bundle = gov ? await gov.resolve() : {};
   const deps = buildGovernDeps({
-    pinChallenge: bundle.pinChallenge,
+    // verifyPin = park-and-resume (no inline await → no serial-poll deadlock).
+    verifyPin: bundle.verifyPin,
+    pinConfigured: bundle.pinConfigured,
     floorPolicy: bundle.floorPolicy,
     denylist: bundle.denylist,
     indexer,
@@ -827,7 +853,7 @@ async function dispatchCapability(capName, args, msg, config, toolDeps = {}) {
     isOwner: isOwner(msg.senderId, config, msg),
     platform: msg.platform,
   };
-  return runGovernedAction({ capability: capName, args, ctx, deps });
+  return runGovernedAction({ capability: capName, args, ctx, deps, ceremonyReply });
 }
 
 /**
@@ -884,7 +910,9 @@ async function sendCapabilityResult(r, platform, msg, opts = {}) {
     } else if (r.reason === 'catastrophic_blocked') {
       await platform.send(msg.chatId, '⛔ Blocked: that command is too destructive to run through me — please do it yourself in a terminal.');
     } else if (/_ceremony_declined$/.test(r.reason || '')) {
-      await platform.send(msg.chatId, 'Action cancelled.');
+      // r.message carries the verifier's reason (e.g. "Wrong PIN. N attempts
+      // remaining."); always end with "Action cancelled." so the outcome is clear.
+      await platform.send(msg.chatId, r.message ? `${r.message}\nAction cancelled.` : 'Action cancelled.');
     } else {
       // floor deny (Axis-A) — bareguard's raw verdict (e.g.
       // "[deny: content.denyPatterns] matched /\brm\s+-rf\s+\//") is an internal
@@ -894,16 +922,63 @@ async function sendCapabilityResult(r, platform, msg, opts = {}) {
     }
     return;
   }
+  if (r.kind === RESULT.NEEDS_CEREMONY) {
+    // Defensive: a destructive result reached the plain renderer instead of
+    // handleCeremonyOrSend. Don't silently drop it — tell the owner to re-send.
+    await platform.send(msg.chatId, 'That action needs your PIN — please re-send the command.');
+    return;
+  }
   // UNKNOWN — no such capability (shouldn't happen from a fixed slash route).
   await platform.send(msg.chatId, 'Unknown command.');
+}
+
+/**
+ * Render a governed-core result, but if it's NEEDS_CEREMONY, drive the
+ * park-and-resume flow instead: prompt for the PIN, park the action on the shared
+ * PendingRegistry, and RETURN (never blocking the poll loop). The PIN reply lands
+ * on the 'ceremony_action' dispatch case, which calls `resume(text)` → re-runs the
+ * capability with `ceremonyReply` → renders. `opts` mirrors sendCapabilityResult's
+ * (usage/format/ownerOnly) plus { capName, args, onResume } for the resume, and an
+ * optional { echo } that overrides the prompt line with a human-readable label (so
+ * an app-verb shows "Amora → off", not the raw room id). run_shell omits it → the
+ * verbatim command is shown, which is the security-relevant thing for shell.
+ */
+async function handleCeremonyOrSend(r, platform, msg, config, toolDeps, opts = {}) {
+  if (r.kind !== RESULT.NEEDS_CEREMONY) {
+    await sendCapabilityResult(r, platform, msg, opts);
+    return;
+  }
+  const { gov, pending } = toolDeps;
+  const bundle = gov ? await gov.resolve() : {};
+  const ctx = {
+    senderId: msg.senderId, chatId: msg.chatId, platform: msg.platform,
+    isOwner: isOwner(msg.senderId, config, msg),
+  };
+  const status = bundle.ceremonyPrompt ? await bundle.ceremonyPrompt(ctx, { echo: opts.echo || r.echo }) : 'no-channel';
+  if (status !== 'prompted') {
+    // 'locked' already messaged the lockout line; 'no-channel' can't prompt.
+    if (status === 'no-channel') await platform.send(msg.chatId, 'Could not prompt for the required PIN — action cancelled.');
+    return; // nothing parked → action does not run (fail-closed)
+  }
+  if (!pending) return; // no registry → can't resume; fail-closed
+  pending.set(msg.chatId, msg.senderId, 'ceremony_action', {
+    ttlMs: (config?.security?.pin_prompt_timeout || 300) * 1000,
+    resume: async (replyText) => {
+      const r2 = await dispatchCapability(opts.capName, opts.args, msg, config, toolDeps, replyText);
+      if (r2.kind === RESULT.OK) await platform.send(msg.chatId, 'PIN accepted.');
+      if (opts.onResume) await opts.onResume(r2);
+      else await sendCapabilityResult(r2, platform, msg, opts);
+    },
+  });
 }
 
 async function routeExec(msg, platform, config, command, toolDeps = {}) {
   // run_shell: the core applies the owner floor first (non-owner → owner_only),
   // then arg-validation (empty → usage), then dynamic shell-severity ceremony —
   // benign runs free, destructive → PIN, catastrophic → PIN+CONFIRM.
-  const r = await dispatchCapability('run_shell', { command: command || '' }, msg, config, toolDeps);
-  await sendCapabilityResult(r, platform, msg, { usage: 'Usage: /exec <command>' });
+  const args = { command: command || '' };
+  const r = await dispatchCapability('run_shell', args, msg, config, toolDeps);
+  await handleCeremonyOrSend(r, platform, msg, config, toolDeps, { capName: 'run_shell', args, usage: 'Usage: /exec <command>' });
 }
 
 async function routeRead(msg, platform, config, filePath, toolDeps = {}) {
@@ -1035,16 +1110,23 @@ function getCircuitBreaker(config) {
  * its tool_call audit. A declined ceremony / floor deny becomes a plain tool
  * result the model reports; it never silently runs.
  */
-function wrapToolThroughCore(adaptedTool, govCtx, { pinChallenge, denylist }) {
+function wrapToolThroughCore(adaptedTool, govCtx, { verifyPin, pinConfigured, ceremonyPrompt, pending, platform, denylist, ceremonyTtlMs }) {
   const cap = getCapabilityForTool(adaptedTool.name);
   if (!cap || cap.severity === SEVERITY.BENIGN) return adaptedTool; // policy is the sole gate
   const original = adaptedTool.execute;
   const deps = buildGovernDeps({
-    pinChallenge,
+    verifyPin,
+    pinConfigured,
     denylist,
     // No floorPolicy: the Loop's policy already enforced Axis-A before execute.
     execute: (_cap, args) => original(args), // delegate → adapter (tool_call audit + tool.execute)
   });
+  const renderDenied = (r) => {
+    if (r.reason === 'owner_only') return 'Denied: this action requires owner privileges.';
+    if (r.reason === 'catastrophic_blocked') return 'Blocked: that command is too destructive to run through me — please do it yourself in a terminal.';
+    if (/_ceremony_declined$/.test(r.reason || '')) return r.message || 'Action cancelled — the required PIN was not provided.';
+    return r.message || 'Denied by governance.';
+  };
   return {
     ...adaptedTool,
     execute: async (args) => {
@@ -1053,12 +1135,27 @@ function wrapToolThroughCore(adaptedTool, govCtx, { pinChallenge, denylist }) {
       if (r.kind === RESULT.NEEDS_ARG) {
         return `Missing required argument(s): ${(r.missing || []).join(', ')}. Provide them and retry.`;
       }
-      if (r.kind === RESULT.DENIED) {
-        if (r.reason === 'owner_only') return 'Denied: this action requires owner privileges.';
-        if (r.reason === 'catastrophic_blocked') return 'Blocked: that command is too destructive to run through me — please do it yourself in a terminal.';
-        if (/_ceremony_declined$/.test(r.reason || '')) return 'Action cancelled — the required PIN was not provided.';
-        return r.message || 'Denied by governance.';
+      if (r.kind === RESULT.NEEDS_CEREMONY) {
+        // Park-and-resume on the LLM door: NEVER block the Loop awaiting the PIN (a
+        // serial Beeper poll loop would deadlock). Prompt, park the action, and end
+        // this turn; the PIN reply runs it AFTER the turn (M9: destructive execution
+        // is decoupled from the model's reasoning). Needs an interactive channel +
+        // the shared registry; background jobs (cron/plan) pass neither → fail-closed.
+        if (!pending || !platform) return 'That action needs your PIN, which I can\'t collect here. Re-send it as /exec <command>.';
+        const status = ceremonyPrompt ? await ceremonyPrompt(govCtx, { echo: r.echo }) : 'no-channel';
+        if (status === 'locked') return 'Locked out due to failed PIN attempts. Try again later.';
+        if (status !== 'prompted') return 'Could not prompt for the required PIN — action cancelled.';
+        pending.set(govCtx.chatId, govCtx.senderId, 'ceremony_action', {
+          ttlMs: ceremonyTtlMs || 300_000,
+          resume: async (replyText) => {
+            const r2 = await runGovernedAction({ capability: cap, args: args || {}, ctx: govCtx, deps, ceremonyReply: replyText });
+            const out = r2.kind === RESULT.OK ? `PIN accepted.\n${String(r2.result ?? '(done)')}` : renderDenied(r2);
+            try { await platform.send(govCtx.chatId, out); } catch { /* ignore */ }
+          },
+        });
+        return 'I\'ve requested your PIN — reply with it and I\'ll run that.';
       }
+      if (r.kind === RESULT.DENIED) return renderDenied(r);
       return 'Action could not be completed.';
     },
   };
@@ -1074,7 +1171,7 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   // Resolve governance lazily on first call (ESM bareguard requires await import)
   const _gc = startClock();
   const bundle = gov ? await gov.resolve() : {};
-  const { policy, onLlmResult, onToolResult, pinChallenge, denylist } = bundle;
+  const { policy, onLlmResult, onToolResult, verifyPin, pinConfigured, ceremonyPrompt, denylist } = bundle;
   mark('runAgentLoop: gov.resolve done', _gc);
 
   // M9 increment 3 — the LLM door through the one governed core. A tool whose
@@ -1092,8 +1189,16 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
     isOwner: ctx.isOwner,
     platform: ctx.platform?.name || ctx.platform?.platform || ctx.platformName,
   };
+  // Park-and-resume needs the shared registry + an interactive channel to prompt
+  // and to deliver the deferred result. Present on the interactive /ask path; absent
+  // on background jobs (cron/plan), where a destructive tool fails-closed instead.
   const governed = gov
-    ? adapted.map((t) => wrapToolThroughCore(t, govCtx, { pinChallenge, denylist }))
+    ? adapted.map((t) => wrapToolThroughCore(t, govCtx, {
+        verifyPin, pinConfigured, ceremonyPrompt, denylist,
+        pending: ctx.pending,
+        platform: ctx.platform,
+        ceremonyTtlMs: (config?.security?.pin_prompt_timeout || 300) * 1000,
+      }))
     : adapted;
 
   // Build retry + circuit breaker from config
@@ -1231,9 +1336,11 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     }
 
     // --- Agent loop with tool calling ---
-    const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5, platformRegistry, gov } = toolDeps;
+    const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5, platformRegistry, gov, pending } = toolDeps;
     const userTools = getToolsForUser(allTools, admin, tCfg);
-    const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, platformName: msg.platform, config, platformRegistry };
+    // pending: the shared PendingRegistry, so a destructive tool on the LLM door can
+    // park its PIN ceremony (park-and-resume) instead of blocking the loop.
+    const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, platformName: msg.platform, config, platformRegistry, pending };
 
     const _lc = startClock();
     mark(`routeAsk -> agent loop (${userTools.length} tools, model ${config?.llm?.model || '?'})`);
@@ -1305,8 +1412,11 @@ async function routeMemory(msg, platform, config, getMem, toolDeps = {}) {
 }
 
 async function routeForget(msg, platform, config, getMem, toolDeps = {}) {
-  const r = await dispatchCapability('forget', { target: 'everything' }, msg, config, { ...toolDeps, getMem });
-  await sendCapabilityResult(r, platform, msg, { format: () => 'Memory cleared for this chat.' });
+  const args = { target: 'everything' };
+  const td = { ...toolDeps, getMem };
+  // forget is destructive (clears memory) → PIN ceremony via park-and-resume.
+  const r = await dispatchCapability('forget', args, msg, config, td);
+  await handleCeremonyOrSend(r, platform, msg, config, td, { capName: 'forget', args, echo: 'clear this chat\'s memory', format: () => 'Memory cleared for this chat.' });
 }
 
 async function routeRemember(msg, platform, config, getMem, note, toolDeps = {}) {
@@ -1332,19 +1442,35 @@ const VALID_MODES = ['off', 'business', 'silent'];
  * @returns {Promise<boolean>} true if the mode was committed.
  */
 async function commitMode({ chatId, mode, agent, displayName }, msg, platform, config, toolDeps = {}) {
-  const r = await dispatchCapability('set_mode', { target: chatId, mode }, msg, config, toolDeps);
-  if (r.kind !== RESULT.OK) {
-    await sendCapabilityResult(r, platform, msg);
-    return false;
+  const args = { target: chatId, mode };
+  // The success tail runs identically whether set_mode cleared immediately
+  // (silent/business → benign) or after the PIN ceremony (off → destructive,
+  // park-and-resume). Sharing it keeps the agent-assignment + confirmation in one
+  // place for both paths.
+  const finish = async (res) => {
+    if (res.kind !== RESULT.OK) {
+      await sendCapabilityResult(res, platform, msg);
+      return false;
+    }
+    if (agent) {
+      if (!config.chat_agents) config.chat_agents = {};
+      config.chat_agents[chatId] = agent;
+      saveConfig(config);
+    }
+    const agentNote = agent ? `, agent: ${agent}` : '';
+    await platform.send(msg.chatId, `${displayName || chatId} set to: ${mode}${agentNote}`);
+    return true;
+  };
+  const r = await dispatchCapability('set_mode', args, msg, config, toolDeps);
+  if (r.kind === RESULT.NEEDS_CEREMONY) {
+    // `off` needs the PIN — prompt + park; finish runs on the reply, after this returns.
+    // Friendly echo: the owner sees the chat's name, not its raw room id.
+    await handleCeremonyOrSend(r, platform, msg, config, toolDeps, {
+      capName: 'set_mode', args, onResume: finish, echo: `set "${displayName || chatId}" to ${mode}`,
+    });
+    return false; // pending — not yet committed
   }
-  if (agent) {
-    if (!config.chat_agents) config.chat_agents = {};
-    config.chat_agents[chatId] = agent;
-    saveConfig(config);
-  }
-  const agentNote = agent ? `, agent: ${agent}` : '';
-  await platform.send(msg.chatId, `${displayName || chatId} set to: ${mode}${agentNote}`);
-  return true;
+  return finish(r);
 }
 
 async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = {}) {
