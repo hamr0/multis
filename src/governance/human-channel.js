@@ -66,6 +66,21 @@ function createHumanPrompt({ platformRegistry, pinManager, config, autoResponder
       return { decision: 'terminate', reason: 'halt acknowledged (no top-up UX)' };
     }
 
+    // Serial-poll transports (Beeper) cannot do inline HITL: awaiting the reply
+    // here freezes the poll loop, and the reply can only arrive on the next poll
+    // the frozen loop never runs — the latent twin of the ceremony deadlock
+    // (proven 2026-06-23). Fail closed: notify and deny rather than deadlock. The
+    // one interactive gate that works on Beeper is the destructive PIN ceremony
+    // (park-and-resume); risky actions now escalate to it, so an inline yes/no is
+    // no longer the approval path here. Telegram dispatches each update
+    // concurrently, so the reply lands in its own context — it still inline-waits.
+    if (reqCtx.platform === 'beeper') {
+      try {
+        await platform.send(chatId, `${summary}\n\n(Auto-declined — Beeper can't run an inline yes/no. Destructive actions ask for your PIN instead; re-run if you meant it.)`);
+      } catch { /* best-effort */ }
+      return { decision: 'deny', reason: 'serial-poll transport: ask auto-denied (no inline HITL)' };
+    }
+
     try {
       await platform.send(chatId, summary);
     } catch (err) {

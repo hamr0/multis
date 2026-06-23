@@ -49,10 +49,10 @@ async function loadDeps() {
  * Build a Gate config object from multis governance.json + config.security.
  * Pure — no I/O, easy to test.
  */
-// multis-specific prompt-injection patterns. Escalated to the human via
-// content.askPatterns (humanChannel decides). COMPOSED with bareguard's
-// SAFE_DEFAULT_ASK_PATTERNS — never replacing them (bareguard treats a set
-// askPatterns as a full override).
+// multis-specific prompt-injection patterns. The interactive ask is disabled
+// (buildGateConfig sets content.askPatterns = []), so these no longer drive a
+// bareguard yes/no — they feed matchesAskEscalation, which escalates a matching
+// tool call to the destructive PIN tier in classifyEffectiveSeverity.
 const INJECTION_ASK_PATTERNS = [
   /ignore\s+(all\s+)?(previous\s+)?instructions/i,
   /ignore\s+your\s+(instructions|rules|guidelines)/i,
@@ -67,6 +67,28 @@ const INJECTION_ASK_PATTERNS = [
   /show\s+(me\s+)?(all|other)\s+(users?|customers?|data)/i,
   /system\s+prompt/i,
 ];
+
+// Risk-word patterns — copied from bareguard's SAFE_DEFAULT_ASK_PATTERNS so multis
+// owns them. The gate's interactive yes/no `ask` is disabled (it deadlocked
+// Beeper's serial poll — the latent twin of the ceremony deadlock). Instead, a
+// tool call whose serialized args match one of these — or an injection pattern —
+// escalates to the destructive PIN tier in classifyEffectiveSeverity: ONE operator
+// gate (park-and-resume), not a separate yes/no. Catastrophic still hard-walls.
+const RISK_WORD_PATTERNS = [
+  /\b(delete|drop|revoke|truncate|destroy|remove|purge)\b/i,
+  /\bforce[- ]push\b/i,
+  /"method"\s*:\s*"(DELETE|PUT|PATCH)"/i,
+];
+const ASK_ESCALATION_PATTERNS = [...RISK_WORD_PATTERNS, ...INJECTION_ASK_PATTERNS];
+
+/** True if a tool call (string command, or args object) carries destructive-intent
+ *  risk-words or an injection pattern → escalate to the destructive (PIN) tier. */
+function matchesAskEscalation(value) {
+  let s;
+  if (typeof value === 'string') s = value;
+  else { try { s = JSON.stringify(value); } catch { s = String(value); } }
+  return ASK_ESCALATION_PATTERNS.some((re) => re.test(s));
+}
 
 // multis tool name → bareguard canonical action type. Mirrors makeActionTranslator
 // so an "always ask" declared on tool names lands on the type the gate evaluates.
@@ -129,11 +151,8 @@ function makeDestructiveCheck(denylist) {
 
 /**
  * @param {object} args
- * @param {RegExp[]} [args.safeAskPatterns]  bareguard's SAFE_DEFAULT_ASK_PATTERNS,
- *   passed in by createGate (ESM, async-loaded). Defaults to [] for the pure
- *   sync test accessor — production composes the real defaults.
  */
-function buildGateConfig({ governance, security, audit, budget, llm, safeAskPatterns = [] }) {
+function buildGateConfig({ governance, security, audit, budget, llm }) {
   const cfg = {};
 
   if (governance?.commands) {
@@ -167,10 +186,12 @@ function buildGateConfig({ governance, security, audit, budget, llm, safeAskPatt
   };
 
   cfg.content = {
-    // Compose: bareguard safe defaults (delete/revoke/truncate/force-push/…)
-    // FIRST, then multis injection patterns. Setting askPatterns is a full
-    // override in bareguard, so we must re-include the defaults explicitly.
-    askPatterns: [...safeAskPatterns, ...INJECTION_ASK_PATTERNS],
+    // Interactive ask DISABLED (`[]` overrides bareguard's defaults — omitting it
+    // would re-enable them). The yes/no ask deadlocked Beeper's serial poll, and
+    // it was a vestigial 4th tier (M9 removed CONFIRM). Its coverage is folded into
+    // the destructive PIN tier via matchesAskEscalation in classifyEffectiveSeverity
+    // — one operator gate. The deterministic deny floor (denyPatterns) is untouched.
+    askPatterns: [],
   };
 
   // Optional "always ask" before a tool runs, via bareguard's flags primitive
@@ -326,9 +347,6 @@ async function createGate(opts = {}) {
       maxCostUsd: opts.config?.security?.max_cost_per_run,
       sharedFile: budgetFile,
     },
-    // Compose multis injection asks ON TOP of bareguard's safe defaults rather
-    // than clobbering them (bareguard treats a set askPatterns as a full override).
-    safeAskPatterns: bareguard.SAFE_DEFAULT_ASK_PATTERNS || [],
   });
 
   // humanChannel — collapses every ask/halt into one callback. Routes back to
@@ -415,4 +433,5 @@ module.exports = {
   isCatastrophic,
   commandHead,
   makeDestructiveCheck,
+  matchesAskEscalation,
 };

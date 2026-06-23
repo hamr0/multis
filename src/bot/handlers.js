@@ -402,14 +402,30 @@ function createMessageRouter(config, deps = {}) {
             // CONFIRM itself — and it self-clears via the resolver.
             entry.resolve(text);
             return;
-          case 'ceremony_action':
-            // M9 park-and-resume: a destructive capability was deferred pending this
-            // PIN reply. One-shot — clear first, then resume (the resume re-runs the
-            // capability with `ceremonyReply`, which verifies the PIN, then executes
-            // and renders). A wrong PIN is rejected inside the resume.
+          case 'ceremony_action': {
+            // M9 park-and-resume: a destructive capability is deferred pending this
+            // PIN reply. We distinguish an ANSWER from a new request so a stray
+            // message neither runs unguarded nor burns the ceremony as a failed PIN.
+            // (`t` is the trimmed reply from the enclosing block.)
+            if (/^(cancel|stop|abort|no)$/i.test(t)) {
+              pending.clear(msg.chatId, msg.senderId);
+              await platform.send(msg.chatId, 'Cancelled — that action will not run.');
+              return;
+            }
+            if (!/^\d{4,6}$/.test(t)) {
+              // Not a PIN and not a cancel — treat as a new request: REMIND and keep
+              // the ceremony parked (don't eat the message, don't count a failed
+              // attempt). One pending per (chat,sender) already serializes the rest.
+              const what = entry.label ? ` to ${entry.label}` : '';
+              await platform.send(msg.chatId, `⏳ Still waiting for your PIN${what}. Reply your PIN (4–6 digits), or "cancel".`);
+              return;
+            }
+            // A PIN attempt → one-shot: clear, then resume (verifies + runs; a wrong
+            // PIN is rejected inside the resume with the attempts-remaining reason).
             pending.clear(msg.chatId, msg.senderId);
-            if (typeof entry.resume === 'function') await entry.resume(text);
+            if (typeof entry.resume === 'function') await entry.resume(t);
             return;
+          }
           case 'pin_change':
             await handlePinChangeStep(msg, platform, config, pinManager, pending, t, entry);
             return;
@@ -975,6 +991,7 @@ async function handleCeremonyOrSend(r, platform, msg, config, toolDeps, opts = {
   if (!pending) return; // no registry → can't resume; fail-closed
   pending.set(msg.chatId, msg.senderId, 'ceremony_action', {
     ttlMs: (config?.security?.pin_prompt_timeout || 300) * 1000,
+    label: opts.echo || r.echo,
     resume: async (replyText) => {
       const r2 = await dispatchCapability(opts.capName, opts.args, msg, config, toolDeps, replyText);
       if (r2.kind === RESULT.OK) await platform.send(msg.chatId, 'PIN accepted.');
@@ -1159,6 +1176,7 @@ function wrapToolThroughCore(adaptedTool, govCtx, { verifyPin, pinConfigured, ce
         if (status !== 'prompted') return 'Could not prompt for the required PIN — action cancelled.';
         pending.set(govCtx.chatId, govCtx.senderId, 'ceremony_action', {
           ttlMs: ceremonyTtlMs || 300_000,
+          label: r.echo,
           resume: async (replyText) => {
             const r2 = await runGovernedAction({ capability: cap, args: args || {}, ctx: govCtx, deps, ceremonyReply: replyText });
             const out = r2.kind === RESULT.OK ? `PIN accepted.\n${String(r2.result ?? '(done)')}` : renderDenied(r2);
