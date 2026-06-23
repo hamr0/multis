@@ -4,6 +4,8 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+## [0.17.6] — 2026-06-23
+
 ### Fixed — the approval prompt no longer deadlocks Beeper (the ceremony's latent twin)
 
 A second inline-blocking approval — bareguard's yes/no `ask`, fired when a tool call matched a risk-word or injection pattern — could freeze Beeper's serial poll loop for the full timeout (~60s), the same shape as the PIN ceremony before its park-and-resume fix. Proven reproducible with a regression test. (Found during Tier-A testing, 2026-06-23.)
