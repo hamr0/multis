@@ -4,6 +4,8 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+## [0.17.4] — 2026-06-23
+
 ### Security — Telegram is owner-only; a non-owner can't reach RAG, commands, or pairing
 
 On a Telegram bot, **only the owner** is served. Previously a second person who paired with the code could send a question and get a real answer from the assistant loop — and a query about owner-only material came back with a revealing *"you need owner privileges to access those details,"* which **confirmed that gated content existed**. (No document content leaked — owner material stays scope-fenced — but the existence hint, and the owner's tool-oriented prompt, should never reach a stranger.) Telegram is the **personal-bot** channel, bound to the owner; customers belong on Beeper.
