@@ -8,13 +8,20 @@ const { runGovernedAction, RESULT } = require('../../src/capabilities/govern');
 const DENYLIST = ['rm', 'mv', 'chmod', 'chown', 'kill', 'dd', 'sudo'];
 
 // A test deps factory: records what was called, lets each ceremony pass/fail.
-function makeDeps({ pin = true } = {}) {
-  const calls = { pin: 0, execute: 0, audit: [], auditMeta: [], echoSeen: null };
+// Park-and-resume: the core calls verifyPin ONLY on a resume (ceremonyReply set);
+// the first pass returns NEEDS_CEREMONY without verifying. `pin` controls the
+// verify verdict; `pinConfigured:false` models "owner set no PIN" (no ceremony).
+function makeDeps({ pin = true, pinConfigured = true } = {}) {
+  const calls = { verify: 0, execute: 0, audit: [], auditMeta: [], replySeen: null };
   return {
     calls,
     deps: {
       denylist: DENYLIST,
-      pinChallenge: async (_ctx, { echo } = {}) => { calls.pin += 1; calls.echoSeen = echo; return pin; },
+      pinConfigured,
+      verifyPin: async (_ctx, reply) => {
+        calls.verify += 1; calls.replySeen = reply;
+        return pin ? { ok: true } : { ok: false, reason: 'Wrong PIN.' };
+      },
       execute: async (cap, args) => { calls.execute += 1; return { ran: cap.name, args }; },
       audit: async (line, meta) => { calls.audit.push(line); calls.auditMeta.push(meta); },
     },
@@ -66,20 +73,47 @@ test('benign action runs WITHOUT a ceremony', async () => {
   const r = await runGovernedAction({ capability: 'run_shell', args: { command: 'ls ~/Music' }, ctx: OWNER, deps });
   assert.strictEqual(r.ok, true);
   assert.strictEqual(r.tier, 'benign');
-  assert.strictEqual(calls.pin, 0, 'no PIN on benign');
+  assert.strictEqual(calls.verify, 0, 'no PIN on benign');
   assert.strictEqual(calls.execute, 1);
 });
 
-// ---- THE dead-3-tier fix: a cleared destructive action must actually RUN ----
+// ---- park-and-resume: a destructive action defers, then RUNS on the resume ----
 
-test('destructive action after a cleared PIN returns ok:true and RUNS', async () => {
+test('destructive action: first pass NEEDS_CEREMONY (does not run), resume on PIN RUNS', async () => {
   const { deps, calls } = makeDeps({ pin: true });
-  const r = await runGovernedAction({ capability: 'run_shell', args: { command: 'rm notes.txt' }, ctx: OWNER, deps });
-  assert.strictEqual(r.ok, true, 'cleared PIN → allowed (not the old null→deny)');
-  assert.strictEqual(r.tier, 'destructive');
-  assert.strictEqual(calls.pin, 1);
+  // First pass — parked, nothing verified or executed.
+  const r1 = await runGovernedAction({ capability: 'run_shell', args: { command: 'rm notes.txt' }, ctx: OWNER, deps });
+  assert.strictEqual(r1.kind, RESULT.NEEDS_CEREMONY, 'first pass parks, never blocks');
+  assert.strictEqual(r1.tier, 'destructive');
+  assert.strictEqual(calls.verify, 0, 'no verify before a reply');
+  assert.strictEqual(calls.execute, 0, 'does not run before the PIN');
+  // Resume — the PIN reply verifies and runs.
+  const r2 = await runGovernedAction({ capability: 'run_shell', args: { command: 'rm notes.txt' }, ctx: OWNER, deps, ceremonyReply: '1234' });
+  assert.strictEqual(r2.ok, true, 'cleared PIN → allowed (not the old null→deny)');
+  assert.strictEqual(r2.tier, 'destructive');
+  assert.strictEqual(calls.verify, 1);
+  assert.strictEqual(calls.replySeen, '1234', 'the verifier sees the raw reply');
   assert.strictEqual(calls.execute, 1, 'the command actually ran');
-  assert.deepStrictEqual(r.result, { ran: 'run_shell', args: { command: 'rm notes.txt' } });
+  assert.deepStrictEqual(r2.result, { ran: 'run_shell', args: { command: 'rm notes.txt' } });
+});
+
+test('no PIN configured (pinConfigured:false) → destructive runs without a ceremony', async () => {
+  const { deps, calls } = makeDeps({ pinConfigured: false });
+  const r = await runGovernedAction({ capability: 'run_shell', args: { command: 'rm notes.txt' }, ctx: OWNER, deps });
+  assert.strictEqual(r.ok, true, 'owner chose no PIN → the action runs');
+  assert.strictEqual(calls.verify, 0, 'nothing to verify');
+  assert.strictEqual(calls.execute, 1);
+});
+
+test('requiresCeremony but NO verifier wired → fail-closed DENIED, never runs', async () => {
+  const { deps } = makeDeps();
+  delete deps.verifyPin; // misconfiguration: a destructive action with no way to ceremony
+  const calls = { execute: 0 };
+  deps.execute = async () => { calls.execute += 1; };
+  const r = await runGovernedAction({ capability: 'run_shell', args: { command: 'rm x' }, ctx: OWNER, deps });
+  assert.strictEqual(r.kind, RESULT.DENIED, 'no verifier → fail closed, not run');
+  assert.match(r.reason, /ceremony_declined/);
+  assert.strictEqual(calls.execute, 0);
 });
 
 test('catastrophic action is a HARD WALL — no PIN, no run, no override', async () => {
@@ -90,30 +124,34 @@ test('catastrophic action is a HARD WALL — no PIN, no run, no override', async
   assert.strictEqual(r.kind, RESULT.DENIED);
   assert.strictEqual(r.reason, 'catastrophic_blocked');
   assert.strictEqual(r.tier, 'catastrophic');
-  assert.strictEqual(calls.pin, 0, 'a wall is not a ceremony — no PIN is asked');
+  assert.strictEqual(calls.verify, 0, 'a wall is not a ceremony — no PIN is asked');
   assert.strictEqual(calls.execute, 0, 'it never runs');
 });
 
-test('declined PIN on a destructive action → DENIED, execute never runs', async () => {
+test('a wrong PIN on the resume → DENIED, execute never runs, reason surfaced', async () => {
   const { deps, calls } = makeDeps({ pin: false });
-  const r = await runGovernedAction({ capability: 'run_shell', args: { command: 'rm x' }, ctx: OWNER, deps });
+  const r = await runGovernedAction({ capability: 'run_shell', args: { command: 'rm x' }, ctx: OWNER, deps, ceremonyReply: '9999' });
   assert.strictEqual(r.kind, RESULT.DENIED);
   assert.strictEqual(r.reason, 'destructive_ceremony_declined');
+  assert.match(r.message, /Wrong PIN/, 'the verifier reason is surfaced to the owner');
   assert.strictEqual(calls.execute, 0);
 });
 
-test('set_mode(off) is destructive → ceremonies', async () => {
+test('set_mode(off) is destructive → first pass NEEDS_CEREMONY, resume runs', async () => {
   const { deps, calls } = makeDeps({ pin: true });
-  const r = await runGovernedAction({ capability: 'set_mode', args: { target: 'Amr', mode: 'off' }, ctx: OWNER, deps });
-  assert.strictEqual(r.ok, true);
-  assert.strictEqual(r.tier, 'destructive');
-  assert.strictEqual(calls.pin, 1);
+  const r1 = await runGovernedAction({ capability: 'set_mode', args: { target: 'Amr', mode: 'off' }, ctx: OWNER, deps });
+  assert.strictEqual(r1.kind, RESULT.NEEDS_CEREMONY);
+  assert.strictEqual(r1.tier, 'destructive');
+  const r2 = await runGovernedAction({ capability: 'set_mode', args: { target: 'Amr', mode: 'off' }, ctx: OWNER, deps, ceremonyReply: '1234' });
+  assert.strictEqual(r2.ok, true);
+  assert.strictEqual(calls.verify, 1);
 });
 
-test('the destructive PIN ceremony echoes the VERBATIM resolved command, not the intent', async () => {
-  const { deps, calls } = makeDeps({ pin: true });
-  await runGovernedAction({ capability: 'run_shell', args: { command: 'rm -rf ./build' }, ctx: OWNER, deps });
-  assert.strictEqual(calls.echoSeen, 'rm -rf ./build');
+test('the NEEDS_CEREMONY echo is the VERBATIM resolved command, not the intent', async () => {
+  const { deps } = makeDeps({ pin: true });
+  const r = await runGovernedAction({ capability: 'run_shell', args: { command: 'rm -rf ./build' }, ctx: OWNER, deps });
+  assert.strictEqual(r.kind, RESULT.NEEDS_CEREMONY);
+  assert.strictEqual(r.echo, 'rm -rf ./build');
 });
 
 test('plain-language intent is recorded on every action', async () => {
@@ -139,7 +177,7 @@ test('a non-owner (owner_only) denial is audited as denied-owner', async () => {
 
 test('a declined destructive ceremony is audited as denied-ceremony', async () => {
   const { deps, calls } = makeDeps({ pin: false });
-  const r = await runGovernedAction({ capability: 'run_shell', args: { command: 'rm -rf ./build' }, ctx: OWNER, deps });
+  const r = await runGovernedAction({ capability: 'run_shell', args: { command: 'rm -rf ./build' }, ctx: OWNER, deps, ceremonyReply: '9999' });
   assert.strictEqual(r.kind, RESULT.DENIED);
   assert.match(r.reason, /ceremony_declined/);
   assert.strictEqual(calls.execute, 0, 'declined → nothing runs');

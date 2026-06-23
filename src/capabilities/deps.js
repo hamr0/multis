@@ -21,7 +21,7 @@ const { logAudit } = require('../governance/audit');
 /**
  * Build the `deps` bundle for runGovernedAction.
  * @param {Object}   p
- * @param {Function} [p.pinChallenge]      async (ctx, { echo }) => boolean
+ * @param {Function} [p.verifyPin]        async (ctx, reply) => { ok, reason? }
  * @param {Function} [p.floorPolicy]       bareguard Axis-A policy: async (toolName, args, ctx) => true|denyString
  * @param {string[]} [p.denylist]          command denylist (shell severity classifier)
  * @param {Object}   [p.indexer]           litectx policy wrapper (for the `index` verb)
@@ -35,9 +35,10 @@ const { logAudit } = require('../governance/audit');
  *                                          tool_call audit) instead of calling
  *                                          cap.tool.execute directly.
  */
-function buildGovernDeps({ pinChallenge, floorPolicy, denylist = [], indexer, appExec, execute } = {}) {
+function buildGovernDeps({ verifyPin, pinConfigured, floorPolicy, denylist = [], indexer, appExec, execute } = {}) {
   return {
-    pinChallenge,
+    verifyPin,
+    pinConfigured,
     denylist,
     floor: makeFloor({ floorPolicy }),
     execute: execute || makeExecute({ indexer, appExec }),

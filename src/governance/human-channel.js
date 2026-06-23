@@ -97,64 +97,6 @@ function createHumanPrompt({ platformRegistry, pinManager, config, autoResponder
   };
 }
 
-/**
- * Build a PIN challenge for the gate policy (#5). When a PIN-class tool (exec,
- * read_file) is invoked on the agent/natural-language path and the owner's PIN
- * session is stale, the gate calls this: it prompts in the owner's chat, waits
- * for the reply via the SAME PendingRegistry path the approval flow uses
- * (so the router's gate_reply dispatch delivers it), verifies, and resolves true/false
- * so the same tool call resumes or is cancelled. No second LLM round.
- *
- * Returns a function (ctx) => Promise<boolean>. true = allow (PIN fresh, not
- * configured, or just verified); false = deny (timeout, wrong PIN, lockout, or
- * no channel to prompt on — fails closed).
- */
-function createPinChallenge({ platformRegistry, pinManager, pending, timeoutMs = 300_000 } = {}) {
-  // opts.echo (M9): the verbatim RESOLVED action the PIN authorises (e.g. the exact
-  // `rm -rf …` command), so the owner approves what will actually run — not a model
-  // intent (POC finding #2). The LLM-path caller (gate.js) passes only ctx; echo is
-  // optional and omitted there, so the prompt degrades to the generic line.
-  return async function pinChallenge(ctx, opts = {}) {
-    if (!pinManager || !pinManager.isEnabled()) return true; // no PIN configured
-    // M9 always-ceremony (owner-decided 2026-06-20): a destructive action ALWAYS
-    // re-prompts for a fresh PIN — we deliberately do NOT honor a still-fresh PIN
-    // session here. The old 24h session bypass (`if (auth === false) return true`)
-    // let a destructive command run for up to a day after one PIN, undercutting
-    // "no destructive capability bypasses ceremony" (negative POC: assume the model
-    // is compromised, so the ceremony is the load-bearing control). `needsAuth` is
-    // still consulted for the LOCKOUT state; only the session-fresh shortcut is gone.
-    const auth = pinManager.needsAuth(ctx?.senderId);
-
-    const platform = platformRegistry?.get(ctx?.platform);
-    if (!platform || typeof platform.send !== 'function') return false; // can't prompt → deny
-
-    if (auth === 'locked') {
-      try { await platform.send(ctx.chatId, 'Locked out due to failed PIN attempts. Try again later.'); } catch { /* ignore */ }
-      return false;
-    }
-
-    const echoLine = opts.echo ? `\n\n  ${opts.echo}\n` : ' ';
-    try {
-      await platform.send(ctx.chatId, `🔒 That action needs your PIN.${echoLine}Reply with your PIN:`);
-    } catch {
-      return false;
-    }
-
-    const reply = await waitForReply(pending, ctx.chatId, ctx.senderId, { timeoutMs });
-    if (reply == null) {
-      try { await platform.send(ctx.chatId, 'PIN timed out — action cancelled.'); } catch { /* ignore */ }
-      return false;
-    }
-    const result = pinManager.authenticate(ctx.senderId, reply.trim());
-    if (!result.success) {
-      try { await platform.send(ctx.chatId, result.reason); } catch { /* ignore */ }
-      return false;
-    }
-    try { await platform.send(ctx.chatId, 'PIN accepted.'); } catch { /* ignore */ }
-    return true;
-  };
-}
-
 function summarizeEvent(event) {
   if (event.kind === 'halt') {
     // Tool-round cap: the model kept calling tools without finishing. Plain
@@ -221,7 +163,49 @@ function waitForReply(pending, chatId, senderId, { timeoutMs } = {}) {
   });
 }
 
+/**
+ * Park-and-resume ceremony (M9 fix 2026-06-22) — split of createPinChallenge into
+ * two non-blocking halves so a serial poll loop (Beeper) never deadlocks:
+ *
+ *   createCeremonyPrompt — sends the PIN prompt (or the lockout line) and returns a
+ *     status; the CALLER then parks the action and RETURNS (freeing the loop).
+ *   createVerifyPin      — on the PIN reply, the core verifies it here, then runs.
+ *
+ * Neither awaits the reply, so neither holds the poll loop. Replaces the old inline
+ * `await pinChallenge → waitForReply`.
+ */
+function createCeremonyPrompt({ platformRegistry, pinManager } = {}) {
+  return async function ceremonyPrompt(ctx, opts = {}) {
+    const platform = platformRegistry?.get(ctx?.platform);
+    if (!platform || typeof platform.send !== 'function') return 'no-channel';
+    if (pinManager && pinManager.needsAuth(ctx?.senderId) === 'locked') {
+      try { await platform.send(ctx.chatId, 'Locked out due to failed PIN attempts. Try again later.'); } catch { /* ignore */ }
+      return 'locked';
+    }
+    // Same wording the inline challenge used; opts.echo is the verbatim RESOLVED
+    // action so the owner approves what will actually run (POC finding #2).
+    const echoLine = opts.echo ? `\n\n  ${opts.echo}\n` : ' ';
+    try {
+      await platform.send(ctx.chatId, `🔒 That action needs your PIN.${echoLine}Reply with your PIN:`);
+    } catch {
+      return 'no-channel';
+    }
+    return 'prompted';
+  };
+}
+
+/** Verify a parked ceremony's PIN reply. Returns { ok, reason? }. No PIN configured
+ *  → { ok: true } (parity with the legacy `!isEnabled() → allow`). */
+function createVerifyPin({ pinManager } = {}) {
+  return async function verifyPin(ctx, reply) {
+    if (!pinManager || !pinManager.isEnabled()) return { ok: true };
+    const r = pinManager.authenticate(ctx?.senderId, String(reply ?? '').trim());
+    return r.success ? { ok: true } : { ok: false, reason: r.reason };
+  };
+}
+
 module.exports = {
   createHumanPrompt,
-  createPinChallenge,
+  createCeremonyPrompt,
+  createVerifyPin,
 };

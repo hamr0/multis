@@ -121,7 +121,7 @@ describe('/remind command', () => {
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
     await router(msg('/remind 1h test', { senderId: 'user2' }), platform);
-    assert.match(platform.lastTo('chat1').text, /Owner only/);
+    assert.match(platform.lastTo('chat1').text, /private assistant/i);
   });
 
   it('shows usage for missing args', async () => {
@@ -177,7 +177,7 @@ describe('/plan command', () => {
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
     await router(msg('/plan organize docs', { senderId: 'user2' }), platform);
-    assert.match(platform.lastTo('chat1').text, /Owner only/);
+    assert.match(platform.lastTo('chat1').text, /private assistant/i);
   });
 
   it('shows usage for missing goal', async () => {

@@ -240,7 +240,7 @@ Changes made via bot commands (`/mode business`, `/mode`, `/agent`, `/pin`) are 
 
 **How it works:** multis uses the Telegram Bot API via long polling. Your bot receives messages in real time as long as multis is running.
 
-**Pairing:** The first person to send `/start <pairing_code>` becomes the owner. The pairing code is printed when multis starts. Additional users can pair with the same code. *(Pairing is Telegram-only — on Beeper there's no code: you're the owner via your Note-to-self chat, detected automatically. See [Beeper](#beeper).)*
+**Pairing:** The first person to send `/start <pairing_code>` becomes the **owner**. The Telegram bot is then **owner-only**: anyone else who messages it — even with the code — gets `This is a private assistant.` and nothing more (no answer, no pairing). To reach other people, connect them through Beeper, not a second Telegram pairing. The pairing code is printed when multis starts. *(Pairing is Telegram-only — on Beeper there's no code: you're the owner via your Note-to-self chat, detected automatically. See [Beeper](#beeper).)*
 
 **Commands:** All commands use the `/` prefix (`/ask`, `/exec`, `/help`, etc.). Plain text messages are treated as questions.
 
@@ -604,7 +604,7 @@ The PIN guards **destructive actions** by *what they do*, not by which command n
 
 When an action needs it, the bot asks for your PIN. After entering the correct PIN, your session is active for 24 hours (configurable).
 
-**This applies to the natural-language path too.** If you ask in plain language ("delete the logs in ~/tmp") and the assistant resolves it to a destructive action while your PIN session is stale, it prompts `🔒 That action needs your PIN.` — echoing the **exact resolved command** — and continues the same action once you reply. So rephrasing a command as a sentence can't sidestep the PIN, and you approve what will *actually* run. (`pin_prompt_timeout` in config bounds how long it waits.)
+**This applies to the natural-language path too.** If you ask in plain language ("delete the logs in ~/tmp") and the assistant resolves it to a destructive action while your PIN session is stale, it prompts `🔒 That action needs your PIN.` — echoing the **exact resolved command** — and continues the same action once you reply. So rephrasing a command as a sentence can't sidestep the PIN, and you approve what will *actually* run. (`pin_prompt_timeout` in config bounds how long it waits.) For an **app-verb** (e.g. `/mode off`), the prompt names the thing in plain language — `set "Amora" to off` — rather than echoing an internal id; only shell commands show the verbatim command text.
 
 ### Changing Your PIN
 

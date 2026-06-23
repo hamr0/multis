@@ -4,6 +4,28 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+## [0.17.4] — 2026-06-23
+
+### Security — Telegram is owner-only; a non-owner can't reach RAG, commands, or pairing
+
+On a Telegram bot, **only the owner** is served. Previously a second person who paired with the code could send a question and get a real answer from the assistant loop — and a query about owner-only material came back with a revealing *"you need owner privileges to access those details,"* which **confirmed that gated content existed**. (No document content leaked — owner material stays scope-fenced — but the existence hint, and the owner's tool-oriented prompt, should never reach a stranger.) Telegram is the **personal-bot** channel, bound to the owner; customers belong on Beeper.
+
+Now every non-owner Telegram message — a question, any command, `/start`, even a file upload — gets a flat `This is a private assistant.` **before** any routing, RAG, or pairing runs. The owner is unaffected, and the first-`/start`-becomes-owner bootstrap on a fresh install still works. Each turned-away sender is recorded once in the audit log (`telegram_reject`, deduped per sender so a spammer can't flood it), so probing stays visible. (Found live during Tier-A testing, 2026-06-23.)
+
+### Fixed — destructive ceremonies no longer deadlock the Beeper message loop
+
+A PIN-gated action on Beeper (`/mode off`, a destructive `/exec`, `/forget`, or a natural-language destructive request) **froze the entire Beeper message loop** for the full PIN timeout (~5 min), ignored the PIN you typed, then cancelled. Root cause: Beeper polls messages **serially** (it `await`s each handler under an overlap guard), but the ceremony **blocked inline** waiting for your PIN — which can only arrive on the *next* poll, that the blocked loop never runs. Telegram was immune (it dispatches each message concurrently), which is why it looked fine there.
+
+The ceremony is now **park-and-resume**: the governed core returns a "needs ceremony" signal instead of blocking, the handler prompts + parks the action and returns (freeing the loop), and your PIN on the next poll verifies and runs it. Identical on Telegram and Beeper. Guarded by a regression test that reproduces the serial-poll deadlock. (Found live, 2026-06-22.)
+
+### Changed — the PIN prompt names the chat, not its raw room id
+
+The ceremony prompt for an app-verb (e.g. `/mode off`) showed the internal Matrix room id (`set_mode(target=!ovoHr…, mode=off)`). It now reads `set "Amora" to off`. The `/exec` echo still shows the **verbatim** shell command — for shell, the exact text is the security-relevant thing you approve.
+
+### Removed — legacy inline PIN-challenge path (internal)
+
+Retired `createPinChallenge` / `runCeremony` / the `pinChallenge` dep now that every door uses park-and-resume; `pin-challenge.test.js` replaced by `ceremony-prompt.test.js` covering the new verify/prompt builders. No second parallel PIN path.
+
 ## [0.17.3] — 2026-06-22
 
 ### Changed — `/mode` is one model: a read-only overview + explicit actions

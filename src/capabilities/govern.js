@@ -17,7 +17,7 @@
  * correct PIN. Here a cleared destructive action returns `{ ok: true, result }`; both
  * consumers map their own verdict off `.ok`. Proven by a consumer-level test (govern.test.js).
  *
- * Pure orchestration: all I/O is injected via `deps` (pinChallenge, execute, audit)
+ * Pure orchestration: all I/O is injected via `deps` (verifyPin, execute, audit)
  * so it is testable without the bot stack and so the ceremony seam stays
  * single-sourced in human-channel.js.
  */
@@ -33,6 +33,8 @@ const {
 const RESULT = Object.freeze({
   OK: 'ok',                 // ran; carries result
   NEEDS_ARG: 'needs_arg',   // missing/invalid required arg → caller opens the picker
+  NEEDS_CEREMONY: 'needs_ceremony', // destructive — caller prompts for PIN, parks the
+                                    // action, resumes via ceremonyReply (park-and-resume)
   DENIED: 'denied',         // floor or declined ceremony
   UNKNOWN: 'unknown',       // no such capability
 });
@@ -43,14 +45,15 @@ const RESULT = Object.freeze({
  * @param {Object}   p.args             concrete arguments
  * @param {Object}   p.ctx              { isOwner, platform, chatId, senderId, ... }
  * @param {Object}   p.deps
- * @param {Function} [p.deps.pinChallenge]      async (ctx, { echo }) => boolean
+ * @param {Function} [p.deps.verifyPin]          async (ctx, reply) => { ok, reason? } — park-and-resume ceremony
+ * @param {boolean}  [p.deps.pinConfigured]      false → no PIN set; ceremony degrades to a no-op
  * @param {Function} p.deps.execute             async (cap, args, ctx) => any  (REQUIRED)
  * @param {Function} [p.deps.floor]             async (cap, args, ctx) => true|denyString — Axis-A
  * @param {Function} [p.deps.audit]             async (intentLine, meta) => void
  * @param {string[]} [p.deps.denylist]          governance command denylist (shell tier)
  * @returns {Promise<{kind, ok, tier?, result?, reason?, missing?, echo?}>}
  */
-async function runGovernedAction({ capability, args = {}, ctx = {}, deps = {} }) {
+async function runGovernedAction({ capability, args = {}, ctx = {}, deps = {}, ceremonyReply } = {}) {
   const cap = typeof capability === 'string' ? getCapability(capability) : capability;
   if (!cap) return { kind: RESULT.UNKNOWN, ok: false, reason: 'unknown_capability' };
 
@@ -106,11 +109,34 @@ async function runGovernedAction({ capability, args = {}, ctx = {}, deps = {} })
     return { kind: RESULT.DENIED, ok: false, reason: 'catastrophic_blocked', tier, echo };
   }
   // Destructive = a PIN speed bump (the owner clears it and proceeds).
+  //
+  // Park-and-resume (M9, 2026-06-22): NEVER block awaiting the reply. The Beeper
+  // poll loop is serial (`await _handleMessage` under an overlap guard), so an
+  // inline wait deadlocks — the PIN reply can't be polled while the handler holds
+  // the loop. So the first pass returns NEEDS_CEREMONY; the caller prompts, parks
+  // the action, and returns (freeing the loop); the PIN reply re-enters here with
+  // `ceremonyReply`, verified via deps.verifyPin, and only then executes.
   if (requiresCeremony(tier)) {
-    const cleared = await runCeremony({ ctx, echo, deps });
-    if (!cleared) {
+    if (!deps.verifyPin) {
+      // No verifier wired → we cannot run the ceremony. Fail closed rather than
+      // execute a destructive action unprotected.
       if (deps.audit) await deps.audit(plainIntent(cap, args, tier), { capability: cap.name, tier, ctx, status: 'denied-ceremony' }).catch(() => {});
       return { kind: RESULT.DENIED, ok: false, reason: `${tier}_ceremony_declined`, tier, echo };
+    }
+    // pinConfigured === false → the owner chose no PIN; the ceremony degrades to a
+    // no-op (the action runs) — parity with "PIN not configured → allow".
+    if (deps.pinConfigured === false) {
+      // fall through to execute — no prompt, no reply round-trip
+    } else if (ceremonyReply === undefined) {
+      return { kind: RESULT.NEEDS_CEREMONY, ok: false, capability: cap, args, ctx, echo, tier };
+    } else {
+      const v = await deps.verifyPin(ctx, ceremonyReply);
+      if (!(v && v.ok)) {
+        if (deps.audit) await deps.audit(plainIntent(cap, args, tier), { capability: cap.name, tier, ctx, status: 'denied-ceremony' }).catch(() => {});
+        // Surface the verifier's reason (e.g. "Wrong PIN. N attempts remaining.")
+        // so the owner knows why it was declined, not just that it was.
+        return { kind: RESULT.DENIED, ok: false, reason: `${tier}_ceremony_declined`, message: v && v.reason, tier, echo };
+      }
     }
   }
 
@@ -124,16 +150,6 @@ async function runGovernedAction({ capability, args = {}, ctx = {}, deps = {} })
 
   // 7. The real allow signal — `{ ok: true }`, never null.
   return { kind: RESULT.OK, ok: true, tier, result, echo };
-}
-
-/** Run the destructive tier's ceremony: a PIN speed bump. (Catastrophic never reaches
- *  here — it is walled in step 4. Benign never reaches here either.) */
-async function runCeremony({ ctx, echo, deps }) {
-  if (deps.pinChallenge) {
-    const pinOk = await deps.pinChallenge(ctx, { echo });
-    if (!pinOk) return false;
-  }
-  return true;
 }
 
 /**
