@@ -931,6 +931,15 @@ function friendlyFloorDeny(raw) {
  * stand-in for the slash door). DENIED maps the owner floor and a declined
  * ceremony to plain language.
  */
+// A command that succeeded with no stdout (executor.js renders that as
+// "(no output)") needs no result line after a "PIN accepted." — the confirmation
+// already says it ran. Standalone benign exec still shows "(no output)" (there it's
+// the only feedback); this only trims the redundant tail in a ceremony resume.
+function isSilentSuccess(result) {
+  const s = result == null ? '' : String(result).trim();
+  return s === '' || s === '(no output)';
+}
+
 async function sendCapabilityResult(r, platform, msg, opts = {}) {
   if (r.kind === RESULT.OK) {
     const text = opts.format ? opts.format(r.result) : String(r.result ?? '(done)');
@@ -1008,7 +1017,8 @@ async function handleCeremonyOrSend(r, platform, msg, config, toolDeps, opts = {
       const r2 = await dispatchCapability(opts.capName, opts.args, msg, config, toolDeps, replyText);
       if (r2.kind === RESULT.OK) await platform.send(msg.chatId, 'PIN accepted.');
       if (opts.onResume) await opts.onResume(r2);
-      else await sendCapabilityResult(r2, platform, msg, opts);
+      // "PIN accepted." already confirms a silent success — skip the "(no output)" tail.
+      else if (!(r2.kind === RESULT.OK && isSilentSuccess(r2.result))) await sendCapabilityResult(r2, platform, msg, opts);
       // Signal the router to re-park on a retryable wrong PIN (attempts remain).
       return { retry: r2.kind === RESULT.DENIED && r2.retry === true };
     },
@@ -1193,7 +1203,9 @@ function wrapToolThroughCore(adaptedTool, govCtx, { verifyPin, pinConfigured, ce
           label: r.echo,
           resume: async (replyText) => {
             const r2 = await runGovernedAction({ capability: cap, args: args || {}, ctx: govCtx, deps, ceremonyReply: replyText });
-            const out = r2.kind === RESULT.OK ? `PIN accepted.\n${String(r2.result ?? '(done)')}` : renderDenied(r2);
+            const out = r2.kind === RESULT.OK
+              ? (isSilentSuccess(r2.result) ? 'PIN accepted.' : `PIN accepted.\n${String(r2.result)}`)
+              : renderDenied(r2);
             try { await platform.send(govCtx.chatId, out); } catch { /* ignore */ }
             // Signal the router to re-park on a retryable wrong PIN (attempts remain).
             return { retry: r2.kind === RESULT.DENIED && r2.retry === true };

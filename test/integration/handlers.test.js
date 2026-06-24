@@ -312,6 +312,22 @@ describe('PIN auth — governed-core ceremony (M9 slash door)', () => {
     assert.ok(out(platform).some((s) => /hello/.test(s.text)), 'command produced its output');
   });
 
+  it('a silent-success command after the PIN shows only "PIN accepted." — no redundant "(no output)"', async () => {
+    // `echo` with no args prints just a newline → executor renders empty stdout as
+    // "(no output)". After "PIN accepted." confirms success that tail is pure noise,
+    // so the ceremony resume trims it (standalone benign exec still shows it).
+    const { platform, router } = build(DESTRUCTIVE_GOV);
+    const execP = router(msg('/exec echo'), platform);
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
+    await router(msg('1234'), platform);
+    await execP;
+    assert.ok(platform.sent.some((s) => /PIN accepted/i.test(s.text)), 'success confirmed');
+    // The redundant tail is either the literal "(no output)" (production exec) or a
+    // blank/whitespace bubble (the bare newline `echo` prints) — neither should be sent.
+    assert.ok(!platform.sent.some((s) => /\(no output\)/.test(s.text) || /^\s*$/.test(s.text)),
+      'no redundant blank/"(no output)" bubble after PIN accepted');
+  });
+
   it('a benign /exec does NOT prompt for a PIN, even when one is configured', async () => {
     const { platform, router } = build(BENIGN_GOV);
     await router(msg('/exec echo benign-marker'), platform);
