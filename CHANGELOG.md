@@ -4,6 +4,18 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+### Fixed — a natural-language destructive action no longer hangs instead of running
+
+Asking in plain language for a destructive action ("delete the file ~/x") prompted for your PIN correctly, but the agent loop kept running *after* the prompt — so the assistant re-prompted, re-reasoned, and eventually hit the tool-round cap, leaking a raw `halt:gate.terminated` to the chat while the action **never executed**. The PIN prompt now **ends the turn cleanly** (the parked action waits for your reply and runs on the correct PIN), so the natural-language path behaves exactly like `/exec`. The slash (`/exec`) path was never affected. Found and fixed live, 2026-06-24; covered by a deterministic regression test (`test/integration/llm-ceremony-halt.test.js`). The root cause — bare-agent swallowing a `HaltError` thrown from a tool body rather than from a governance seam — is filed as an upstream ask; multis halts from the correct seam in the meantime.
+
+### Fixed — a wrong PIN is retry-able, not a dead end
+
+Entering a wrong PIN used to cancel the action outright, so your next (correct) PIN had nothing to resume and fell through. Now a wrong PIN **re-parks** the same action and tells you how many attempts remain (the 3 you always had before lockout) — reply the correct PIN and it runs. A genuine lockout (3 strikes, or a reply during an active lockout) is still terminal.
+
+### Fixed — internal: cleaner audit + lockout signalling
+
+A parked PIN ceremony is no longer mis-logged as a `loop_error` in `audit.log` (it's a clean governance exit; the action's `govern` line is the real record). A PIN reply received *during* an active lockout window is now treated as terminal rather than silently re-parking.
+
 ## [0.17.6] — 2026-06-23
 
 ### Fixed — the approval prompt no longer deadlocks Beeper (the ceremony's latent twin)

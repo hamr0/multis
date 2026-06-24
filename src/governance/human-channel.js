@@ -215,7 +215,9 @@ function createVerifyPin({ pinManager } = {}) {
   return async function verifyPin(ctx, reply) {
     if (!pinManager || !pinManager.isEnabled()) return { ok: true };
     const r = pinManager.authenticate(ctx?.senderId, String(reply ?? '').trim());
-    return r.success ? { ok: true } : { ok: false, reason: r.reason };
+    // Propagate `locked` so the caller can tell a retryable wrong PIN (attempts
+    // remain → re-park the ceremony) from a terminal lockout (stay cleared).
+    return r.success ? { ok: true } : { ok: false, reason: r.reason, locked: r.locked };
   };
 }
 

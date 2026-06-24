@@ -319,14 +319,20 @@ describe('PIN auth — governed-core ceremony (M9 slash door)', () => {
     assert.ok(platform.sent.some((s) => /benign-marker/.test(s.text)), 'benign command ran straight through');
   });
 
-  it('a wrong PIN on a destructive /exec cancels — the command never runs', async () => {
+  it('a wrong PIN on a destructive /exec does NOT run the command and stays retry-able', async () => {
+    // A wrong PIN with attempts remaining re-parks the ceremony (the owner gets the
+    // 3 tries pin.js grants), so the message is "N attempts remaining" — NOT a
+    // terminal "cancelled". The security invariant is unchanged: the command never
+    // runs on a wrong PIN. (Corrected 2026-06-23: a wrong PIN used to kill the park,
+    // making the next correct PIN fall through — see ceremony-repark.test.js.)
     const { platform, router } = build(DESTRUCTIVE_GOV);
     const execP = router(msg('/exec echo should-not-run'), platform);
     await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
 
     await router(msg('9999'), platform); // wrong
     await execP;
-    assert.ok(platform.sent.some((s) => /cancelled/i.test(s.text)), 'ceremony declined → cancelled');
+    assert.ok(platform.sent.some((s) => /attempts remaining/i.test(s.text)), 'wrong PIN → retry-able, attempts remaining');
+    assert.ok(!platform.sent.some((s) => /cancelled/i.test(s.text)), 'a retry-able wrong PIN is NOT cancelled');
     assert.ok(!out(platform).some((s) => /should-not-run/.test(s.text)), 'command did not execute');
   });
 
@@ -428,14 +434,20 @@ describe('App-verb door — governed-core ceremony (M9 increment 2)', () => {
     assert.match(platform.lastTo('chat1').text, /No memory notes/, 'memory is empty after the cleared forget');
   });
 
-  it('a wrong PIN on /forget cancels — memory is NOT cleared', async () => {
+  it('a wrong PIN on /forget does NOT clear memory and stays retry-able', async () => {
+    // Wrong PIN re-parks (retry-able, "attempts remaining"), never a terminal
+    // cancel; memory is untouched until a correct PIN. (Corrected 2026-06-23.)
     const { platform, router } = buildPin();
     await router(msg('/remember keep-this-note'), platform);
     const forgetP = router(msg('/forget'), platform);
     await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
     await router(msg('9999'), platform); // wrong
     await forgetP;
-    assert.ok(platform.sent.some((s) => /cancelled/i.test(s.text)), 'declined ceremony cancels');
+    assert.ok(platform.sent.some((s) => /attempts remaining/i.test(s.text)), 'wrong PIN → retry-able');
+    assert.ok(!platform.sent.some((s) => /cancelled/i.test(s.text)), 'a retry-able wrong PIN is NOT cancelled');
+    // The ceremony is still parked (retry-able), so `cancel` to abort it before
+    // checking memory — a non-PIN reply would just hit the park-and-remind.
+    await router(msg('cancel'), platform);
     await router(msg('/memory'), platform);
     assert.match(platform.lastTo('chat1').text, /keep-this-note/, 'memory survived the declined forget');
   });

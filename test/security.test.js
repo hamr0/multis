@@ -156,6 +156,10 @@ describe('PinManager', () => {
       const r = pm.authenticate('user1', '4567');
       assert.strictEqual(r.success, false);
       assert.match(r.reason, /Locked out/);
+      // `locked:true` during an active lockout makes a mid-lockout ceremony reply
+      // terminal (retry:false) instead of re-parking on every reply — see
+      // govern.js `retry: !(v && v.locked)` (regression 2026-06-24).
+      assert.strictEqual(r.locked, true);
     });
 
     it('clears fail count on success', () => {

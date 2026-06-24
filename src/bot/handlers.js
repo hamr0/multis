@@ -13,7 +13,7 @@ const { detectInjection, logInjectionAttempt } = require('../security/injection'
 const { buildToolRegistry, getToolsForUser, loadToolsConfig } = require('../tools/registry');
 const { adaptTools } = require('../tools/adapter');
 const { getPlatform } = require('../tools/platform');
-const { Loop, Retry, CircuitBreaker } = require('bare-agent');
+const { Loop, Retry, CircuitBreaker, HaltError } = require('bare-agent');
 const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler');
 const { createGate } = require('../governance/gate');
 const { createHumanPrompt, createCeremonyPrompt, createVerifyPin } = require('../governance/human-channel');
@@ -420,10 +420,19 @@ function createMessageRouter(config, deps = {}) {
               await platform.send(msg.chatId, `⏳ Still waiting for your PIN${what}. Reply your PIN (4–6 digits), or "cancel".`);
               return;
             }
-            // A PIN attempt → one-shot: clear, then resume (verifies + runs; a wrong
-            // PIN is rejected inside the resume with the attempts-remaining reason).
+            // A PIN attempt → clear, then resume (verifies + runs). On a WRONG PIN
+            // with attempts remaining the resume returns { retry:true } → RE-PARK the
+            // SAME ceremony so the owner can use their remaining tries (pin.js grants
+            // 3, and the prompt says "N attempts remaining"). On success / lockout /
+            // no-verifier it stays cleared. Without this, a wrong PIN killed the park
+            // and the next (correct) PIN fell through to /ask (regression 2026-06-23).
             pending.clear(msg.chatId, msg.senderId);
-            if (typeof entry.resume === 'function') await entry.resume(t);
+            const outcome = typeof entry.resume === 'function' ? await entry.resume(t) : undefined;
+            if (outcome && outcome.retry) {
+              pending.set(msg.chatId, msg.senderId, 'ceremony_action', {
+                ttlMs: entry.ttlMs, label: entry.label, resume: entry.resume,
+              });
+            }
             return;
           }
           case 'pin_change':
@@ -939,8 +948,11 @@ async function sendCapabilityResult(r, platform, msg, opts = {}) {
       await platform.send(msg.chatId, '⛔ Blocked: that command is too destructive to run through me — please do it yourself in a terminal.');
     } else if (/_ceremony_declined$/.test(r.reason || '')) {
       // r.message carries the verifier's reason (e.g. "Wrong PIN. N attempts
-      // remaining."); always end with "Action cancelled." so the outcome is clear.
-      await platform.send(msg.chatId, r.message ? `${r.message}\nAction cancelled.` : 'Action cancelled.');
+      // remaining."). When `retry` is set the ceremony is RE-PARKED (the caller
+      // re-adds it), so don't say "Action cancelled" — the owner can try again.
+      // A terminal decline (lockout / no verifier) ends with "Action cancelled."
+      const tail = r.retry ? '' : '\nAction cancelled.';
+      await platform.send(msg.chatId, r.message ? `${r.message}${tail}` : 'Action cancelled.');
     } else {
       // floor deny (Axis-A) — bareguard's raw verdict (e.g.
       // "[deny: content.denyPatterns] matched /\brm\s+-rf\s+\//") is an internal
@@ -997,6 +1009,8 @@ async function handleCeremonyOrSend(r, platform, msg, config, toolDeps, opts = {
       if (r2.kind === RESULT.OK) await platform.send(msg.chatId, 'PIN accepted.');
       if (opts.onResume) await opts.onResume(r2);
       else await sendCapabilityResult(r2, platform, msg, opts);
+      // Signal the router to re-park on a retryable wrong PIN (attempts remain).
+      return { retry: r2.kind === RESULT.DENIED && r2.retry === true };
     },
   });
 }
@@ -1181,9 +1195,22 @@ function wrapToolThroughCore(adaptedTool, govCtx, { verifyPin, pinConfigured, ce
             const r2 = await runGovernedAction({ capability: cap, args: args || {}, ctx: govCtx, deps, ceremonyReply: replyText });
             const out = r2.kind === RESULT.OK ? `PIN accepted.\n${String(r2.result ?? '(done)')}` : renderDenied(r2);
             try { await platform.send(govCtx.chatId, out); } catch { /* ignore */ }
+            // Signal the router to re-park on a retryable wrong PIN (attempts remain).
+            return { retry: r2.kind === RESULT.DENIED && r2.retry === true };
           },
         });
-        return 'I\'ve requested your PIN — reply with it and I\'ll run that.';
+        // END THE TURN. The PIN prompt is already sent and the action is parked; if
+        // we returned a tool-result string the Loop would feed it to the model and
+        // keep going — a model that keeps reasoning/re-calling then re-prompts and
+        // re-parks every round until limits.maxToolRounds halts it (the NL-door bug,
+        // 2026-06-24). bare-agent only honors HaltError from its GATE SEAMS, NOT from
+        // a tool's execute (that catch wraps it in a ToolError and continues). So we
+        // flag the park here and let the onToolResult seam in runAgentLoop throw the
+        // HaltError — the Loop exits cleanly with error 'halt:ceremony-parked', which
+        // runAgentLoop swallows (the prompt IS the user-facing signal). Return ''
+        // (not a hint string) so nothing extra is fed back before the halt.
+        govCtx._ceremonyParked = true;
+        return '';
       }
       if (r.kind === RESULT.DENIED) return renderDenied(r);
       return 'Action could not be completed.';
@@ -1240,6 +1267,16 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   const cb = getCircuitBreaker(config);
   const wrappedProvider = cb.wrapProvider(agentProvider, config?.llm?.provider || 'default');
 
+  // Halt the loop when a tool parked a PIN ceremony. bare-agent honors HaltError
+  // from the onToolResult SEAM (not from a tool's execute, which swallows it), so
+  // wrapToolThroughCore flags the park on govCtx and we throw HaltError here — right
+  // after the gate records the tool result — to end the turn cleanly. Without this
+  // the model keeps reasoning/re-calling and burns rounds to a maxToolRounds halt.
+  const onToolResultWithHalt = async (rec) => {
+    if (onToolResult) await onToolResult(rec);
+    if (govCtx._ceremonyParked) throw new HaltError('ceremony parked for PIN', { rule: 'ceremony-parked' });
+  };
+
   // "Always ask" confirms (e.g. before every exec) are governed by bareguard's
   // flags primitive inside `policy`, routed through the single humanChannel —
   // no separate Checkpoint. governance = bareguard, one path.
@@ -1249,9 +1286,13 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
     retry,
     policy,
     onLlmResult,
-    onToolResult,
+    onToolResult: onToolResultWithHalt,
     throwOnError: false,
     onError: (err, meta) => {
+      // A parked PIN ceremony halts the loop on purpose (onToolResultWithHalt) — a
+      // clean governance exit, not an error. Don't log it as loop_error (the parked
+      // action's govern line is the real audit record); logging it dents fidelity.
+      if (err?.rule === 'ceremony-parked') return;
       logAudit({ action: 'loop_error', source: meta?.source, error: err?.message, chatId: ctx.chatId, user_id: ctx.senderId });
     },
   });
@@ -1264,7 +1305,11 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   });
   mark(`runAgentLoop: loop.run done (rounds=${result.toolRounds ?? '?'}, err=${result.error ? 'yes' : 'no'})`, _rc);
   if (result.error) {
-    // Halt errors come back as `error: 'halt:<rule>'` strings — surface as a normal Error
+    // A destructive tool parked its PIN ceremony and halted the turn (see
+    // wrapToolThroughCore). The PIN prompt is already in the chat and the action is
+    // parked on PendingRegistry — there is nothing to surface, so end quietly.
+    if (result.error === 'halt:ceremony-parked') return '';
+    // Other halt errors come back as `error: 'halt:<rule>'` strings — surface as a normal Error
     throw result.error instanceof Error ? result.error : new Error(String(result.error));
   }
   return result.text || '(no response)';
@@ -1381,6 +1426,12 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
       gov,
     });
     mark('routeAsk <- agent loop', _lc);
+
+    // Empty answer = a destructive tool parked its PIN ceremony and halted the turn
+    // (runAgentLoop swallows 'halt:ceremony-parked' → ''). The PIN prompt is already
+    // the only thing to say — don't post an empty bubble, record an empty assistant
+    // turn, or trip capture. The parked action's govern line is the audit record.
+    if (!answer) return;
 
     // Prefix with agent name only when multiple agents exist
     const prefixed = agentRegistry && agentRegistry.size > 1
