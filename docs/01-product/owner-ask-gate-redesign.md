@@ -1,6 +1,6 @@
 # M10 — Unified owner-ask gate (ceremony/pending/park-resume redesign)
 
-**Status:** DESIGN — **core LOCKED 2026-06-24** (principle + contract, §1–§3 below). Remaining sections (§4 doors, §5 memory wiring, §6 migration+tests) are OPEN, to design before build.
+**Status:** DESIGN COMPLETE — **§1–§6 LOCKED 2026-06-24**. Ready to build (M10), starting with the keystone replay regression (red).
 **Motivation:** live testing (2026-06-24) surfaced the "stuck on delete" bug — a parked destructive request replays on every later turn. Investigation showed the owner-interaction lifecycle is **4 parallel park-and-resume implementations** with no shared contract; the bug lives in the seam between them. Owner called for a redesign, not a fifth patch.
 
 ---
@@ -58,17 +58,54 @@ Each of the 7 types fills in only `prompt / accepts / handle`; none touch memory
 
 ---
 
-## 4. OPEN — how the two doors create an ask (to design next)
+## 4. Both doors construct one ask; one resume path (LOCKED)
 
-Both the slash door and the LLM door should stop implementing park/resume and instead **construct one ask object and hand it to the dispatcher**. The agent-loop halt (HaltError from the `onToolResult` seam, to stop the model re-calling after a park) is retained but reframed as "the loop yields when an ask is created mid-loop." Kills the two divergent resume paths (`dispatchCapability` vs direct `runGovernedAction`). *To be designed and validated.*
+Today each door parks its **own** resume closure, and they differ: slash re-runs `dispatchCapability(…, ceremonyReply)`, LLM calls `runGovernedAction(…, ceremonyReply)` directly. Same destination, two paths.
 
-## 5. OPEN — memory wiring specifics (to design next)
+**One factory builds the ask, both doors use it.** `makeCeremonyAsk({ capability, args, ctx })` returns an ask whose:
+- `prompt` = verbatim *"🔒 needs your PIN — `<echo>`"* (built once),
+- `accepts(text)` = `^\d{4,6}$`,
+- `handle(text)` = `runGovernedAction({ capability, args, ctx, ceremonyReply: text })`, mapped: OK → `{ done, summary }`; wrong-PIN-tries-left → `{ retry, reprompt: "Wrong PIN, N left" }`; lockout → `{ done, summary: "didn't run — locked out" }` (terminal).
 
-The dispatcher needs the per-chat memory manager (`getMem`) — which the `ceremony_action` handler lacks today. Key decision: **the user's original request should enter `recent.json` paired with its outcome at resolution, not eagerly before the loop** (so a parked request can never dangle). Define exactly what `summary` reads like per ask type, and confirm the PIN keystrokes/prompts are excluded. *To be designed and validated.*
+Defined **once** — "run this capability with this PIN" is identical whether it came from `/exec` or the model calling `exec`. Both doors then do two steps: build the ask, `dispatcher.open(ask)`. Slash returns (poll loop free); the LLM door opens it **mid-loop → the loop yields**. `handleCeremonyOrSend` and the bespoke `wrapToolThroughCore` ceremony branch both collapse into "build ask, open it"; the divergent closures and `dispatchCapability`-vs-direct-core split are gone.
 
-## 6. OPEN — migration order + tests (to design next)
+**Loop-yield mechanism:** stays the **HaltError-from-the-`onToolResult`-seam** (the only thing bare-agent honors today), reframed as a general rule — *opening an owner-ask during a turn ends the turn; the model can't proceed until the owner answers.* Simplifies to a direct `throw` from `execute` once the §7 bare-agent ask lands.
 
-Migrate the 7 types onto the contract incrementally (likely: `ceremony_action` first — it's the broken one — then pickers, then wizards), each behind its own red→green test, with a regression test that proves a resolved/parked destructive request is **not** replayed on the next turn (the bug this whole redesign exists to kill). *To be sequenced.*
+## 5. Memory wiring: record the exchange at completion, never eagerly (LOCKED)
+
+The bug: `routeAsk` appends the user request **before** the loop (handlers.js:1365), the loop parks + halts, the outcome is never appended → the request dangles and replays; the `ceremony_action` handler has no memory access to fix it.
+
+**Two rules:**
+1. **A turn enters conversation only when it *completes*, as a paired (request → outcome) exchange.** Stop appending the user message eagerly. The live request is handed to the loop as a message (history still comes from past *completed* turns) and is written to `recent.json` only at completion, with its outcome. While an ask is pending, `recent.json` holds **nothing** about this turn — pure control state, invisible to the model. No dangling, by construction. (A benign `/ask` is the same rule with no parking; the eager append at handlers.js:1365 goes away and the loop's `messages` get the live request pushed explicitly.)
+2. **The dispatcher owns recording, for every ask type.** Wired with `getMem`. The ask carries the originating request text; the dispatcher pairs it with the outcome at resolution. **PIN keystrokes and prompts are never written.** The capability supplies the `summary` line (default: its result, or *"✓ done"* when silent — which restores the confirmation the `(no output)` polish removed).
+
+**Terminal-states table — every terminal state records; only *pending* is silent (so no ending can leave a dangling request):**
+
+| Terminal state | Recorded as |
+|---|---|
+| done — success | *"✓ deleted X"* / *"Amora set to off"* / *"memory cleared"* |
+| done — lockout (3 wrong PINs) | *"didn't run — locked out"* |
+| cancelled | *"cancelled — didn't run"* |
+| expired (TTL timeout, owner never replied) | *"expired — didn't run"* |
+| *(pending)* | *nothing* |
+
+**Edge case for build (not design):** a turn that answers something *and* parks a ceremony loses the partial answer on yield — rare; flag it.
+
+## 6. Migration order + tests (LOCKED)
+
+**Strangler, not big-bang:** build the one dispatcher *beside* the existing 7-case switch, move types onto it one at a time, suite green at every step.
+
+**Order — riskiest first:**
+1. **`ceremony_action`** — the broken one, and the only type touching the agent loop + memory. Highest value + risk → first. Proves the dispatcher + completion-recording end-to-end.
+2. **Pickers** (`index`, `mode`, `business_menu`) — single-shot numeric; validate the simple path.
+3. **Wizards** (`pin_change`, `business_wizard`) — multi-step; validate the `{ next }` outcome.
+4. **`gate_reply`** — **assess before migrating**: the interactive bareguard ask was largely folded into the PIN tier (0.17.6) and fails closed on Beeper; may be vestigial → migrate *or delete*.
+
+**Tests:**
+- **Keystone regression — write FIRST, must FAIL on today's code:** destructive request → park → {resolve | cancel | expire} → next turn is a plain question → assert the model does **not** re-issue the action, and `recent.json` reads request→outcome, not a dangling request. *Passing it is the definition of "done."*
+- **Per-type characterization:** each migrated type keeps its existing behavior tests green, plus contract assertions (`accepts` gates the answer; `handle` returns the right outcome; `summary` recorded).
+- **Memory invariants:** after resolve `recent.json` has (request, summary); the PIN digits are **never** in `recent.json`; a pending ask records nothing; cancel/expire/lockout each record their line.
+- Full suite green at every step.
 
 ---
 
