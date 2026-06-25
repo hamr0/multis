@@ -30,7 +30,6 @@ const pickerTtlMs = (config) => (config.interaction?.picker_ttl_minutes ?? 5) * 
 const wizardTtlMs = (config) => (config.interaction?.wizard_ttl_minutes ?? 30) * 60_000;
 const PKG_VERSION = require('../../package.json').version;
 const { looksLikeCommand } = require('../platforms/message');
-const { mark, startClock } = require('../debug/instr'); // TEMP: timeout instrumentation
 
 // ---------------------------------------------------------------------------
 // Admin presence pause — when owner messages in a business chat, bot pauses
@@ -1206,10 +1205,8 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   const adapted = adaptTools(tools, ctx);
 
   // Resolve governance lazily on first call (ESM bareguard requires await import)
-  const _gc = startClock();
   const bundle = gov ? await gov.resolve() : {};
   const { policy, onLlmResult, onToolResult, verifyPin, pinConfigured, ceremonyPrompt, denylist } = bundle;
-  mark('runAgentLoop: gov.resolve done', _gc);
 
   // M9 increment 3 — the LLM door through the one governed core. A tool whose
   // capability can require a ceremony (today: `exec`/run_shell, dynamic severity)
@@ -1277,12 +1274,9 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   });
 
   // Pass _ctx through so humanChannel can route prompts back via platformRegistry.
-  const _rc = startClock();
-  mark('runAgentLoop: loop.run start');
   const result = await loop.run(messages, governed, {
     ctx: govCtx,
   });
-  mark(`runAgentLoop: loop.run done (rounds=${result.toolRounds ?? '?'}, err=${result.error ? 'yes' : 'no'})`, _rc);
   if (result.error) {
     // A ceremony halt — a destructive tool parked its PIN prompt, or the owner was
     // locked out (see wrapToolThroughCore). The user-facing line (the PIN prompt or
@@ -1345,10 +1339,7 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     // null-global, so customer-planted content can't surface in another customer's
     // or the owner's tool-enabled agent loop as trusted instructions (#6).
     const scope = admin ? 'admin' : `user:${msg.chatId}`;
-    const _sc = startClock();
-    mark('routeAsk -> indexer.search');
     const chunks = await indexer.search(question, { scope, n: 5 });
-    mark(`routeAsk <- indexer.search (${chunks.length} chunks)`, _sc);
 
     // Resolve agent for @mention stripping + per-chat provider only. The persona
     // layer is DEFERRED (obedient-bot-first; constitution/persona returns with the
@@ -1394,15 +1385,12 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     // park its PIN ceremony (park-and-resume) instead of blocking the loop.
     const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, platformName: msg.platform, config, platformRegistry, pending, requestText: question };
 
-    const _lc = startClock();
-    mark(`routeAsk -> agent loop (${userTools.length} tools, model ${config?.llm?.model || '?'})`);
     const answer = await runAgentLoop(agentProvider, messages, userTools, {
       system,
       ctx,
       config,
       gov,
     });
-    mark('routeAsk <- agent loop', _lc);
 
     // Empty answer = a destructive tool parked its PIN ceremony and halted the turn
     // (runAgentLoop swallows 'halt:ceremony-parked' → ''). The PIN prompt is already
@@ -1416,10 +1404,7 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
       ? `[${resolved.name}] ${answer}`
       : answer;
 
-    const _pc = startClock();
-    mark('routeAsk -> platform.send');
     await platform.send(msg.chatId, prefixed);
-    mark('routeAsk <- platform.send', _pc);
 
     // Record the COMPLETED exchange as a paired (request → answer) turn (M10 §5
     // rule 2). Written only now — never eagerly — so a turn that instead parked a
