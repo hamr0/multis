@@ -934,7 +934,7 @@ describe('Owner commands', () => {
     let indexedPath = null;
     let indexedRole = null;
     const indexer = stubIndexer();
-    indexer.indexFile = async (p, role) => { indexedPath = p; indexedRole = role; return 5; };
+    indexer.indexFile = async (p, role) => { indexedPath = p; indexedRole = role; return { chunks: 5, mode: 'chunked' }; };
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
     await router(msg('/index /tmp/test.pdf public'), platform);
@@ -1482,7 +1482,7 @@ describe('Beeper file indexing', () => {
     const platform = mockPlatform();
     let indexedName = null, indexedRole = null;
     const indexer = stubIndexer();
-    indexer.indexBuffer = async (buf, name, role) => { indexedName = name; indexedRole = role; return 3; };
+    indexer.indexBuffer = async (buf, name, role) => { indexedName = name; indexedRole = role; return { chunks: 3, mode: 'chunked' }; };
     platform.downloadAsset = async (url) => Buffer.from('test content');
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
@@ -1529,7 +1529,7 @@ describe('Beeper file indexing', () => {
 
   it('scope reply 1 indexes as public', async () => {
     let indexedRole = null;
-    const { platform, router, up } = uploadNoScope({ indexBuffer: async (buf, name, role) => { indexedRole = role; return 5; } });
+    const { platform, router, up } = uploadNoScope({ indexBuffer: async (buf, name, role) => { indexedRole = role; return { chunks: 5, mode: 'chunked' }; } });
     await router(up, platform);
     await router(msg('1', { platform: 'beeper', senderId: 'self1', isSelf: true }), platform);
     assert.strictEqual(indexedRole, 'public');
@@ -1538,7 +1538,7 @@ describe('Beeper file indexing', () => {
 
   it('scope reply 2 indexes as admin', async () => {
     let indexedRole = null;
-    const { platform, router, up } = uploadNoScope({ fileName: 'notes.md', indexBuffer: async (buf, name, role) => { indexedRole = role; return 2; } });
+    const { platform, router, up } = uploadNoScope({ fileName: 'notes.md', indexBuffer: async (buf, name, role) => { indexedRole = role; return { chunks: 2, mode: 'chunked' }; } });
     await router(up, platform);
     await router(msg('2', { platform: 'beeper', senderId: 'self1', isSelf: true }), platform);
     assert.strictEqual(indexedRole, 'admin');

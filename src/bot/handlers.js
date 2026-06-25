@@ -999,6 +999,14 @@ async function routeRead(msg, platform, config, filePath, toolDeps = {}) {
 // file in chat (a scoped upload), never via a host path.
 // Registry scope vocab: 'kb' = the public KB, 'admin' = owner-private. We accept
 // the user words public|kb|admin and normalise; null scope → ask for the role.
+// One renderer for an ingest outcome so a 0-chunk / blob result reads as "stored
+// but not searchable" instead of a misleading "Indexed 0 chunks". Takes litectx's
+// {chunks, mode} ('chunked' = searchable; 'blob' = stored-only, not recallable).
+function indexOutcomeMsg({ chunks, mode }, name, scope) {
+  if (mode === 'blob' || !chunks) return `Stored ${name} [${scope}] — saved but not searchable (no text chunks).`;
+  return `Indexed ${chunks} chunk${chunks === 1 ? '' : 's'} from ${name} [${scope}]`;
+}
+
 function parseIndexArgs(args) {
   if (!args || !args.trim()) return null;
   const parts = args.trim().split(/\s+/);
@@ -1039,7 +1047,7 @@ async function routeIndex(msg, platform, config, indexer, args, toolDeps = {}) {
     return;
   }
   await sendCapabilityResult(r, platform, msg, {
-    format: (res) => `Indexed ${res.count} chunks from ${parsed.display} [${res.role}]`,
+    format: (res) => indexOutcomeMsg({ chunks: res.count, mode: res.mode }, parsed.display, res.role),
     ownerOnly: 'Owner only command.',
   });
 }
@@ -2581,9 +2589,9 @@ function makeIndexAsk({ fileName, srcURL, platform, indexer, msg, config }) {
       try {
         await platform.send(msg.chatId, `Downloading and indexing: ${fileName} (${scope})...`);
         const buffer = await platform.downloadAsset(srcURL);
-        const count = await indexer.indexBuffer(buffer, fileName, scope);
-        await platform.send(msg.chatId, `Indexed ${count} chunks from ${fileName} [${scope}]`);
-        logAudit({ action: 'index_upload', user_id: msg.senderId, filename: fileName, chunks: count, scope, platform: 'beeper' });
+        const res = await indexer.indexBuffer(buffer, fileName, scope);
+        await platform.send(msg.chatId, indexOutcomeMsg(res, fileName, scope));
+        logAudit({ action: 'index_upload', user_id: msg.senderId, filename: fileName, chunks: res.chunks, scope, platform: 'beeper' });
       } catch (err) {
         await platform.send(msg.chatId, `Index error: ${err.message}`);
       }
@@ -2598,7 +2606,7 @@ async function handleBeeperFileIndex(msg, platform, config, indexer, pending) {
     return;
   }
 
-  const supported = ['pdf', 'docx', 'md', 'txt'];
+  const supported = config.documents?.allowedTypes || ['pdf', 'docx', 'md', 'txt'];
   const attachment = msg._attachments.find(a => {
     const ext = (a.fileName || '').split('.').pop().toLowerCase();
     return supported.includes(ext);
@@ -2628,9 +2636,9 @@ async function handleBeeperFileIndex(msg, platform, config, indexer, pending) {
   try {
     await platform.send(msg.chatId, `Downloading and indexing: ${fileName} (${scope})...`);
     const buffer = await platform.downloadAsset(srcURL);
-    const count = await indexer.indexBuffer(buffer, fileName, scope);
-    await platform.send(msg.chatId, `Indexed ${count} chunks from ${fileName} [${scope}]`);
-    logAudit({ action: 'index_upload', user_id: msg.senderId, filename: fileName, chunks: count, scope, platform: 'beeper' });
+    const res = await indexer.indexBuffer(buffer, fileName, scope);
+    await platform.send(msg.chatId, indexOutcomeMsg(res, fileName, scope));
+    logAudit({ action: 'index_upload', user_id: msg.senderId, filename: fileName, chunks: res.chunks, scope, platform: 'beeper' });
   } catch (err) {
     await platform.send(msg.chatId, `Index error: ${err.message}`);
   }
@@ -2648,7 +2656,7 @@ async function handleDocumentUpload(msg, platform, config, indexer) {
 
   const filename = doc.file_name || 'unknown';
   const ext = filename.split('.').pop().toLowerCase();
-  const supported = ['pdf', 'docx', 'md', 'txt'];
+  const supported = config.documents?.allowedTypes || ['pdf', 'docx', 'md', 'txt'];
 
   if (!supported.includes(ext)) {
     await platform.send(msg.chatId, `Unsupported file type: .${ext}\nSupported: ${supported.join(', ')}`);
@@ -2661,9 +2669,9 @@ async function handleDocumentUpload(msg, platform, config, indexer) {
     const response = await fetch(fileLink.href);
     const buffer = Buffer.from(await response.arrayBuffer());
 
-    const count = await indexer.indexBuffer(buffer, filename, 'kb');
-    await platform.send(msg.chatId, `Indexed ${count} chunks from ${filename} [kb]`);
-    logAudit({ action: 'index_upload', user_id: msg.senderId, filename, chunks: count });
+    const res = await indexer.indexBuffer(buffer, filename, 'kb');
+    await platform.send(msg.chatId, indexOutcomeMsg(res, filename, 'kb'));
+    logAudit({ action: 'index_upload', user_id: msg.senderId, filename, chunks: res.chunks });
   } catch (err) {
     await platform.send(msg.chatId, `Index error: ${err.message}`);
     logAudit({ action: 'index_error', user_id: msg.senderId, filename, error: err.message });
@@ -2675,7 +2683,7 @@ async function handleDocumentUpload(msg, platform, config, indexer) {
  * Never sends a reply to the user.
  */
 async function handleSilentAttachment(msg, platform, config, indexer, source) {
-  const supported = ['pdf', 'docx', 'md', 'txt'];
+  const supported = config.documents?.allowedTypes || ['pdf', 'docx', 'md', 'txt'];
 
   if (source === 'telegram') {
     const doc = msg._document;
@@ -2689,8 +2697,8 @@ async function handleSilentAttachment(msg, platform, config, indexer, source) {
       const fileLink = await msg._telegram.getFileLink(doc.file_id);
       const response = await fetch(fileLink.href);
       const buffer = Buffer.from(await response.arrayBuffer());
-      const count = await indexer.indexBuffer(buffer, filename, scope);
-      logAudit({ action: 'silent_index', user_id: msg.senderId, filename, chunks: count, scope, platform: 'telegram' });
+      const res = await indexer.indexBuffer(buffer, filename, scope);
+      logAudit({ action: 'silent_index', user_id: msg.senderId, filename, chunks: res.chunks, scope, platform: 'telegram' });
     } catch (err) {
       console.error(`Silent index error (telegram): ${err.message}`);
     }
@@ -2704,8 +2712,8 @@ async function handleSilentAttachment(msg, platform, config, indexer, source) {
     try {
       const scope = `user:${msg.chatId}`;
       const buffer = await platform.downloadAsset(attachment.srcURL);
-      const count = await indexer.indexBuffer(buffer, attachment.fileName, scope);
-      logAudit({ action: 'silent_index', user_id: msg.senderId, filename: attachment.fileName, chunks: count, scope, platform: 'beeper' });
+      const res = await indexer.indexBuffer(buffer, attachment.fileName, scope);
+      logAudit({ action: 'silent_index', user_id: msg.senderId, filename: attachment.fileName, chunks: res.chunks, scope, platform: 'beeper' });
     } catch (err) {
       console.error(`Silent index error (beeper): ${err.message}`);
     }

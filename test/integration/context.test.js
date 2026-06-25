@@ -52,9 +52,28 @@ describe('context wrapper (litectx policy layer)', () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('ingest reports chunk count for a parseable doc', async () => {
-    const n = await context.indexBuffer(buf('# Extra\nA widget appendix paragraph.'), 'extra.md', 'kb');
-    assert.ok(n >= 1, 'a non-empty markdown doc should produce at least one chunk');
+  it('ingest reports {chunks, mode} for a parseable doc', async () => {
+    const r = await context.indexBuffer(buf('# Extra\nA widget appendix paragraph.'), 'extra.md', 'kb');
+    assert.ok(r.chunks >= 1, 'a non-empty markdown doc should produce at least one chunk');
+    assert.equal(r.mode, 'chunked', 'a parseable doc reports the searchable (chunked) mode');
+  });
+
+  // litectx 0.19.0 (plaintext-chunker ask) — validate the PUBLISHED artifact: plain-text
+  // family files now chunk (were 0-chunk blobs on 0.18.0) and are recallable by a body term.
+  it('plaintext family (.txt/.text/.log/.csv) chunks and is recallable (litectx 0.19.0)', async () => {
+    const cases = [
+      ['notes.txt', 'zonkberry alpha note\n\nsecond paragraph beta'],
+      ['app.log', '2026-06-25 zonkberry log line\nanother line'],
+      ['rows.csv', 'col1,col2\nzonkberry,9\nbeta,8'],
+      ['raw.text', 'zonkberry plain text body'],
+    ];
+    for (const [name, body] of cases) {
+      const r = await context.indexBuffer(buf(body), name, 'kb');
+      assert.ok(r.chunks >= 1, `${name} should produce >= 1 chunk (0 on litectx 0.18.0)`);
+      assert.equal(r.mode, 'chunked', `${name} should be searchable, not stored-only`);
+    }
+    const hits = names(await context.search('zonkberry', { scope: 'kb', n: 20 })).join('\n');
+    assert.match(hits, /zonkberry/, 'a plain-text body term is returned by recall');
   });
 
   it('customer recall sees own scope ∪ global-KB only (never another customer, never admin)', async () => {
@@ -183,7 +202,7 @@ describe('context wrapper (litectx policy layer)', () => {
       // An under-limit doc of the SAME format ingests → the rejection is the byte
       // cap, not a content/format quirk.
       const under = buf('# Doc\n' + 'The widget fox jumps over the lazy dog. '.repeat(8000)); // ~0.3MB
-      assert.ok((await context.indexBuffer(under, 'under.md', 'kb')) >= 1, 'an under-limit doc ingests');
+      assert.ok((await context.indexBuffer(under, 'under.md', 'kb')).chunks >= 1, 'an under-limit doc ingests');
       // 2MB > the 1MB bound multis wired (and < litectx's 10MB default — so a
       // rejection here can ONLY be multis's configured cap).
       await assert.rejects(
@@ -198,7 +217,7 @@ describe('context wrapper (litectx policy layer)', () => {
       // At a 2-page cap the same PDF ingests; at a 1-page cap it is rejected — and
       // 1 is below litectx's 2000 default, so the cap is multis's configured value.
       context.setBounds({ maxSize: 10 * MB, maxPdfPages: 2, parseTimeoutMs: 30000 });
-      assert.ok((await context.indexBuffer(pdf, 'ok.pdf', 'kb')) >= 1, 'a 2-page PDF ingests at a 2-page cap');
+      assert.ok((await context.indexBuffer(pdf, 'ok.pdf', 'kb')).chunks >= 1, 'a 2-page PDF ingests at a 2-page cap');
 
       context.setBounds({ maxSize: 10 * MB, maxPdfPages: 1, parseTimeoutMs: 30000 });
       await assert.rejects(

@@ -121,12 +121,18 @@ function forScope(scope) {
       const hits = await view.recall(query, { kind: 'doc', n: n * 4, body: true });
       return hits.filter((h) => h.meta && h.meta.type === 'memory').slice(0, n).map(mapMemHit);
     },
-    /** Ingest an uploaded document buffer into the bound scope. @returns {Promise<number>} chunks. */
+    /**
+     * Ingest an uploaded document buffer into the bound scope.
+     * @returns {Promise<{chunks:number, mode:string}>} chunk count + litectx mode
+     *   ('chunked' = searchable; 'blob' = stored-only, not recallable). The host
+     *   surfaces `mode` so a 0-chunk ingest reads as "stored, not searchable"
+     *   rather than a misleading success.
+     */
     async indexBuffer(buffer, filename, { expiresAt = null } = {}) {
       const r = await view.ingest(toU8(buffer), { filename, expiresAt, ..._bounds });
-      return r.chunks;
+      return { chunks: r.chunks, mode: r.mode };
     },
-    /** Ingest a document from a filesystem path (the /index <path> flow). @returns {Promise<number>} chunks. */
+    /** Ingest a document from a filesystem path (the /index <path> flow). @returns {Promise<{chunks:number, mode:string}>} */
     async indexFile(filePath, opts = {}) {
       return this.indexBuffer(fs.readFileSync(filePath), path.basename(filePath), opts);
     },
@@ -156,9 +162,9 @@ function forScope(scope) {
 
 // `async` so a synchronous toScope() throw (missing scope) surfaces as a rejected
 // promise, uniform with the storage I/O — not a sync throw beside it.
-/** @param {string} scope @returns {Promise<number>} chunks */
+/** @param {string} scope @returns {Promise<{chunks:number, mode:string}>} */
 const indexBuffer = async (buffer, filename, scope, opts = {}) => forScope(scope).indexBuffer(buffer, filename, opts);
-/** @param {string} scope @returns {Promise<number>} chunks */
+/** @param {string} scope @returns {Promise<{chunks:number, mode:string}>} */
 const indexFile = async (filePath, scope, opts = {}) => forScope(scope).indexFile(filePath, opts);
 const rememberMemory = async (scope, text, opts = {}) => forScope(scope).rememberMemory(text, opts);
 /** @param {string} query @param {{ scope: string, n?: number }} opts  scope REQUIRED (fail-closed) */

@@ -94,8 +94,8 @@ function makeExecute({ indexer, appExec = {} } = {}) {
         // Registry scope vocab: 'kb' = the public KB, 'admin' = owner-private.
         // indexFile's role vocab is 'public' | 'admin'.
         const role = args.scope === 'admin' ? 'admin' : 'public';
-        const count = await indexer.indexFile(args.path, role);
-        return { count, path: args.path, role };
+        const { chunks, mode } = await indexer.indexFile(args.path, role);
+        return { count: chunks, mode, path: args.path, role };
       }
       default:
         throw new Error(`No execute bound for app capability: ${cap.name}`);

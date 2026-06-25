@@ -266,7 +266,7 @@ function loadConfig() {
     maxSize: 10485760,
     maxPdfPages: 2000,
     parseTimeoutMs: 30000,
-    allowedTypes: ['pdf', 'docx', 'txt', 'md'],
+    allowedTypes: ['pdf', 'docx', 'txt', 'text', 'md', 'log', 'csv'],
     ...config.documents
   };
 
