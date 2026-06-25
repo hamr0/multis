@@ -1180,14 +1180,12 @@ function wrapToolThroughCore(adaptedTool, govCtx, { verifyPin, pinConfigured, ce
         // we returned a tool-result string the Loop would feed it to the model and
         // keep going — a model that keeps reasoning/re-calling then re-prompts and
         // re-parks every round until limits.maxToolRounds halts it (the NL-door bug,
-        // 2026-06-24). bare-agent only honors HaltError from its GATE SEAMS, NOT from
-        // a tool's execute (that catch wraps it in a ToolError and continues). So we
-        // flag the park here and let the onToolResult seam in runAgentLoop throw the
-        // HaltError — the Loop exits cleanly with error 'halt:ceremony-parked', which
-        // runAgentLoop swallows (the prompt IS the user-facing signal). Return ''
-        // (not a hint string) so nothing extra is fed back before the halt.
-        govCtx._ceremonyParked = true;
-        return '';
+        // 2026-06-24). Throw HaltError straight from the tool body: bare-agent ≥0.18.0
+        // re-throws a HaltError out of the per-tool execute catch like every other
+        // seam (the fix multis filed under M9), so the Loop exits cleanly with
+        // error 'halt:ceremony-parked' (onError skips it by rule; runAgentLoop
+        // swallows it — the prompt IS the user-facing signal). No onToolResult shim.
+        throw new HaltError('ceremony parked for PIN', { rule: 'ceremony-parked' });
       }
       if (r.kind === RESULT.DENIED) return renderDenied(r);
       return 'Action could not be completed.';
@@ -1247,15 +1245,10 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   const cb = getCircuitBreaker(config);
   const wrappedProvider = cb.wrapProvider(agentProvider, config?.llm?.provider || 'default');
 
-  // Halt the loop when a tool parked a PIN ceremony. bare-agent honors HaltError
-  // from the onToolResult SEAM (not from a tool's execute, which swallows it), so
-  // wrapToolThroughCore flags the park on govCtx and we throw HaltError here — right
-  // after the gate records the tool result — to end the turn cleanly. Without this
-  // the model keeps reasoning/re-calling and burns rounds to a maxToolRounds halt.
-  const onToolResultWithHalt = async (rec) => {
-    if (onToolResult) await onToolResult(rec);
-    if (govCtx._ceremonyParked) throw new HaltError('ceremony parked for PIN', { rule: 'ceremony-parked' });
-  };
+  // A tool that parks a PIN ceremony throws HaltError straight from its execute
+  // body (wrapToolThroughCore); bare-agent ≥0.18.0 re-throws it out of the per-tool
+  // catch like every other seam, so the Loop exits cleanly on 'halt:ceremony-parked'
+  // with no onToolResult shim. onToolResult is now just bareguard's gate.record.
 
   // "Always ask" confirms (e.g. before every exec) are governed by bareguard's
   // flags primitive inside `policy`, routed through the single humanChannel —
@@ -1266,12 +1259,12 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
     retry,
     policy,
     onLlmResult,
-    onToolResult: onToolResultWithHalt,
+    onToolResult,
     throwOnError: false,
     onError: (err, meta) => {
-      // A parked PIN ceremony halts the loop on purpose (onToolResultWithHalt) — a
-      // clean governance exit, not an error. Don't log it as loop_error (the parked
-      // action's govern line is the real audit record); logging it dents fidelity.
+      // A parked PIN ceremony halts the loop on purpose (the tool body throws
+      // HaltError) — a clean governance exit, not an error. Don't log it as
+      // loop_error (the parked action's govern line is the real audit record).
       if (err?.rule === 'ceremony-parked') return;
       logAudit({ action: 'loop_error', source: meta?.source, error: err?.message, chatId: ctx.chatId, user_id: ctx.senderId });
     },

@@ -198,6 +198,10 @@ function loadConfig() {
     pin_timeout_hours: 24,
     pin_lockout_minutes: 60,
     prompt_injection_detection: true,
+    // Fail-closed on an unpriced LLM round: when max_cost_per_run is set, a round
+    // bareguard can't price (unknown model / no rate-table entry) HALTS instead of
+    // silently passing under the cap. No-op when no cost cap is set. (bareguard 0.9.0)
+    fail_closed_on_unpriced: true,
     rate_limit: { enabled: true, burst_per_min: 10, daily_per_sender: 100 },
     ...config.security
   };

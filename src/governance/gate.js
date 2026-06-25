@@ -213,6 +213,10 @@ function buildGateConfig({ governance, security, audit, budget, llm }) {
     if (budget.maxTokens != null) cfg.budget.maxTokens = budget.maxTokens;
     if (budget.sharedFile) cfg.budget.sharedFile = budget.sharedFile;
     if (budget.strict) cfg.budget.strict = true;
+    // Fail-closed when a round can't be priced (bareguard 0.9.0): under a finite
+    // maxCostUsd cap an unpriced round halts (rule budget.unpriced) instead of
+    // accruing a silent 0. Per-round + no-op without a cost cap.
+    if (budget.failClosedOnUnpriced) cfg.budget.failClosedOnUnpriced = true;
   }
 
   // bareguard 0.4.2 added limits.maxToolRounds — ticks only on non-"llm"
@@ -346,6 +350,7 @@ async function createGate(opts = {}) {
     budget: {
       maxCostUsd: opts.config?.security?.max_cost_per_run,
       sharedFile: budgetFile,
+      failClosedOnUnpriced: opts.config?.security?.fail_closed_on_unpriced !== false,
     },
   });
 
