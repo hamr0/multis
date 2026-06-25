@@ -475,13 +475,37 @@ describe('App-verb door — governed-core ceremony (M9 increment 2)', () => {
     assert.ok(platform.sent.some((s) => /Noted/i.test(s.text)), 'note saved');
   });
 
-  it('selecting OFF in the mode picker requires the PIN before the chat is set off', async () => {
-    const { env, platform, router, pending } = buildPin();
-    pending.set('chat1', 'user1', 'mode', {
-      data: { mode: 'off', matches: [{ id: 'cust-x', title: 'Customer X' }], agent: null },
-      ttlMs: 60_000, expireMsg: 'Mode selection expired — re-run /mode.',
+  // The mode picker is now an owner-ask on the one dispatcher (M10). Drive it
+  // through the REAL /mode flow: two config.chats match "customer" → the picker
+  // opens → reply "1" selects #1 → commitMode applies the off/silent severity.
+  function buildModePicker() {
+    const env = createTestEnv({
+      allowed_users: ['user1'], owner_id: 'user1',
+      platforms: { beeper: { enabled: true } },
+      chats: {
+        'cust-x': { platform: 'beeper', name: 'Customer X' },
+        'cust-z': { platform: 'beeper', name: 'Customer Z' },
+      },
+      security: { pin_hash: hashPin('1234'), pin_timeout_hours: 24, checkpoint_tools: [] },
     });
-    const selP = router(msg('1'), platform); // pick #1 from the open picker
+    const platform = mockPlatform();
+    const pinManager = new PinManager(env.config); pinManager.sessions = {};
+    const pending = new PendingRegistry();
+    const router = createMessageRouter(env.config, {
+      llm: mockLLM(), indexer: stubIndexer(), pinManager, pending, fileless: true,
+      governanceFile: { commands: { allowlist: ['.*'], denylist: [] }, paths: { allowed: ['.*'], denied: [] } },
+      memoryBaseDir: env.memoryBaseDir,
+    });
+    router.registerPlatform('telegram', platform);
+    router.registerPlatform('beeper', { send: async () => {}, _personalChats: new Set() });
+    return { env, platform, router };
+  }
+
+  it('selecting OFF in the mode picker requires the PIN before the chat is set off', async () => {
+    const { env, platform, router } = buildModePicker();
+    await router(msg('/mode off customer'), platform); // 2 matches → picker opens
+    await waitFor(() => platform.sent.some((s) => /Multiple matches/i.test(s.text)), 'picker shown');
+    const selP = router(msg('1'), platform); // pick #1 = Customer X
     await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
     // The ceremony prompt shows the friendly chat NAME, never the raw room id.
     const prompt = platform.sent.find((s) => /PIN/i.test(s.text)).text;
@@ -494,14 +518,135 @@ describe('App-verb door — governed-core ceremony (M9 increment 2)', () => {
   });
 
   it('selecting SILENT in the mode picker sets it straight through (no PIN)', async () => {
-    const { env, platform, router, pending } = buildPin();
-    pending.set('chat1', 'user1', 'mode', {
-      data: { mode: 'silent', matches: [{ id: 'cust-y', title: 'Customer Y' }], agent: null },
-      ttlMs: 60_000, expireMsg: 'Mode selection expired — re-run /mode.',
-    });
+    const { env, platform, router } = buildModePicker();
+    await router(msg('/mode silent customer'), platform);
+    await waitFor(() => platform.sent.some((s) => /Multiple matches/i.test(s.text)), 'picker shown');
     await router(msg('1'), platform);
     assert.ok(!platform.sent.some((s) => /PIN/i.test(s.text)), 'no ceremony for a benign mode');
-    assert.strictEqual(env.config.chats?.['cust-y']?.mode, 'silent', 'chat set silent immediately');
+    assert.strictEqual(env.config.chats?.['cust-x']?.mode, 'silent', 'chat set silent immediately');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PIN change wizard (characterization — verify → new → save)
+// ---------------------------------------------------------------------------
+
+describe('PIN change wizard', () => {
+  let env;
+  afterEach(() => { if (env) env.cleanup(); env = null; });
+
+  function pinRouter(security = {}) {
+    env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1', security });
+    const platform = mockPlatform();
+    const pinManager = new PinManager(env.config); pinManager.sessions = {};
+    const pending = new PendingRegistry();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer(), pinManager, pending });
+    router.registerPlatform('telegram', platform);
+    return { env, platform, router };
+  }
+
+  it('/pin with an existing PIN: verify → new → updates the hash', async () => {
+    const { env, platform, router } = pinRouter({ pin_hash: hashPin('1111') });
+    const before = env.config.security.pin_hash;
+    await router(msg('/pin'), platform);
+    assert.match(platform.lastTo('chat1').text, /current PIN/i);
+    await router(msg('1111'), platform); // correct current
+    assert.match(platform.lastTo('chat1').text, /new PIN/i);
+    await router(msg('2222'), platform); // new
+    assert.match(platform.lastTo('chat1').text, /updated/i);
+    assert.notStrictEqual(env.config.security.pin_hash, before, 'hash changed');
+    assert.strictEqual(env.config.security.pin_hash, hashPin('2222'));
+  });
+
+  it('/pin with a wrong current PIN does not advance', async () => {
+    const { env, platform, router } = pinRouter({ pin_hash: hashPin('1111') });
+    await router(msg('/pin'), platform);
+    await router(msg('9999'), platform); // wrong current
+    assert.doesNotMatch(platform.lastTo('chat1').text, /new PIN/i, 'must not reach the new-PIN step');
+    assert.strictEqual(env.config.security.pin_hash, hashPin('1111'), 'hash unchanged');
+  });
+
+  it('/pin with no PIN set goes straight to setting a new one', async () => {
+    const { env, platform, router } = pinRouter({});
+    await router(msg('/pin'), platform);
+    assert.match(platform.lastTo('chat1').text, /No PIN set/i);
+    await router(msg('4321'), platform);
+    assert.match(platform.lastTo('chat1').text, /updated/i);
+    assert.strictEqual(env.config.security.pin_hash, hashPin('4321'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Business persona menu + setup wizard (characterization — Telegram owner path)
+// ---------------------------------------------------------------------------
+
+describe('Business persona menu + wizard', () => {
+  let env;
+  afterEach(() => { if (env) env.cleanup(); env = null; });
+
+  function ownerRouter(extra = {}) {
+    env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1', ...extra });
+    const platform = mockPlatform();
+    const pending = new PendingRegistry();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer(), pending });
+    router.registerPlatform('telegram', platform);
+    return { platform, router, pending };
+  }
+
+  it('/mode business shows the 1-5 menu', async () => {
+    const { platform, router } = ownerRouter();
+    await router(msg('/mode business'), platform);
+    const text = platform.lastTo('chat1').text;
+    assert.match(text, /Business Mode/);
+    assert.match(text, /1\) Setup persona/);
+    assert.match(text, /5\) Assign chats/);
+  });
+
+  it('menu → 1 → full wizard → confirm saves the persona', async () => {
+    const { platform, router } = ownerRouter();
+    await router(msg('/mode business'), platform);
+    await router(msg('1'), platform); // Setup persona
+    assert.match(platform.lastTo('chat1').text, /Step 1\/5 — Name/);
+    await router(msg('Acme Support'), platform); // name
+    assert.match(platform.lastTo('chat1').text, /Step 2\/5 — Greeting/);
+    await router(msg('Hi there!'), platform); // greeting
+    assert.match(platform.lastTo('chat1').text, /Step 3\/5 — Topics/);
+    await router(msg('Refunds: how to get one'), platform); // a topic
+    assert.match(platform.lastTo('chat1').text, /Added: Refunds/);
+    await router(msg('done'), platform); // topics done
+    assert.match(platform.lastTo('chat1').text, /Step 4\/5 — Rules/);
+    await router(msg('Be polite'), platform); // a rule
+    await router(msg('done'), platform); // rules done
+    assert.match(platform.lastTo('chat1').text, /Step 5\/5 — Review & Save/);
+    await router(msg('yes'), platform); // confirm
+    assert.match(platform.lastTo('chat1').text, /Business persona saved/);
+    assert.strictEqual(env.config.business?.name, 'Acme Support');
+    assert.strictEqual(env.config.business?.greeting, 'Hi there!');
+    assert.deepStrictEqual(env.config.business?.rules, ['Be polite']);
+  });
+
+  it('wizard cancel aborts without saving', async () => {
+    const { platform, router } = ownerRouter();
+    await router(msg('/mode business'), platform);
+    await router(msg('1'), platform);
+    await router(msg('cancel'), platform);
+    assert.match(platform.lastTo('chat1').text, /cancel/i);
+    assert.ok(!env.config.business?.name, 'nothing saved on cancel');
+  });
+
+  it('menu → 3 clears the persona', async () => {
+    const { platform, router } = ownerRouter({ business: { name: 'Old', greeting: 'hey' } });
+    await router(msg('/mode business'), platform);
+    await router(msg('3'), platform);
+    assert.match(platform.lastTo('chat1').text, /cleared/i);
+    assert.strictEqual(env.config.business?.name, null);
+  });
+
+  it('menu out-of-range reply re-prompts', async () => {
+    const { platform, router } = ownerRouter();
+    await router(msg('/mode business'), platform);
+    await router(msg('9'), platform);
+    assert.match(platform.lastTo('chat1').text, /Pick 1-5/);
   });
 });
 
@@ -1357,89 +1502,53 @@ describe('Beeper file indexing', () => {
     assert.match(platform.lastTo('chat1').text, /Indexed 3 chunks/);
   });
 
-  it('file message without scope asks for scope with skip option', async () => {
+  // Upload a doc with no scope → the index scope picker (now an owner-ask on the
+  // one dispatcher, M10) parks. Returns the parked router/pending for a follow-up
+  // numeric reply.
+  function uploadNoScope(extra = {}) {
     const env = createTestEnv({ allowed_users: ['self1'], owner_id: 'self1' });
     const platform = mockPlatform();
+    platform.downloadAsset = async () => Buffer.from('test content');
     const indexer = stubIndexer();
+    if (extra.indexBuffer) indexer.indexBuffer = extra.indexBuffer;
     const pending = new PendingRegistry();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer, pending });
+    const up = msg('here is a doc', { platform: 'beeper', senderId: 'self1', isSelf: true });
+    up._attachments = [{ id: 'a', fileName: extra.fileName || 'report.pdf', mimeType: 'application/pdf', srcURL: 'mxc://beeper.local/abc123' }];
+    return { env, platform, indexer, pending, router, up };
+  }
 
-    const m = msg('here is a doc', {
-      platform: 'beeper', senderId: 'self1', isSelf: true
-    });
-    m._attachments = [{
-      id: 'mxc://beeper.local/abc123',
-      fileName: 'report.pdf',
-      mimeType: 'application/pdf',
-      srcURL: 'mxc://beeper.local/abc123'
-    }];
-
-    await router(m, platform);
+  it('file message without scope asks for scope with skip option', async () => {
+    const { platform, pending, router, up } = uploadNoScope();
+    await router(up, platform);
     assert.match(platform.lastTo('chat1').text, /Index as/);
     assert.match(platform.lastTo('chat1').text, /3\. Skip/);
     const entry = pending.peek('chat1', 'self1');
-    assert.ok(entry && entry.kind === 'index', 'should store pending index in registry');
+    assert.ok(entry && entry.kind === 'ask', 'should park the index ask in the registry');
   });
 
   it('scope reply 1 indexes as public', async () => {
-    const env = createTestEnv({ allowed_users: ['self1'], owner_id: 'self1' });
-    const platform = mockPlatform();
     let indexedRole = null;
-    const indexer = stubIndexer();
-    indexer.indexBuffer = async (buf, name, role) => { indexedRole = role; return 5; };
-    platform.downloadAsset = async () => Buffer.from('test content');
-    const pending = new PendingRegistry();
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer, pending });
-
-    pending.set('chat1', 'self1', 'index', {
-      data: { fileName: 'report.pdf', srcURL: 'mxc://beeper.local/abc123' }
-    });
-
-    const m = msg('1', {
-      platform: 'beeper', senderId: 'self1', isSelf: true
-    });
-    await router(m, platform);
+    const { platform, router, up } = uploadNoScope({ indexBuffer: async (buf, name, role) => { indexedRole = role; return 5; } });
+    await router(up, platform);
+    await router(msg('1', { platform: 'beeper', senderId: 'self1', isSelf: true }), platform);
     assert.strictEqual(indexedRole, 'public');
     assert.match(platform.lastTo('chat1').text, /Indexed 5 chunks.*\[public\]/);
   });
 
   it('scope reply 2 indexes as admin', async () => {
-    const env = createTestEnv({ allowed_users: ['self1'], owner_id: 'self1' });
-    const platform = mockPlatform();
     let indexedRole = null;
-    const indexer = stubIndexer();
-    indexer.indexBuffer = async (buf, name, role) => { indexedRole = role; return 2; };
-    platform.downloadAsset = async () => Buffer.from('test content');
-    const pending = new PendingRegistry();
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer, pending });
-
-    pending.set('chat1', 'self1', 'index', {
-      data: { fileName: 'notes.md', srcURL: 'mxc://beeper.local/def456' }
-    });
-
-    const m = msg('2', {
-      platform: 'beeper', senderId: 'self1', isSelf: true
-    });
-    await router(m, platform);
+    const { platform, router, up } = uploadNoScope({ fileName: 'notes.md', indexBuffer: async (buf, name, role) => { indexedRole = role; return 2; } });
+    await router(up, platform);
+    await router(msg('2', { platform: 'beeper', senderId: 'self1', isSelf: true }), platform);
     assert.strictEqual(indexedRole, 'admin');
     assert.match(platform.lastTo('chat1').text, /Indexed 2 chunks.*\[admin\]/);
   });
 
   it('scope reply 3 skips indexing', async () => {
-    const env = createTestEnv({ allowed_users: ['self1'], owner_id: 'self1' });
-    const platform = mockPlatform();
-    const indexer = stubIndexer();
-    const pending = new PendingRegistry();
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer, pending });
-
-    pending.set('chat1', 'self1', 'index', {
-      data: { fileName: 'report.pdf', srcURL: 'mxc://beeper.local/abc123' }
-    });
-
-    const m = msg('3', {
-      platform: 'beeper', senderId: 'self1', isSelf: true
-    });
-    await router(m, platform);
+    const { platform, pending, router, up } = uploadNoScope();
+    await router(up, platform);
+    await router(msg('3', { platform: 'beeper', senderId: 'self1', isSelf: true }), platform);
     assert.match(platform.lastTo('chat1').text, /Skipped/);
     assert.strictEqual(pending.peek('chat1', 'self1'), null, 'pending cleared after skip');
   });

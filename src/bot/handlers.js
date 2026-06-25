@@ -18,6 +18,7 @@ const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler
 const { createGate } = require('../governance/gate');
 const { createHumanPrompt, createCeremonyPrompt, createVerifyPin } = require('../governance/human-channel');
 const { PendingRegistry } = require('./pending');
+const { ASK_KIND, openAsk, resumeAsk, expireAsk } = require('./ask-dispatcher');
 const { runGovernedAction, RESULT } = require('../capabilities/govern');
 const { buildGovernDeps } = require('../capabilities/deps');
 const { getCapabilityForTool, SEVERITY } = require('../capabilities/registry');
@@ -387,152 +388,44 @@ function createMessageRouter(config, deps = {}) {
       const entry = pending.get(msg.chatId, msg.senderId);
       if (entry && (typeof entry.match !== 'function' || entry.match(text))) {
         if (entry.expired) {
-          // Announce expiry rather than letting a late reply (PIN digits, a
-          // confirm word) fall through to the RAG pipeline as a search query —
-          // the orphaned-reply bug this de-tangle exists to kill.
+          // An owner-ask (M10) that timed out records its terminal "expired" outcome
+          // so the request can't dangle, then announces it once. Other parked kinds
+          // just announce — a late reply must not fall through to the RAG pipeline as
+          // a search query (the orphaned-reply bug this de-tangle exists to kill).
+          if (entry.kind === ASK_KIND) {
+            await expireAsk(entry, { platform, getMem, chatId: msg.chatId });
+            return;
+          }
           await platform.send(msg.chatId, entry.expireMsg
             || 'That prompt expired — please re-send the command.');
           return;
         }
-        const t = text.trim();
         switch (entry.kind) {
+          case ASK_KIND: {
+            // The one owner-ask dispatcher (M10): owns cancel / stick / handle /
+            // re-park / record for EVERY ask type (ceremony, pickers, wizards). Pass
+            // the RAW text — the dispatcher trims and the ask's accepts()/handle()
+            // interpret it. A /command-cancel returns { fallThrough } so the command
+            // routes normally (the pickers' prior escape UX); everything else is
+            // consumed here.
+            const res = await resumeAsk(entry, text, { pending, platform, getMem, chatId: msg.chatId, senderId: msg.senderId });
+            if (res && res.fallThrough) break;
+            return;
+          }
           case 'gate_reply':
             // A parked bareguard challenge (approval/PIN/CONFIRM) is awaiting this
             // reply. Hand it the RAW text — the challenge interprets yes/no/PIN/
             // CONFIRM itself — and it self-clears via the resolver.
             entry.resolve(text);
             return;
-          case 'ceremony_action': {
-            // M9 park-and-resume: a destructive capability is deferred pending this
-            // PIN reply. We distinguish an ANSWER from a new request so a stray
-            // message neither runs unguarded nor burns the ceremony as a failed PIN.
-            // (`t` is the trimmed reply from the enclosing block.)
-            if (/^(cancel|stop|abort|no)$/i.test(t)) {
-              pending.clear(msg.chatId, msg.senderId);
-              await platform.send(msg.chatId, 'Cancelled — that action will not run.');
-              return;
-            }
-            if (!/^\d{4,6}$/.test(t)) {
-              // Not a PIN and not a cancel — treat as a new request: REMIND and keep
-              // the ceremony parked (don't eat the message, don't count a failed
-              // attempt). One pending per (chat,sender) already serializes the rest.
-              const what = entry.label ? ` to ${entry.label}` : '';
-              await platform.send(msg.chatId, `⏳ Still waiting for your PIN${what}. Reply your PIN (4–6 digits), or "cancel".`);
-              return;
-            }
-            // A PIN attempt → clear, then resume (verifies + runs). On a WRONG PIN
-            // with attempts remaining the resume returns { retry:true } → RE-PARK the
-            // SAME ceremony so the owner can use their remaining tries (pin.js grants
-            // 3, and the prompt says "N attempts remaining"). On success / lockout /
-            // no-verifier it stays cleared. Without this, a wrong PIN killed the park
-            // and the next (correct) PIN fell through to /ask (regression 2026-06-23).
-            pending.clear(msg.chatId, msg.senderId);
-            const outcome = typeof entry.resume === 'function' ? await entry.resume(t) : undefined;
-            if (outcome && outcome.retry) {
-              pending.set(msg.chatId, msg.senderId, 'ceremony_action', {
-                ttlMs: entry.ttlMs, label: entry.label, resume: entry.resume,
-              });
-            }
-            return;
-          }
-          case 'pin_change':
-            await handlePinChangeStep(msg, platform, config, pinManager, pending, t, entry);
-            return;
           // (The 'pin_command' router-PIN resume was retired with PIN_PROTECTED —
           // exec/read/index now ceremony inside the M9 governed core, whose PIN
           // reply parks as a 'gate_reply' waiter, handled above.)
-
-          // --- Interactive pickers / wizards (migrated from config._pending*) ---
-          // None carry a `match` fn, so they always enter here. Each owns its
-          // cancel/fall-through contract: a case that `return`s consumes the
-          // reply; a case that `break`s lets the message fall through to normal
-          // command routing below (used for the /command-cancels-a-picker path).
-          // Only one entry exists per (chat,sender), so the latest prompt is
-          // authoritative — this also kills the old hazard where a numeric reply
-          // meant for the mode picker was swallowed by a still-open index prompt.
-
-          case 'index': {
-            if (/^[123]$/.test(t)) {
-              const idx = entry.data; // { fileName, srcURL }
-              pending.clear(msg.chatId, msg.senderId);
-              if (t === '3') {
-                await platform.send(msg.chatId, 'Skipped.');
-                return;
-              }
-              const scope = t === '1' ? 'public' : 'admin';
-              try {
-                await platform.send(msg.chatId, `Downloading and indexing: ${idx.fileName} (${scope})...`);
-                const buffer = await platform.downloadAsset(idx.srcURL);
-                const count = await indexer.indexBuffer(buffer, idx.fileName, scope);
-                await platform.send(msg.chatId, `Indexed ${count} chunks from ${idx.fileName} [${scope}]`);
-                logAudit({ action: 'index_upload', user_id: msg.senderId, filename: idx.fileName, chunks: count, scope, platform: 'beeper' });
-              } catch (err) {
-                await platform.send(msg.chatId, `Index error: ${err.message}`);
-              }
-              return;
-            }
-            // Any non-[123] reply drops the stale prompt and falls through
-            // (mirrors the old clear-on-other-input behavior — no message).
-            pending.clear(msg.chatId, msg.senderId);
-            break;
-          }
-
-          case 'mode': {
-            if (text.startsWith('/')) {
-              pending.clear(msg.chatId, msg.senderId);
-              await platform.send(msg.chatId, 'Mode selection cancelled.');
-              break; // /command cancels the picker, then routes normally
-            }
-            const m = entry.data; // { mode, matches, agent }
-            if (/^\d+$/.test(t)) {
-              const idx = parseInt(t, 10) - 1;
-              if (idx >= 0 && idx < m.matches.length) {
-                const chat = m.matches[idx];
-                // Block silent/off for personal/note-to-self chats
-                const beeperPlat = platformRegistry?.get('beeper');
-                if ((m.mode === 'silent' || m.mode === 'off') && beeperPlat?._personalChats?.has(chat.id)) {
-                  pending.clear(msg.chatId, msg.senderId);
-                  await platform.send(msg.chatId, 'Personal/note-to-self chats cannot be set to silent or off.');
-                  return;
-                }
-                // Clear the picker BEFORE the ceremony: an `off` set makes
-                // commitMode open a PIN gate_reply waiter, and the PIN reply must
-                // route there — not fall back into this still-open mode picker.
-                pending.clear(msg.chatId, msg.senderId);
-                await commitMode(
-                  { chatId: chat.id, mode: m.mode, agent: m.agent, displayName: chat.title || chat.id },
-                  msg, platform, config,
-                  { gov, pending, platformRegistry, getMem },
-                );
-              } else {
-                await platform.send(msg.chatId, `Invalid choice. Pick 1-${m.matches.length}.`);
-              }
-              return;
-            }
-            // Non-number, non-command reply: remind, keep the picker open.
-            await platform.send(msg.chatId, `Pick a number (1-${m.matches.length}) or send a /command to cancel.`);
-            return;
-          }
-
-          case 'business_menu': {
-            if (text.startsWith('/')) {
-              pending.clear(msg.chatId, msg.senderId);
-              await platform.send(msg.chatId, 'Business menu cancelled.');
-              break; // /command cancels the picker, then routes normally
-            }
-            const handled = await handleBusinessMenuReply(msg, platform, config, t, agentRegistry, platformRegistry, entry.data, pending);
-            if (handled) return;
-            break;
-          }
-
-          case 'business_wizard':
-            if (text.startsWith('/')) {
-              pending.clear(msg.chatId, msg.senderId);
-              await platform.send(msg.chatId, 'Business setup cancelled.');
-              break; // /command cancels the wizard, then routes normally
-            }
-            await handleBusinessWizardStep(msg, platform, config, t, entry.data, pending);
-            return;
+          //
+          // The PIN ceremony, the index + mode pickers, the business menu + setup
+          // wizard, and the /pin change wizard are all migrated to ASK_KIND (the one
+          // dispatcher above). gate_reply (the bareguard approval/PIN challenge) is
+          // the last bespoke holdout — it self-clears via its parked resolver.
         }
       }
     }
@@ -766,12 +659,39 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
 
 // pin_change entries match digit replies and share the registry's announce-on-
 // expiry. The step ('verify' → 'new') lives on the entry itself.
-function setPinChangePending(pending, msg, step) {
-  pending.set(msg.chatId, msg.senderId, 'pin_change', {
+// The /pin change wizard as a multi-step owner-ask (M10): verify → new. Carries a
+// digit-only `match` so a non-digit reply (a command, a stray message) falls
+// through to normal routing rather than being consumed — the wizard's prior
+// "type a command to step away" behaviour. The mutable `step` advances via { next }.
+function makePinChangeAsk({ msg, platform, config, pinManager, step }) {
+  const ask = {
+    kind: 'pin_change',
+    request: null, isOwner: true,
     step,
-    match: (t) => /^\d{4,6}$/.test(t.trim()),
+    match: (t) => /^\d{4,6}$/.test(String(t).trim()),
     expireMsg: 'PIN change timed out — send /pin to start over.',
-  });
+    accepts: (t) => /^\d{4,6}$/.test(t), // guaranteed by `match`, but explicit
+    handle: async (pin) => {
+      if (ask.step === 'verify') {
+        const result = pinManager.authenticate(msg.senderId, pin);
+        if (!result.success) {
+          await platform.send(msg.chatId, result.reason);
+          // A lockout is terminal (clear); a plain wrong PIN re-parks for a retry.
+          return result.locked ? { done: true, summary: null } : { retry: true };
+        }
+        ask.step = 'new';
+        await platform.send(msg.chatId, 'Enter your new PIN (4-6 digits):');
+        return { next: ask };
+      }
+      // step 'new' — `match` already guaranteed a 4–6 digit PIN.
+      config.security.pin_hash = hashPin(pin);
+      saveConfig(config);
+      await platform.send(msg.chatId, 'PIN updated successfully.');
+      logAudit({ action: 'pin_change', user_id: msg.senderId });
+      return { done: true, summary: null };
+    },
+  };
+  return ask;
 }
 
 async function routePinChange(msg, platform, config, pinManager, pending) {
@@ -780,39 +700,12 @@ async function routePinChange(msg, platform, config, pinManager, pending) {
     return;
   }
 
-  if (!pinManager.isEnabled()) {
-    // No PIN set — go straight to setting new PIN
-    setPinChangePending(pending, msg, 'new');
-    await platform.send(msg.chatId, 'No PIN set. Enter a new PIN (4-6 digits):');
-    return;
-  }
-
-  // PIN is set — verify current first
-  setPinChangePending(pending, msg, 'verify');
-  await platform.send(msg.chatId, 'Enter your current PIN:');
-}
-
-async function handlePinChangeStep(msg, platform, config, pinManager, pending, pin, entry) {
-  if (entry.step === 'verify') {
-    const result = pinManager.authenticate(msg.senderId, pin);
-    if (!result.success) {
-      await platform.send(msg.chatId, result.reason);
-      if (result.locked) pending.clear(msg.chatId, msg.senderId);
-      return;
-    }
-    setPinChangePending(pending, msg, 'new');
-    await platform.send(msg.chatId, 'Enter your new PIN (4-6 digits):');
-  } else if (entry.step === 'new') {
-    if (!/^\d{4,6}$/.test(pin)) {
-      await platform.send(msg.chatId, 'PIN must be 4-6 digits. Try again:');
-      return;
-    }
-    config.security.pin_hash = hashPin(pin);
-    saveConfig(config);
-    pending.clear(msg.chatId, msg.senderId);
-    await platform.send(msg.chatId, 'PIN updated successfully.');
-    logAudit({ action: 'pin_change', user_id: msg.senderId });
-  }
+  const step = pinManager.isEnabled() ? 'verify' : 'new';
+  await platform.send(msg.chatId, step === 'verify'
+    ? 'Enter your current PIN:'
+    : 'No PIN set. Enter a new PIN (4-6 digits):');
+  await openAsk(makePinChangeAsk({ msg, platform, config, pinManager, step }),
+    { pending, chatId: msg.chatId, senderId: msg.senderId });
 }
 
 async function routeStart(msg, platform, config, code) {
@@ -873,10 +766,29 @@ async function routeStatus(msg, platform, config) {
  * parallel PIN path. Returns the core's tagged result for the caller to render.
  */
 async function dispatchCapability(capName, args, msg, config, toolDeps = {}, ceremonyReply) {
-  const { gov, indexer, getMem } = toolDeps;
+  const { gov } = toolDeps;
   const bundle = gov ? await gov.resolve() : {};
-  const deps = buildGovernDeps({
-    // verifyPin = park-and-resume (no inline await → no serial-poll deadlock).
+  const deps = buildSlashDeps(bundle, config, toolDeps);
+  const ctx = buildGovernCtx(msg, config);
+  return runGovernedAction({ capability: capName, args, ctx, deps, ceremonyReply });
+}
+
+// The governed-action ctx for the slash door — single-sourced so the initial
+// dispatch and the parked ceremony's resume build the identical ctx.
+function buildGovernCtx(msg, config) {
+  return {
+    senderId: msg.senderId,
+    chatId: msg.chatId,
+    isOwner: isOwner(msg.senderId, config, msg),
+    platform: msg.platform,
+  };
+}
+
+// The governed-action deps for the slash door (full floor + appExec + ceremony).
+// verifyPin = park-and-resume (no inline await → no serial-poll deadlock).
+function buildSlashDeps(bundle, config, toolDeps) {
+  const { indexer, getMem } = toolDeps;
+  return buildGovernDeps({
     verifyPin: bundle.verifyPin,
     pinConfigured: bundle.pinConfigured,
     floorPolicy: bundle.floorPolicy,
@@ -884,13 +796,49 @@ async function dispatchCapability(capName, args, msg, config, toolDeps = {}, cer
     indexer,
     appExec: buildAppExec(config, getMem),
   });
-  const ctx = {
-    senderId: msg.senderId,
-    chatId: msg.chatId,
-    isOwner: isOwner(msg.senderId, config, msg),
-    platform: msg.platform,
+}
+
+/**
+ * Build a PIN-ceremony ask (M10 §4) — the single "run this capability with this
+ * PIN" object both doors construct. The factory owns the shared structure:
+ *   - showPrompt → ceremonyPrompt (the lockout-aware PIN prompt)
+ *   - accepts    → a 4–6 digit PIN
+ *   - handle     → runGovernedAction(…, ceremonyReply) once, mapped to one outcome
+ *
+ * Presentation is the ONE thing that legitimately differs per door, so each door
+ * passes a `render(result)` that owns its exact user-facing wording (the slash
+ * door's "PIN accepted." + onResume/format; the LLM door's single concatenated
+ * bubble). The dispatcher then owns cancel/stick/record/expire for this ask like
+ * any other. `request` is the conversational text to record at completion (LLM
+ * door) or null for a slash command (a command is not conversation).
+ */
+function makeCeremonyAsk({ capability, args, ctx, deps, ceremonyPrompt, echo, request, ttlMs, render }) {
+  const defaultSummary = (r) => {
+    if (r.kind === RESULT.OK) return isSilentSuccess(r.result) ? '✓ done' : String(r.result);
+    if (/lock/i.test(r.message || '')) return 'didn\'t run — locked out';
+    return 'didn\'t run';
   };
-  return runGovernedAction({ capability: capName, args, ctx, deps, ceremonyReply });
+  return {
+    kind: 'ceremony',
+    request: request || null,
+    label: echo || null,
+    isOwner: !!ctx.isOwner,
+    ttlMs,
+    expireMsg: 'That PIN prompt expired — re-send the command if you still want it.',
+    stickHint: 'Reply with your PIN (4–6 digits), or "cancel".',
+    showPrompt: async () => (ceremonyPrompt
+      ? ceremonyPrompt({ senderId: ctx.senderId, chatId: ctx.chatId, platform: ctx.platform }, { echo })
+      : 'no-channel'),
+    accepts: (text) => /^\d{4,6}$/.test(text),
+    handle: async (reply) => {
+      const r2 = await runGovernedAction({ capability, args, ctx, deps, ceremonyReply: reply });
+      await render(r2); // door-specific user-facing output (already-sent chat lines)
+      // A wrong PIN with attempts remaining is retryable → re-park the SAME ask.
+      if (r2.kind === RESULT.DENIED && r2.retry === true) return { retry: true };
+      // Everything else is terminal (success, lockout, no-verifier, floor) → record.
+      return { done: true, summary: defaultSummary(r2) };
+    },
+  };
 }
 
 /**
@@ -983,14 +931,16 @@ async function sendCapabilityResult(r, platform, msg, opts = {}) {
 
 /**
  * Render a governed-core result, but if it's NEEDS_CEREMONY, drive the
- * park-and-resume flow instead: prompt for the PIN, park the action on the shared
- * PendingRegistry, and RETURN (never blocking the poll loop). The PIN reply lands
- * on the 'ceremony_action' dispatch case, which calls `resume(text)` → re-runs the
- * capability with `ceremonyReply` → renders. `opts` mirrors sendCapabilityResult's
- * (usage/format/ownerOnly) plus { capName, args, onResume } for the resume, and an
- * optional { echo } that overrides the prompt line with a human-readable label (so
- * an app-verb shows "Amora → off", not the raw room id). run_shell omits it → the
- * verbatim command is shown, which is the security-relevant thing for shell.
+ * park-and-resume flow via the one ask dispatcher (M10): build a ceremony ask,
+ * `openAsk` it (prompt + park on the shared PendingRegistry), and RETURN (never
+ * blocking the poll loop). The PIN reply lands on the ASK_KIND dispatch case →
+ * `resumeAsk` → the ask's `handle` re-runs the capability with `ceremonyReply`.
+ * `opts` mirrors sendCapabilityResult's (usage/format/ownerOnly) plus
+ * { capName, args, onResume } for the resume render, and an optional { echo } that
+ * overrides the prompt line with a human-readable label (so an app-verb shows
+ * "Amora → off", not the raw room id). run_shell omits it → the verbatim command
+ * is shown, which is the security-relevant thing for shell. A slash command is not
+ * conversation, so the ask carries no `request` → nothing is recorded to memory.
  */
 async function handleCeremonyOrSend(r, platform, msg, config, toolDeps, opts = {}) {
   if (r.kind !== RESULT.NEEDS_CEREMONY) {
@@ -998,31 +948,32 @@ async function handleCeremonyOrSend(r, platform, msg, config, toolDeps, opts = {
     return;
   }
   const { gov, pending } = toolDeps;
-  const bundle = gov ? await gov.resolve() : {};
-  const ctx = {
-    senderId: msg.senderId, chatId: msg.chatId, platform: msg.platform,
-    isOwner: isOwner(msg.senderId, config, msg),
-  };
-  const status = bundle.ceremonyPrompt ? await bundle.ceremonyPrompt(ctx, { echo: opts.echo || r.echo }) : 'no-channel';
-  if (status !== 'prompted') {
-    // 'locked' already messaged the lockout line; 'no-channel' can't prompt.
-    if (status === 'no-channel') await platform.send(msg.chatId, 'Could not prompt for the required PIN — action cancelled.');
-    return; // nothing parked → action does not run (fail-closed)
-  }
   if (!pending) return; // no registry → can't resume; fail-closed
-  pending.set(msg.chatId, msg.senderId, 'ceremony_action', {
+  const bundle = gov ? await gov.resolve() : {};
+  const ctx = buildGovernCtx(msg, config);
+  const deps = buildSlashDeps(bundle, config, toolDeps);
+  const ask = makeCeremonyAsk({
+    capability: opts.capName, args: opts.args, ctx, deps,
+    ceremonyPrompt: bundle.ceremonyPrompt,
+    echo: opts.echo || r.echo,
+    request: null, // a slash command is not conversation — record nothing
     ttlMs: (config?.security?.pin_prompt_timeout || 300) * 1000,
-    label: opts.echo || r.echo,
-    resume: async (replyText) => {
-      const r2 = await dispatchCapability(opts.capName, opts.args, msg, config, toolDeps, replyText);
+    // "PIN accepted." then onResume / format / result. A silent success (a command
+    // with no stdout, e.g. `rm`) gets an explicit "✓ Done." so success is confirmed
+    // the way a failure shows its error — restoring the confirmation the "(no
+    // output)" polish removed (M10 §5). onResume / format callers send their own.
+    render: async (r2) => {
       if (r2.kind === RESULT.OK) await platform.send(msg.chatId, 'PIN accepted.');
       if (opts.onResume) await opts.onResume(r2);
-      // "PIN accepted." already confirms a silent success — skip the "(no output)" tail.
-      else if (!(r2.kind === RESULT.OK && isSilentSuccess(r2.result))) await sendCapabilityResult(r2, platform, msg, opts);
-      // Signal the router to re-park on a retryable wrong PIN (attempts remain).
-      return { retry: r2.kind === RESULT.DENIED && r2.retry === true };
+      else if (r2.kind === RESULT.OK && isSilentSuccess(r2.result)) await platform.send(msg.chatId, '✓ Done.');
+      else await sendCapabilityResult(r2, platform, msg, opts);
     },
   });
+  const status = await openAsk(ask, { pending, chatId: msg.chatId, senderId: msg.senderId });
+  if (status === 'no-channel') {
+    await platform.send(msg.chatId, 'Could not prompt for the required PIN — action cancelled.');
+  }
+  // 'locked' already messaged the lockout line inside ceremonyPrompt; 'prompted' is parked.
 }
 
 async function routeExec(msg, platform, config, command, toolDeps = {}) {
@@ -1195,22 +1146,28 @@ function wrapToolThroughCore(adaptedTool, govCtx, { verifyPin, pinConfigured, ce
         // is decoupled from the model's reasoning). Needs an interactive channel +
         // the shared registry; background jobs (cron/plan) pass neither → fail-closed.
         if (!pending || !platform) return 'That action needs your PIN, which I can\'t collect here. Re-send it as /exec <command>.';
-        const status = ceremonyPrompt ? await ceremonyPrompt(govCtx, { echo: r.echo }) : 'no-channel';
-        if (status === 'locked') return 'Locked out due to failed PIN attempts. Try again later.';
-        if (status !== 'prompted') return 'Could not prompt for the required PIN — action cancelled.';
-        pending.set(govCtx.chatId, govCtx.senderId, 'ceremony_action', {
+        // One ask, one dispatcher (M10). The conversational `request` (the user's NL
+        // turn) rides the ask so the dispatcher records (request → outcome) at the PIN
+        // reply — closing the replay bug where a parked turn dangled in recent.json.
+        const ask = makeCeremonyAsk({
+          capability: cap, args: args || {}, ctx: govCtx, deps,
+          ceremonyPrompt, echo: r.echo,
+          request: govCtx.requestText || null,
           ttlMs: ceremonyTtlMs || 300_000,
-          label: r.echo,
-          resume: async (replyText) => {
-            const r2 = await runGovernedAction({ capability: cap, args: args || {}, ctx: govCtx, deps, ceremonyReply: replyText });
+          // A silent success (a command with no stdout, e.g. `rm`) still needs a
+          // confirmation it RAN — otherwise "PIN accepted." alone leaves the owner
+          // unsure, while a FAILURE shows its error. "✓ Done." restores the
+          // confirmation the "(no output)" polish removed (M10 §5).
+          render: async (r2) => {
             const out = r2.kind === RESULT.OK
-              ? (isSilentSuccess(r2.result) ? 'PIN accepted.' : `PIN accepted.\n${String(r2.result)}`)
+              ? (isSilentSuccess(r2.result) ? 'PIN accepted.\n✓ Done.' : `PIN accepted.\n${String(r2.result)}`)
               : renderDenied(r2);
             try { await platform.send(govCtx.chatId, out); } catch { /* ignore */ }
-            // Signal the router to re-park on a retryable wrong PIN (attempts remain).
-            return { retry: r2.kind === RESULT.DENIED && r2.retry === true };
           },
         });
+        const status = await openAsk(ask, { pending, chatId: govCtx.chatId, senderId: govCtx.senderId });
+        if (status === 'locked') return 'Locked out due to failed PIN attempts. Try again later.';
+        if (status !== 'prompted') return 'Could not prompt for the required PIN — action cancelled.';
         // END THE TURN. The PIN prompt is already sent and the action is parked; if
         // we returned a tool-result string the Loop would feed it to the model and
         // keep going — a model that keeps reasoning/re-calling then re-prompts and
@@ -1257,6 +1214,9 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
     chatId: ctx.chatId,
     isOwner: ctx.isOwner,
     platform: ctx.platform?.name || ctx.platform?.platform || ctx.platformName,
+    // The conversational request driving this turn — rides a parked ceremony ask so
+    // the dispatcher records (request → outcome) at the PIN reply (M10 §5).
+    requestText: ctx.requestText || null,
   };
   // Park-and-resume needs the shared registry + an interactive channel to prompt
   // and to deliver the deferred result. Present on the interactive /ask path; absent
@@ -1360,16 +1320,16 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
   const mem = getMem ? getMem(msg.chatId, { isAdmin: admin }) : null;
 
   try {
-    // Record user message + persist chat metadata
-    if (mem) {
-      mem.appendMessage('user', question);
-      mem.appendToLog('user', question);
-      if (msg.chatName || msg.network) {
-        const fields = { platform: msg.platform };
-        if (msg.chatName) fields.name = msg.chatName;
-        if (msg.network) fields.network = msg.network;
-        updateChatMeta(config, msg.chatId, fields);
-      }
+    // Persist chat metadata. The user message is NOT appended here (M10 §5 rule 1):
+    // a turn enters recent.json only when it COMPLETES, paired with its outcome. The
+    // live request is handed to the loop as a message below; if the turn parks a
+    // ceremony, the dispatcher records (request → outcome) at the PIN reply — so a
+    // parked turn never dangles in recent.json and the model can't replay it.
+    if (mem && (msg.chatName || msg.network)) {
+      const fields = { platform: msg.platform };
+      if (msg.chatName) fields.name = msg.chatName;
+      if (msg.network) fields.network = msg.network;
+      updateChatMeta(config, msg.chatId, fields);
     }
 
     // Search for relevant documents (scoped). Owner recalls admin ∪ global-KB; a
@@ -1405,29 +1365,26 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     const memoryMd = mem ? mem.loadMemory() : '';
     const system = buildMemorySystemPrompt(memoryMd, chunks, agentPersona);
 
-    // Build messages array: recent history (excluding the just-appended user msg if already there)
-    // Recent already includes the current user message from appendMessage above
+    // Build messages array: recent history is past COMPLETED turns only (the live
+    // request is no longer eagerly appended — M10 §5 rule 1).
     const messages = recent.map(m => ({
       role: m.role === 'assistant' ? 'assistant' : 'user',
       content: m.content
     }));
 
-    // If @mention stripped the question, update the last message in recent
-    if (cleanQuestion !== question && messages.length > 0) {
-      messages[messages.length - 1] = { role: 'user', content: cleanQuestion };
-    }
-
-    // If no recent history (no memory manager), fall back to single-message
-    if (messages.length === 0) {
-      messages.push({ role: 'user', content: cleanQuestion });
-    }
+    // Hand the LIVE request to the loop as the final user turn. It is NOT in
+    // recent.json yet — it enters conversation only at completion, paired with its
+    // outcome (below, or via the dispatcher if a ceremony parks). cleanQuestion is
+    // the @mention-stripped text the model sees; the original `question` is what's
+    // recorded, for parity with the non-tool path.
+    messages.push({ role: 'user', content: cleanQuestion });
 
     // --- Agent loop with tool calling ---
     const { allTools = [], toolsConfig: tCfg, runtimePlatform, maxToolRounds = 5, platformRegistry, gov, pending } = toolDeps;
     const userTools = getToolsForUser(allTools, admin, tCfg);
     // pending: the shared PendingRegistry, so a destructive tool on the LLM door can
     // park its PIN ceremony (park-and-resume) instead of blocking the loop.
-    const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, platformName: msg.platform, config, platformRegistry, pending };
+    const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, platformName: msg.platform, config, platformRegistry, pending, requestText: question };
 
     const _lc = startClock();
     mark(`routeAsk -> agent loop (${userTools.length} tools, model ${config?.llm?.model || '?'})`);
@@ -1441,8 +1398,9 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
 
     // Empty answer = a destructive tool parked its PIN ceremony and halted the turn
     // (runAgentLoop swallows 'halt:ceremony-parked' → ''). The PIN prompt is already
-    // the only thing to say — don't post an empty bubble, record an empty assistant
-    // turn, or trip capture. The parked action's govern line is the audit record.
+    // the only thing to say — don't post an empty bubble or record anything here. The
+    // turn isn't complete: the dispatcher records (request → outcome) on the PIN reply
+    // (M10 §5), so recent.json holds NOTHING about this turn while it's pending.
     if (!answer) return;
 
     // Prefix with agent name only when multiple agents exist
@@ -1455,8 +1413,12 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     await platform.send(msg.chatId, prefixed);
     mark('routeAsk <- platform.send', _pc);
 
-    // Record assistant response (without prefix for clean memory)
+    // Record the COMPLETED exchange as a paired (request → answer) turn (M10 §5
+    // rule 2). Written only now — never eagerly — so a turn that instead parked a
+    // ceremony leaves no dangling request for the model to replay.
     if (mem) {
+      mem.appendMessage('user', question);
+      mem.appendToLog('user', question);
       mem.appendMessage('assistant', answer);
       mem.appendToLog('assistant', answer);
     }
@@ -1566,6 +1528,45 @@ async function commitMode({ chatId, mode, agent, displayName }, msg, platform, c
   return finish(r);
 }
 
+// The mode picker (multiple chats match a /mode target) as an owner-ask (M10):
+// single-shot numeric over `matches`. handle() commits the chosen chat via
+// commitMode — which may itself open a PIN ceremony ask for an `off` set (the
+// dispatcher already cleared this picker, so the new ceremony parks cleanly).
+// An out-of-range number re-prompts (stays parked); commandCancels preserves the
+// "issue another /command to abandon the picker" escape.
+function makeModeAsk({ mode, matches, agent, msg, platform, config, toolDeps }) {
+  const { platformRegistry } = toolDeps;
+  return {
+    kind: 'mode',
+    request: null, // a picker is not conversation — record nothing
+    isOwner: true,
+    commandCancels: true,
+    cancelMsg: 'Mode selection cancelled.',
+    ttlMs: pickerTtlMs(config),
+    expireMsg: 'Mode selection expired — re-run /mode.',
+    stickMsg: `Pick a number (1-${matches.length}) or send a /command to cancel.`,
+    accepts: (text) => /^\d+$/.test(text),
+    handle: async (t) => {
+      const idx = parseInt(t, 10) - 1;
+      if (idx < 0 || idx >= matches.length) {
+        await platform.send(msg.chatId, `Invalid choice. Pick 1-${matches.length}.`);
+        return { retry: true }; // stay parked; owner picks again
+      }
+      const chat = matches[idx];
+      const beeperPlat = platformRegistry?.get('beeper');
+      if ((mode === 'silent' || mode === 'off') && beeperPlat?._personalChats?.has(chat.id)) {
+        await platform.send(msg.chatId, 'Personal/note-to-self chats cannot be set to silent or off.');
+        return { done: true }; // consumed; nothing set
+      }
+      await commitMode(
+        { chatId: chat.id, mode, agent, displayName: chat.title || chat.id },
+        msg, platform, config, toolDeps,
+      );
+      return { done: true };
+    },
+  };
+}
+
 async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = {}) {
   const { platformRegistry, pending } = toolDeps;
   // Owner-only command.
@@ -1619,12 +1620,9 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
       if (match.length > 1) {
         const labels = disambiguateTitles(match, config);
         const list = match.map((c, i) => `  ${i + 1}) ${labels.get(c.id)}`).join('\n');
-        pending.set(msg.chatId, msg.senderId, 'mode', {
-          data: { mode, matches: match, agent: null },
-          ttlMs: pickerTtlMs(config),
-          expireMsg: 'Mode selection expired — re-run /mode.',
-        });
         await platform.send(msg.chatId, `Multiple matches:\n${list}\n\nReply with a number:`);
+        await openAsk(makeModeAsk({ mode, matches: match, agent: null, msg, platform, config, toolDeps }),
+          { pending, chatId: msg.chatId, senderId: msg.senderId });
         return;
       }
       const chat = match[0];
@@ -1639,7 +1637,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
 
     // No target + business → show business menu
     if (mode === 'business') {
-      await showBusinessMenu(msg, platform, config, pending);
+      await showBusinessMenu(msg, platform, config, { toolDeps });
       return;
     }
 
@@ -1718,13 +1716,9 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
     if (match.length > 1) {
       const labels = disambiguateTitles(match, config);
       const list = match.map((c, i) => `  ${i + 1}) ${labels.get(c.id)}`).join('\n');
-      // Store pending mode selection (include agent for deferred assignment)
-      pending.set(msg.chatId, msg.senderId, 'mode', {
-        data: { mode, matches: match, agent: agentArg },
-        ttlMs: pickerTtlMs(config),
-        expireMsg: 'Mode selection expired — re-run /mode.',
-      });
       await platform.send(msg.chatId, `Multiple matches:\n${list}\n\nReply with a number:`);
+      await openAsk(makeModeAsk({ mode, matches: match, agent: agentArg, msg, platform, config, toolDeps }),
+        { pending, chatId: msg.chatId, senderId: msg.senderId });
       return;
     }
     const chat = match[0];
@@ -1739,7 +1733,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
 
   // Beeper: no target + business → show business menu
   if (mode === 'business' && msg.isSelf) {
-    await showBusinessMenu(msg, platform, config);
+    await showBusinessMenu(msg, platform, config, { toolDeps });
     return;
   }
 
@@ -1757,13 +1751,9 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
       const currentMode = getChatMode(config, c.id);
       return `  ${i + 1}) ${labels.get(c.id)} [${currentMode}]`;
     }).join('\n');
-    // Store pending mode selection (include agent for deferred assignment)
-    pending.set(msg.chatId, msg.senderId, 'mode', {
-      data: { mode, matches: chats, agent: agentArg },
-      ttlMs: pickerTtlMs(config),
-      expireMsg: 'Mode selection expired — re-run /mode.',
-    });
     await platform.send(msg.chatId, `Pick a chat to set to ${mode}:\n${list}\n\nReply with a number:`);
+    await openAsk(makeModeAsk({ mode, matches: chats, agent: agentArg, msg, platform, config, toolDeps }),
+      { pending, chatId: msg.chatId, senderId: msg.senderId });
     return;
   }
 
@@ -2182,12 +2172,8 @@ async function routePlan(msg, platform, config, provider, goal, toolDeps) {
 // /mode business menu + setup wizard
 // ---------------------------------------------------------------------------
 
-async function showBusinessMenu(msg, platform, config, pending) {
-  pending.set(msg.chatId, msg.senderId, 'business_menu', {
-    data: { senderId: msg.senderId },
-    ttlMs: pickerTtlMs(config),
-    expireMsg: 'Business menu expired — re-run /mode business.',
-  });
+async function showBusinessMenu(msg, platform, config, deps = {}) {
+  const { toolDeps = {} } = deps;
   await platform.send(msg.chatId,
     'Business Mode\n' +
     '1) Setup persona\n' +
@@ -2197,48 +2183,59 @@ async function showBusinessMenu(msg, platform, config, pending) {
     '5) Assign chats\n\n' +
     'Reply with a number:'
   );
+  await openAsk(
+    makeBusinessMenuAsk({ msg, platform, config, platformRegistry: toolDeps.platformRegistry, toolDeps }),
+    { pending: toolDeps.pending, chatId: msg.chatId, senderId: msg.senderId },
+  );
 }
 
-async function handleBusinessMenuReply(msg, platform, config, input, agentRegistry, platformRegistry, state, registry) {
-  const pending = state;
-  if (!pending) return false;
+// The business menu (1-5) as an owner-ask (M10): single-shot numeric. Choices 1
+// and 5 launch sub-asks (the setup wizard / the mode picker) on the SAME
+// dispatcher — the dispatcher cleared this menu before handle ran, so each
+// openAsk parks its successor cleanly.
+function makeBusinessMenuAsk({ msg, platform, config, platformRegistry, toolDeps }) {
+  return {
+    kind: 'business_menu',
+    request: null, isOwner: true, commandCancels: true,
+    cancelMsg: 'Business menu cancelled.',
+    ttlMs: pickerTtlMs(config),
+    expireMsg: 'Business menu expired — re-run /mode business.',
+    stickMsg: 'Pick 1-5 or send a /command to cancel.',
+    accepts: (text) => /^[1-5]$/.test(text),
+    handle: async (t) => {
+      await runBusinessMenuChoice(parseInt(t, 10), msg, platform, config, platformRegistry, toolDeps);
+      return { done: true };
+    },
+  };
+}
 
-  const choice = parseInt(input, 10);
-  if (isNaN(choice) || choice < 1 || choice > 5) {
-    await platform.send(msg.chatId, 'Pick 1-5 or send a /command to cancel.');
-    return true;
-  }
-
-  registry.clear(msg.chatId, msg.senderId);
-
+async function runBusinessMenuChoice(choice, msg, platform, config, platformRegistry, toolDeps) {
   switch (choice) {
     case 1: {
-      // Launch wizard — pre-populated from existing config. Replaces the menu
-      // entry on the same (chat,sender) key; longer TTL for the multi-step fill.
+      // Launch the setup wizard — pre-populated from existing config; parks on the
+      // same (chat,sender) key for the multi-step fill.
       const existing = config.business || {};
-      registry.set(msg.chatId, msg.senderId, 'business_wizard', {
-        ttlMs: wizardTtlMs(config),
-        expireMsg: 'Business setup expired — re-run /mode business → 1.',
+      const state = {
+        step: 'name',
         data: {
-          step: 'name',
-          data: {
-            name: existing.name || null,
-            greeting: existing.greeting || null,
-            topics: existing.topics ? existing.topics.map(t => ({ ...t })) : [],
-            rules: existing.rules ? [...existing.rules] : []
-          }
-        }
-      });
+          name: existing.name || null,
+          greeting: existing.greeting || null,
+          topics: existing.topics ? existing.topics.map(t => ({ ...t })) : [],
+          rules: existing.rules ? [...existing.rules] : [],
+        },
+      };
       const current = existing.name ? `\nCurrent: ${existing.name}` : '';
       await platform.send(msg.chatId, `Step 1/5 — Name${current}\nSend new name or "skip" to keep it.`);
-      return true;
+      await openAsk(makeBusinessWizardAsk({ msg, platform, config, state }),
+        { pending: toolDeps.pending, chatId: msg.chatId, senderId: msg.senderId });
+      return;
     }
     case 2: {
       // Show persona
       const b = config.business || {};
       if (!b.name) {
         await platform.send(msg.chatId, 'No business persona configured. Use /mode business → 1 to set one up.');
-        return true;
+        return;
       }
       const lines = [`Name: ${b.name}`];
       if (b.greeting) lines.push(`Greeting: ${b.greeting}`);
@@ -2254,7 +2251,7 @@ async function handleBusinessMenuReply(msg, platform, config, input, agentRegist
         b.rules.forEach(r => lines.push(`  - ${r}`));
       }
       await platform.send(msg.chatId, lines.join('\n'));
-      return true;
+      return;
     }
     case 3: {
       // Clear persona
@@ -2262,7 +2259,7 @@ async function handleBusinessMenuReply(msg, platform, config, input, agentRegist
       saveConfig(config);
       await platform.send(msg.chatId, 'Business persona cleared.');
       logAudit({ action: 'business_clear', user_id: msg.senderId });
-      return true;
+      return;
     }
     case 4: {
       // Set as global default
@@ -2270,20 +2267,20 @@ async function handleBusinessMenuReply(msg, platform, config, input, agentRegist
       saveConfig(config);
       await platform.send(msg.chatId, 'Bot mode set to: business');
       logAudit({ action: 'mode', user_id: msg.senderId, mode: 'business', scope: 'global' });
-      return true;
+      return;
     }
     case 5: {
-      // Assign chats — delegate to mode picker
+      // Assign chats — delegate to the mode picker (another owner-ask).
       const beeperPlatform = platformRegistry?.get('beeper');
       const hasBeeperChats = beeperPlatform && config.platforms?.beeper?.enabled;
       if (!hasBeeperChats) {
         await platform.send(msg.chatId, 'No Beeper chats available. Connect Beeper first.');
-        return true;
+        return;
       }
       const allChats = await listBeeperChats(beeperPlatform, config);
       if (!allChats || allChats.length === 0) {
         await platform.send(msg.chatId, 'No chats found.');
-        return true;
+        return;
       }
       const chats = allChats.filter(c => c.id !== msg.chatId);
       const labels = disambiguateTitles(chats, config);
@@ -2291,29 +2288,40 @@ async function handleBusinessMenuReply(msg, platform, config, input, agentRegist
         const currentMode = getChatMode(config, c.id);
         return `  ${i + 1}) ${labels.get(c.id)} [${currentMode}]`;
       }).join('\n');
-      registry.set(msg.chatId, msg.senderId, 'mode', {
-        data: { mode: 'business', matches: chats, agent: null },
-        ttlMs: pickerTtlMs(config),
-        expireMsg: 'Mode selection expired — re-run /mode.',
-      });
       await platform.send(msg.chatId, `Pick a chat to set to business:\n${list}\n\nReply with a number:`);
-      return true;
+      await openAsk(makeModeAsk({ mode: 'business', matches: chats, agent: null, msg, platform, config, toolDeps }),
+        { pending: toolDeps.pending, chatId: msg.chatId, senderId: msg.senderId });
+      return;
     }
   }
-  return false;
 }
 
-async function handleBusinessWizardStep(msg, platform, config, input, state, registry) {
-  // `state` is the registry entry payload { step, data } (mutated in place
-  // across steps); `registry` clears it on save/cancel.
+// The business setup wizard as a multi-step owner-ask (M10): one ask whose mutable
+// `state` ({ step, data }) advances per reply. handle runs ONE step and returns
+// { next: self } to stay parked, or { done } when the confirm step ends it. cancel
+// is owned by the dispatcher (CANCEL_RE → "Business setup cancelled.").
+function makeBusinessWizardAsk({ msg, platform, config, state }) {
+  const ask = {
+    kind: 'business_wizard',
+    request: null, isOwner: true, commandCancels: true,
+    cancelMsg: 'Business setup cancelled.',
+    ttlMs: wizardTtlMs(config),
+    expireMsg: 'Business setup expired — re-run /mode business → 1.',
+    accepts: () => true, // any non-cancel input is a step answer
+    handle: async (input) => {
+      const finished = await runBusinessWizardStep(input, state, msg, platform, config);
+      return finished ? { done: true } : { next: ask };
+    },
+  };
+  return ask;
+}
+
+// Run one wizard step against the mutable `state` ({ step, data }). Returns true
+// when the wizard is finished (the confirm step), else false (advance + re-park).
+// Cancel is handled upstream by the dispatcher, so it never reaches here.
+async function runBusinessWizardStep(input, state, msg, platform, config) {
   const pending = state;
   const lower = input.toLowerCase();
-
-  if (lower === 'cancel') {
-    registry.clear(msg.chatId, msg.senderId);
-    await platform.send(msg.chatId, 'Business setup cancelled.');
-    return;
-  }
 
   switch (pending.step) {
     case 'name':
@@ -2431,18 +2439,20 @@ async function handleBusinessWizardStep(msg, platform, config, input, state, reg
       break;
 
     case 'confirm':
+      // The dispatcher already intercepts "no" (CANCEL_RE) → "Business setup
+      // cancelled." A "yes" saves; any other stray reply discards. Either way the
+      // confirm step ENDS the wizard (the dispatcher clears it on { done }).
       if (lower === 'yes' || lower === 'y') {
         config.business = { ...config.business, ...pending.data };
         saveConfig(config);
-        registry.clear(msg.chatId, msg.senderId);
         await platform.send(msg.chatId, 'Business persona saved.');
         logAudit({ action: 'business_setup', user_id: msg.senderId, name: pending.data.name });
       } else {
-        registry.clear(msg.chatId, msg.senderId);
         await platform.send(msg.chatId, 'Discarded.');
       }
-      break;
+      return true; // confirm always ends the wizard
   }
+  return false; // any other step advanced state → re-park and continue
 }
 
 function formatBusinessSummary(data) {
@@ -2546,6 +2556,42 @@ async function routeHelp(msg, platform, config, args) {
   await platform.send(msg.chatId, out.join('\n'));
 }
 
+// The Beeper file-index scope picker as an owner-ask (M10): single-shot 1/2/3.
+// commandCancels preserves the prior escape (issue another command to abandon it).
+function makeIndexAsk({ fileName, srcURL, platform, indexer, msg, config }) {
+  return {
+    kind: 'index',
+    request: null, // a picker is not conversation — record nothing
+    isOwner: true,
+    commandCancels: true,
+    ttlMs: pickerTtlMs(config),
+    expireMsg: 'File index prompt expired — re-send the file.',
+    stickMsg: 'Reply 1 (public), 2 (admin), or 3 (skip), or "cancel".',
+    showPrompt: async () => {
+      await platform.send(msg.chatId, `Got "${fileName}". Index as:\n1. Public (kb)\n2. Admin only\n3. Skip\nReply 1, 2, or 3.`);
+      return 'prompted';
+    },
+    accepts: (text) => /^[123]$/.test(text),
+    handle: async (t) => {
+      if (t === '3') {
+        await platform.send(msg.chatId, 'Skipped.');
+        return { done: true };
+      }
+      const scope = t === '1' ? 'public' : 'admin';
+      try {
+        await platform.send(msg.chatId, `Downloading and indexing: ${fileName} (${scope})...`);
+        const buffer = await platform.downloadAsset(srcURL);
+        const count = await indexer.indexBuffer(buffer, fileName, scope);
+        await platform.send(msg.chatId, `Indexed ${count} chunks from ${fileName} [${scope}]`);
+        logAudit({ action: 'index_upload', user_id: msg.senderId, filename: fileName, chunks: count, scope, platform: 'beeper' });
+      } catch (err) {
+        await platform.send(msg.chatId, `Index error: ${err.message}`);
+      }
+      return { done: true };
+    },
+  };
+}
+
 async function handleBeeperFileIndex(msg, platform, config, indexer, pending) {
   if (!isOwner(msg.senderId, config, msg)) {
     await platform.send(msg.chatId, 'Owner only. File indexing not available.');
@@ -2573,13 +2619,9 @@ async function handleBeeperFileIndex(msg, platform, config, indexer, pending) {
   if (scope === 'kb') scope = 'public';
 
   if (!scope) {
-    // Ask for scope
-    pending.set(msg.chatId, msg.senderId, 'index', {
-      data: { fileName, srcURL },
-      ttlMs: pickerTtlMs(config),
-      expireMsg: 'File index prompt expired — re-send the file.',
-    });
-    await platform.send(msg.chatId, `Got "${fileName}". Index as:\n1. Public (kb)\n2. Admin only\n3. Skip\nReply 1, 2, or 3.`);
+    // Ask for scope via the one dispatcher (prompt + park).
+    await openAsk(makeIndexAsk({ fileName, srcURL, platform, indexer, msg, config }),
+      { pending, platform, chatId: msg.chatId, senderId: msg.senderId });
     return;
   }
 

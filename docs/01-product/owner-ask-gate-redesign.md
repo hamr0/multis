@@ -1,6 +1,7 @@
 # M10 — Unified owner-ask gate (ceremony/pending/park-resume redesign)
 
-**Status:** DESIGN COMPLETE — **§1–§6 LOCKED 2026-06-24**. Ready to build (M10), starting with the keystone replay regression (red).
+**Status:** BUILT — **§1–§6 LOCKED 2026-06-24; implemented 2026-06-24, suite green (520/520), PENDING LIVE VERIFICATION.**
+Keystone replay regression written red→green. One dispatcher (`src/bot/ask-dispatcher.js`) + `makeCeremonyAsk` (both doors) landed. routeAsk memory rewired (§5): the request enters `recent.json` only at completion, paired with its outcome; a parked ceremony records (request→outcome) at the PIN reply — no dangling, no replay; PIN digits never recorded. 6 of 7 ask types migrated onto the dispatcher (PIN ceremony, index + mode pickers, business menu + setup wizard, /pin change wizard); the 7-case router switch is down to 2 (ASK_KIND + gate_reply). **gate_reply is NOT migrated by design** (§6 step-4 assessment): it is a parked-promise *resolver* for bareguard HITL where the router hands raw yes/no/PIN to `entry.resolve()` — routing it through the dispatcher's cancel/stick logic would eat a "no" deny before it reaches the resolver; it is also still live for Telegram `checkpoint_tools` (opt-in), so not deletable. **Still owed:** live serial-transport (Beeper) verification — the project rule is that only live testing confirms a poll-loop fix.
 **Motivation:** live testing (2026-06-24) surfaced the "stuck on delete" bug — a parked destructive request replays on every later turn. Investigation showed the owner-interaction lifecycle is **4 parallel park-and-resume implementations** with no shared contract; the bug lives in the seam between them. Owner called for a redesign, not a fifth patch.
 
 ---
