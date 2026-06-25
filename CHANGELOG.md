@@ -4,6 +4,22 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+## [0.17.7] — 2026-06-25
+
+### Fixed — a destructive request you've answered no longer "sticks" and repeats
+
+Asking in plain language to delete or change something prompted for your PIN, but the request was written into the chat's memory with **no record of how it ended** — so after you supplied the PIN and the action ran, the assistant would re-issue the same destructive request on your *next* message, again and again ("stuck on delete"). Now a request enters the conversation **only when it completes, paired with its outcome** — while it's waiting on your PIN the conversation holds nothing about it, so there's nothing to replay. Your PIN keystrokes are never written to memory. Found and fixed live (2026-06-24/25), proven by a keystone regression test and a live run on Beeper.
+
+### Changed — one unified flow for every prompt that needs a reply (PIN, pick-a-chat, setup wizards)
+
+The PIN ceremony, the `/index` and `/mode` choosers, the business-persona menu, and the `/pin` change wizard previously each had their own ad-hoc "waiting for your reply" handling — four near-copies where the bug above lived in the seams. They now share **one** flow, so they behave consistently:
+
+- A stray message while a prompt is open gets a **"⏳ Still waiting…"** nudge (and is *not* answered as a normal question or silently dropped) — one prompt at a time.
+- **"cancel"** (or just issuing another `/command`, for the choosers) aborts the pending prompt cleanly.
+- A successful action with no output now confirms **"✓ Done."** instead of leaving you guessing — a failure already showed its error.
+
+No command changed what it does; only the shared prompt mechanics. Live-verified on Beeper with no poll-loop stalls.
+
 ### Fixed — a natural-language destructive action no longer hangs instead of running
 
 Asking in plain language for a destructive action ("delete the file ~/x") prompted for your PIN correctly, but the agent loop kept running *after* the prompt — so the assistant re-prompted, re-reasoned, and eventually hit the tool-round cap, leaking a raw `halt:gate.terminated` to the chat while the action **never executed**. The PIN prompt now **ends the turn cleanly** (the parked action waits for your reply and runs on the correct PIN), so the natural-language path behaves exactly like `/exec`. The slash (`/exec`) path was never affected. Found and fixed live, 2026-06-24; covered by a deterministic regression test (`test/integration/llm-ceremony-halt.test.js`). The root cause — bare-agent swallowing a `HaltError` thrown from a tool body rather than from a governance seam — is filed as an upstream ask; multis halts from the correct seam in the meantime.
