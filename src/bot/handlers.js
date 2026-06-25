@@ -1174,7 +1174,12 @@ function wrapToolThroughCore(adaptedTool, govCtx, { verifyPin, pinConfigured, ce
           },
         });
         const status = await openAsk(ask, { pending, chatId: govCtx.chatId, senderId: govCtx.senderId });
-        if (status === 'locked') return 'Locked out due to failed PIN attempts. Try again later.';
+        // Locked out: the ceremony prompt already sent the "Locked out…" line to chat
+        // (createCeremonyPrompt). HALT the turn instead of returning a tool-result
+        // string the Loop would feed back for the model to RE-NARRATE — that double
+        // "locked out" message is the wart a live test surfaced. Same clean-exit
+        // pattern as the parked path below; the canned line IS the user-facing signal.
+        if (status === 'locked') throw new HaltError('ceremony locked out', { rule: 'ceremony-locked' });
         if (status !== 'prompted') return 'Could not prompt for the required PIN — action cancelled.';
         // END THE TURN. The PIN prompt is already sent and the action is parked; if
         // we returned a tool-result string the Loop would feed it to the model and
@@ -1262,10 +1267,11 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
     onToolResult,
     throwOnError: false,
     onError: (err, meta) => {
-      // A parked PIN ceremony halts the loop on purpose (the tool body throws
-      // HaltError) — a clean governance exit, not an error. Don't log it as
-      // loop_error (the parked action's govern line is the real audit record).
-      if (err?.rule === 'ceremony-parked') return;
+      // A ceremony halt — a PIN park or a lockout — ends the loop on purpose (the
+      // tool body throws HaltError) — a clean governance exit, not an error. Don't
+      // log it as loop_error (the message is already in chat; the govern line is the
+      // real audit record).
+      if (err?.rule === 'ceremony-parked' || err?.rule === 'ceremony-locked') return;
       logAudit({ action: 'loop_error', source: meta?.source, error: err?.message, chatId: ctx.chatId, user_id: ctx.senderId });
     },
   });
@@ -1278,10 +1284,11 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   });
   mark(`runAgentLoop: loop.run done (rounds=${result.toolRounds ?? '?'}, err=${result.error ? 'yes' : 'no'})`, _rc);
   if (result.error) {
-    // A destructive tool parked its PIN ceremony and halted the turn (see
-    // wrapToolThroughCore). The PIN prompt is already in the chat and the action is
-    // parked on PendingRegistry — there is nothing to surface, so end quietly.
-    if (result.error === 'halt:ceremony-parked') return '';
+    // A ceremony halt — a destructive tool parked its PIN prompt, or the owner was
+    // locked out (see wrapToolThroughCore). The user-facing line (the PIN prompt or
+    // the "Locked out…" notice) is already in chat, so end quietly — surfacing a
+    // tool-result string here would make the model re-narrate it (double message).
+    if (result.error === 'halt:ceremony-parked' || result.error === 'halt:ceremony-locked') return '';
     // Other halt errors come back as `error: 'halt:<rule>'` strings — surface as a normal Error
     throw result.error instanceof Error ? result.error : new Error(String(result.error));
   }
