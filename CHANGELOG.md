@@ -4,6 +4,10 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+### Changed — memory store ready for the native promotion ladder (M4 unblocked)
+
+Upgraded litectx (0.20 → **0.21**) to consume the per-tenant memory-isolation boundary multis filed for **M4**. A single shared store can now fence each chat's **facts and episodes** — and the promotion ladder that distils them into durable memory — exactly the way it already fences uploaded documents, with a fail-closed guard so a missing scope can never leak one chat's memory into another's. **No user-visible change yet** — the native memory model lands when M4's build replaces the current capture pipeline; this is the foundation it stands on. Validated against the **published** litectx 0.21.0 (16/16, failable — the prior cross-chat leak is closed, the ladder and by-id fetch are fenced, and a deliberately-unfenced control still leaks to prove the test can fail); full suite **526/526**, `npm audit` clean.
+
 ## [0.17.8] — 2026-06-25
 
 ### Added — plain-text/CSV files are searchable, and vague questions recall your recent notes

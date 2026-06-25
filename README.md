@@ -99,7 +99,7 @@ multis is mostly *wiring* — the hard parts are vendored from a family of small
 
 These are siblings multis can grow toward — same design DNA, drop-in when the need arrives:
 
-- **[litectx](https://npmjs.com/package/litectx)** — ranked, graph-aware memory with activation decay. **Now adopted** as multis's document index + memory store (M3); the native memory model (promotion ladder) lands in M4.
+- **[litectx](https://npmjs.com/package/litectx)** — ranked, graph-aware memory with activation decay. **Now adopted** as multis's document index + memory store (M3); the native memory model (promotion ladder) lands in M4 — its per-tenant memory-isolation primitive shipped in **litectx 0.21.0** (validated), so the M4 build is unblocked.
 - **[barebrowse](https://npmjs.com/package/barebrowse)** — a real browser for the agent, so it can read and act on the live web.
 - **[baremobile](https://npmjs.com/package/baremobile)** — Android + iOS device control.
 
