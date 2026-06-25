@@ -112,14 +112,19 @@ function forScope(scope) {
      * to rows written by rememberMemory (meta.type==='memory'). Over-fetches then slices
      * since recall mixes docs + memory in one kind:'doc' ranking.
      *
-     * NOTE (M3 behaviour, flagged): the legacy store had a recency fallback (recentByType)
-     * so an all-stopword query still surfaced recent memory. litectx exposes no recent-by-
-     * scope query for memory rows, so the fallback is dropped — filed as a litectx ask
-     * (litectx-asks/recent-memory-by-scope.md). FTS recall still works for any real term.
+     * Recency fallback (litectx 0.20.0 `recentMemory`): an all-stopword query
+     * (e.g. "what did I say") yields an empty FTS match, so recall ranks nothing and
+     * returns []. We then surface the most recent memory rows for the scope instead —
+     * scope-fenced + expiry-aware via the bound `view`, the same fence as recall. This
+     * restores the legacy `recentByType` tie-break that M3 dropped (the ask is now
+     * DELIVERED; validated against the published 0.20.0 artifact).
      */
     async searchMemory(query, { n = 5 } = {}) {
       const hits = await view.recall(query, { kind: 'doc', n: n * 4, body: true });
-      return hits.filter((h) => h.meta && h.meta.type === 'memory').slice(0, n).map(mapMemHit);
+      const mem = hits.filter((h) => h.meta && h.meta.type === 'memory');
+      if (mem.length > 0) return mem.slice(0, n).map(mapMemHit);
+      const recent = await view.recentMemory({ n: n * 4, body: true });
+      return recent.filter((h) => h.meta && h.meta.type === 'memory').slice(0, n).map(mapMemHit);
     },
     /**
      * Ingest an uploaded document buffer into the bound scope.

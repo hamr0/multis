@@ -151,6 +151,28 @@ describe('context wrapper (litectx policy layer)', () => {
     assert.match(hits[0].createdAt || '', /^\d{4}-\d{2}-\d{2}/, 'createdAt is an ISO timestamp');
   });
 
+  it('searchMemory falls back to recency on an empty FTS match (litectx 0.20.0 recentMemory)', async () => {
+    // Use an isolated scope so the shared-"widget" seed rows can't satisfy the query.
+    // An all-stopword query ("what did I say") has no FTS term → recall ranks nothing
+    // → the recency fallback surfaces the latest memory rows for the scope instead.
+    await context.rememberMemory('user:RX', 'Reminder to renew the parking permit.', { expiresAt: Date.now() + 86400_000 });
+    await context.rememberMemory('user:RX', 'Birthday gift idea: noise-cancelling headphones.', { expiresAt: Date.now() + 86400_000 });
+    // a different tenant + an expired same-scope row — neither may surface via recency
+    await context.rememberMemory('user:RY', 'Other tenant private grocery list.', { expiresAt: Date.now() + 86400_000 });
+    await context.rememberMemory('user:RX', 'Expired stale note about the old lease.', { expiresAt: Date.now() - 1000 });
+
+    // sanity: the query truly has no FTS match in this scope (so the fallback, not
+    // recall, is what returns anything) — proves the test exercises the new path.
+    const fts = names(await context.search('what did i say', { scope: 'user:RX', n: 20 })).join('\n');
+    assert.doesNotMatch(fts, /parking permit|gift idea/, 'the all-stopword query has no FTS match (fallback, not recall, must answer)');
+
+    const recent = names(await context.searchMemory('what did i say', { scope: 'user:RX', n: 10 })).join('\n');
+    assert.match(recent, /parking permit/, 'recency fallback surfaces a recent memory row');
+    assert.match(recent, /gift idea/, 'recency fallback surfaces both recent rows');
+    assert.doesNotMatch(recent, /Other tenant/, 'recency fallback is scope-fenced (no other tenant)');
+    assert.doesNotMatch(recent, /Expired stale/, 'recency fallback is expiry-aware (no dead row)');
+  });
+
   it('purge reclaims expired memory rows and spares live ones', async () => {
     await context.rememberMemory('user:B', 'The widget ephemeral beta note.', { expiresAt: Date.now() - 1000 });
     await context.rememberMemory('user:B', 'The widget durable beta note.', { expiresAt: Date.now() + 86400_000 });
