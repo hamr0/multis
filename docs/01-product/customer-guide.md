@@ -606,6 +606,8 @@ When an action needs it, the bot asks for your PIN. After entering the correct P
 
 **While a PIN is pending:** reply your PIN to proceed, or **`cancel`** to abort it. Anything else — a new request, a stray message — doesn't run, doesn't count as a wrong PIN, and isn't answered as a question: you get a **"⏳ Still waiting for your PIN"** reminder and the action stays parked until you reply. Only one action waits at a time, so if you fire several, the rest wait behind the reminder until you clear the first.
 
+A **wrong** PIN doesn't cancel the action — it tells you how many attempts remain and keeps it parked, so your next *correct* PIN still runs it. Three wrong tries trips the [lockout](#lockout) below; a reply during an active lockout is final.
+
 **This applies to the natural-language path too.** If you ask in plain language ("delete the logs in ~/tmp") and the assistant resolves it to a destructive action while your PIN session is stale, it prompts `🔒 That action needs your PIN.` — echoing the **exact resolved command** — and continues the same action once you reply. So rephrasing a command as a sentence can't sidestep the PIN, and you approve what will *actually* run. (`pin_prompt_timeout` in config bounds how long it waits.) For an **app-verb** (e.g. `/mode off`), the prompt names the thing in plain language — `set "Amora" to off` — rather than echoing an internal id; only shell commands show the verbatim command text.
 
 ### Changing Your PIN

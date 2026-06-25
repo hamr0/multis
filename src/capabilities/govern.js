@@ -135,7 +135,9 @@ async function runGovernedAction({ capability, args = {}, ctx = {}, deps = {}, c
         if (deps.audit) await deps.audit(plainIntent(cap, args, tier), { capability: cap.name, tier, ctx, status: 'denied-ceremony' }).catch(() => {});
         // Surface the verifier's reason (e.g. "Wrong PIN. N attempts remaining.")
         // so the owner knows why it was declined, not just that it was.
-        return { kind: RESULT.DENIED, ok: false, reason: `${tier}_ceremony_declined`, message: v && v.reason, tier, echo };
+        // `retry` tells the caller to RE-PARK the ceremony: a wrong PIN with
+        // attempts left is retryable; a lockout (v.locked) is terminal.
+        return { kind: RESULT.DENIED, ok: false, reason: `${tier}_ceremony_declined`, message: v && v.reason, tier, echo, retry: !(v && v.locked) };
       }
     }
   }

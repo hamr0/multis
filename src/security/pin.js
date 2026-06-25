@@ -55,7 +55,10 @@ class PinManager {
     const fail = this.failCounts.get(userId);
     if (fail && fail.lockedUntil && Date.now() < fail.lockedUntil) {
       const remaining = Math.ceil((fail.lockedUntil - Date.now()) / 60000);
-      return { success: false, reason: `Locked out. Try again in ${remaining} minutes.` };
+      // `locked:true` so a reply during an active lockout is terminal, not retry-able
+      // (matches the transition-into-lockout return below; without it a ceremony
+      // triggered mid-lockout would re-park on every reply instead of cancelling).
+      return { success: false, reason: `Locked out. Try again in ${remaining} minutes.`, locked: true };
     }
 
     if (verifyPin(pin, hash)) {

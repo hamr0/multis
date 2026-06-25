@@ -188,14 +188,17 @@ describe('M0 parity — slash door and LLM door converge on the one governed cor
     llm.env.cleanup();
   });
 
-  it('declined PIN: both doors cancel the destructive action — neither executes', async () => {
+  it('declined PIN: both doors refuse the destructive action — neither executes', async () => {
+    // A wrong PIN with attempts remaining re-parks the ceremony (retry-able) on both
+    // doors — NOT a terminal cancel — so the message is "attempts remaining". The
+    // load-bearing invariant is unchanged: neither door executes on a wrong PIN.
     // --- slash door, wrong PIN ---
     const slash = buildSlash();
     const sp = slash.router(msg(`/exec ${DESTRUCTIVE}`), slash.platform);
     await waitFor(() => pinPrompt(slash.platform), 'slash PIN prompt');
     await slash.router(msg('9999'), slash.platform); // wrong
     await sp;
-    assert.ok(slash.platform.sent.some((s) => /cancelled/i.test(s.text)), 'slash: declined → cancelled');
+    assert.ok(slash.platform.sent.some((s) => /attempts remaining/i.test(s.text)), 'slash: wrong PIN → retry-able');
     assert.ok(!ranSomeOutput(slash.platform, /parity-marker/), 'slash: command did NOT execute');
     slash.env.cleanup();
 
