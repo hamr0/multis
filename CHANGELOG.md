@@ -4,6 +4,24 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+## [0.17.8] — 2026-06-25
+
+### Added — plain-text/CSV files are searchable, and vague questions recall your recent notes
+
+Dropping a `.txt`, `.log`, `.csv`, or `.text` file into the chat now **indexes its contents** for retrieval — previously these were stored but invisible to search (only PDF/DOCX/Markdown were chunked). The `/index` reply now tells you whether a file became **searchable** or was **stored-only**, instead of a bare chunk count you had to interpret. And an all-stopword question like *"what did I say?"* — which has no keyword to match — now **falls back to your most recent notes** for that chat instead of "no matching memories". (Rides litectx 0.19/0.20.)
+
+### Changed — the agent loop and governance run on the current foundation
+
+Upgraded the underlying agent loop and governance engine (bare-agent → 0.19, bareguard → 0.9), and simplified how a natural-language destructive action pauses for your PIN (it now halts the turn directly instead of through a workaround). The visible effect is internal robustness; one new safeguard is user-relevant: if you set a per-run cost cap and a turn can't be priced (an unknown model), the assistant now **stops rather than silently continuing** under an unenforceable cap — configurable (`security.fail_closed_on_unpriced`, on by default), with no effect unless you've set a cost cap.
+
+### Fixed — a "Locked out" message no longer arrives twice
+
+After three wrong PINs, a further plain-language destructive request showed the **"Locked out"** notice *and* a second paraphrase of it. Now it's a single clean notice. Covered by a regression test; root cause was the locked path feeding a tool-result string back for the model to re-narrate.
+
+### Changed — removed temporary diagnostic logging
+
+The event-loop diagnostic instrumentation (added to chase an intermittent Beeper `tools/call` timeout) is **removed** — the cause was traced to harmless suspend/resume wake transients and cold-startup cost, never a runtime stall during message handling. Side benefit: the daemon log no longer records snippets of message text or chat IDs.
+
 ## [0.17.7] — 2026-06-25
 
 ### Fixed — a destructive request you've answered no longer "sticks" and repeats

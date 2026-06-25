@@ -58,6 +58,10 @@ describe('loadConfig — default merging', () => {
     assert.strictEqual(config.security.pin_timeout_hours, 24);
     assert.strictEqual(config.security.pin_lockout_minutes, 60);
     assert.strictEqual(config.security.prompt_injection_detection, true);
+    // Secure default (M11): fail-closed on an unpriced LLM round is ON unless
+    // explicitly disabled. Guards the default itself — the governance tests set
+    // the flag explicitly, so only this asserts a silent flip to false.
+    assert.strictEqual(config.security.fail_closed_on_unpriced, true);
   });
 
   it('fills security.rate_limit, llm.max_tool_rounds and documents bounds for pre-existing configs', () => {

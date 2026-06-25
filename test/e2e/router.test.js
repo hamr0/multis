@@ -290,10 +290,11 @@ describe('M0 e2e — halt routing + injection', () => {
     const { carrier, gate } = await realGov(env.config, GOVERNANCE, humanPrompt);
 
     // No injected spend. The first LLM turn reports a real model + token usage;
-    // bare-agent's Loop derives costUsd (claude-haiku-4-5: $0.0008/$0.004 per 1k
-    // → 1k in + 1k out = $0.0048) and accrues it into the gate budget via
-    // onLlmResult. That single turn alone exceeds max_cost_per_run ($0.0001), so
-    // the exec tool's policy check halts and routes to humanChannel.
+    // bare-agent's Loop derives costUsd (claude-haiku-4-5: $0.001/$0.005 per 1k
+    // → 1k in + 1k out = $0.006, per the bare-agent 0.17 rate-table refresh) and
+    // accrues it into the gate budget via onLlmResult. That single turn alone
+    // exceeds max_cost_per_run ($0.0001), so the exec tool's policy check halts
+    // and routes to humanChannel.
     //
     // This is the end-to-end proof F3 is closed: pre-0.16.1, CircuitBreaker
     // .wrapProvider dropped `.model` and Loop had no result.model fallback, so

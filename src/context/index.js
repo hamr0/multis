@@ -112,21 +112,32 @@ function forScope(scope) {
      * to rows written by rememberMemory (meta.type==='memory'). Over-fetches then slices
      * since recall mixes docs + memory in one kind:'doc' ranking.
      *
-     * NOTE (M3 behaviour, flagged): the legacy store had a recency fallback (recentByType)
-     * so an all-stopword query still surfaced recent memory. litectx exposes no recent-by-
-     * scope query for memory rows, so the fallback is dropped — filed as a litectx ask
-     * (litectx-asks/recent-memory-by-scope.md). FTS recall still works for any real term.
+     * Recency fallback (litectx 0.20.0 `recentMemory`): an all-stopword query
+     * (e.g. "what did I say") yields an empty FTS match, so recall ranks nothing and
+     * returns []. We then surface the most recent memory rows for the scope instead —
+     * scope-fenced + expiry-aware via the bound `view`, the same fence as recall. This
+     * restores the legacy `recentByType` tie-break that M3 dropped (the ask is now
+     * DELIVERED; validated against the published 0.20.0 artifact).
      */
     async searchMemory(query, { n = 5 } = {}) {
       const hits = await view.recall(query, { kind: 'doc', n: n * 4, body: true });
-      return hits.filter((h) => h.meta && h.meta.type === 'memory').slice(0, n).map(mapMemHit);
+      const mem = hits.filter((h) => h.meta && h.meta.type === 'memory');
+      if (mem.length > 0) return mem.slice(0, n).map(mapMemHit);
+      const recent = await view.recentMemory({ n: n * 4, body: true });
+      return recent.filter((h) => h.meta && h.meta.type === 'memory').slice(0, n).map(mapMemHit);
     },
-    /** Ingest an uploaded document buffer into the bound scope. @returns {Promise<number>} chunks. */
+    /**
+     * Ingest an uploaded document buffer into the bound scope.
+     * @returns {Promise<{chunks:number, mode:string}>} chunk count + litectx mode
+     *   ('chunked' = searchable; 'blob' = stored-only, not recallable). The host
+     *   surfaces `mode` so a 0-chunk ingest reads as "stored, not searchable"
+     *   rather than a misleading success.
+     */
     async indexBuffer(buffer, filename, { expiresAt = null } = {}) {
       const r = await view.ingest(toU8(buffer), { filename, expiresAt, ..._bounds });
-      return r.chunks;
+      return { chunks: r.chunks, mode: r.mode };
     },
-    /** Ingest a document from a filesystem path (the /index <path> flow). @returns {Promise<number>} chunks. */
+    /** Ingest a document from a filesystem path (the /index <path> flow). @returns {Promise<{chunks:number, mode:string}>} */
     async indexFile(filePath, opts = {}) {
       return this.indexBuffer(fs.readFileSync(filePath), path.basename(filePath), opts);
     },
@@ -156,9 +167,9 @@ function forScope(scope) {
 
 // `async` so a synchronous toScope() throw (missing scope) surfaces as a rejected
 // promise, uniform with the storage I/O — not a sync throw beside it.
-/** @param {string} scope @returns {Promise<number>} chunks */
+/** @param {string} scope @returns {Promise<{chunks:number, mode:string}>} */
 const indexBuffer = async (buffer, filename, scope, opts = {}) => forScope(scope).indexBuffer(buffer, filename, opts);
-/** @param {string} scope @returns {Promise<number>} chunks */
+/** @param {string} scope @returns {Promise<{chunks:number, mode:string}>} */
 const indexFile = async (filePath, scope, opts = {}) => forScope(scope).indexFile(filePath, opts);
 const rememberMemory = async (scope, text, opts = {}) => forScope(scope).rememberMemory(text, opts);
 /** @param {string} query @param {{ scope: string, n?: number }} opts  scope REQUIRED (fail-closed) */

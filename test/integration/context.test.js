@@ -52,9 +52,28 @@ describe('context wrapper (litectx policy layer)', () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('ingest reports chunk count for a parseable doc', async () => {
-    const n = await context.indexBuffer(buf('# Extra\nA widget appendix paragraph.'), 'extra.md', 'kb');
-    assert.ok(n >= 1, 'a non-empty markdown doc should produce at least one chunk');
+  it('ingest reports {chunks, mode} for a parseable doc', async () => {
+    const r = await context.indexBuffer(buf('# Extra\nA widget appendix paragraph.'), 'extra.md', 'kb');
+    assert.ok(r.chunks >= 1, 'a non-empty markdown doc should produce at least one chunk');
+    assert.equal(r.mode, 'chunked', 'a parseable doc reports the searchable (chunked) mode');
+  });
+
+  // litectx 0.19.0 (plaintext-chunker ask) — validate the PUBLISHED artifact: plain-text
+  // family files now chunk (were 0-chunk blobs on 0.18.0) and are recallable by a body term.
+  it('plaintext family (.txt/.text/.log/.csv) chunks and is recallable (litectx 0.19.0)', async () => {
+    const cases = [
+      ['notes.txt', 'zonkberry alpha note\n\nsecond paragraph beta'],
+      ['app.log', '2026-06-25 zonkberry log line\nanother line'],
+      ['rows.csv', 'col1,col2\nzonkberry,9\nbeta,8'],
+      ['raw.text', 'zonkberry plain text body'],
+    ];
+    for (const [name, body] of cases) {
+      const r = await context.indexBuffer(buf(body), name, 'kb');
+      assert.ok(r.chunks >= 1, `${name} should produce >= 1 chunk (0 on litectx 0.18.0)`);
+      assert.equal(r.mode, 'chunked', `${name} should be searchable, not stored-only`);
+    }
+    const hits = names(await context.search('zonkberry', { scope: 'kb', n: 20 })).join('\n');
+    assert.match(hits, /zonkberry/, 'a plain-text body term is returned by recall');
   });
 
   it('customer recall sees own scope ∪ global-KB only (never another customer, never admin)', async () => {
@@ -132,6 +151,28 @@ describe('context wrapper (litectx policy layer)', () => {
     assert.match(hits[0].createdAt || '', /^\d{4}-\d{2}-\d{2}/, 'createdAt is an ISO timestamp');
   });
 
+  it('searchMemory falls back to recency on an empty FTS match (litectx 0.20.0 recentMemory)', async () => {
+    // Use an isolated scope so the shared-"widget" seed rows can't satisfy the query.
+    // An all-stopword query ("what did I say") has no FTS term → recall ranks nothing
+    // → the recency fallback surfaces the latest memory rows for the scope instead.
+    await context.rememberMemory('user:RX', 'Reminder to renew the parking permit.', { expiresAt: Date.now() + 86400_000 });
+    await context.rememberMemory('user:RX', 'Birthday gift idea: noise-cancelling headphones.', { expiresAt: Date.now() + 86400_000 });
+    // a different tenant + an expired same-scope row — neither may surface via recency
+    await context.rememberMemory('user:RY', 'Other tenant private grocery list.', { expiresAt: Date.now() + 86400_000 });
+    await context.rememberMemory('user:RX', 'Expired stale note about the old lease.', { expiresAt: Date.now() - 1000 });
+
+    // sanity: the query truly has no FTS match in this scope (so the fallback, not
+    // recall, is what returns anything) — proves the test exercises the new path.
+    const fts = names(await context.search('what did i say', { scope: 'user:RX', n: 20 })).join('\n');
+    assert.doesNotMatch(fts, /parking permit|gift idea/, 'the all-stopword query has no FTS match (fallback, not recall, must answer)');
+
+    const recent = names(await context.searchMemory('what did i say', { scope: 'user:RX', n: 10 })).join('\n');
+    assert.match(recent, /parking permit/, 'recency fallback surfaces a recent memory row');
+    assert.match(recent, /gift idea/, 'recency fallback surfaces both recent rows');
+    assert.doesNotMatch(recent, /Other tenant/, 'recency fallback is scope-fenced (no other tenant)');
+    assert.doesNotMatch(recent, /Expired stale/, 'recency fallback is expiry-aware (no dead row)');
+  });
+
   it('purge reclaims expired memory rows and spares live ones', async () => {
     await context.rememberMemory('user:B', 'The widget ephemeral beta note.', { expiresAt: Date.now() - 1000 });
     await context.rememberMemory('user:B', 'The widget durable beta note.', { expiresAt: Date.now() + 86400_000 });
@@ -183,7 +224,7 @@ describe('context wrapper (litectx policy layer)', () => {
       // An under-limit doc of the SAME format ingests → the rejection is the byte
       // cap, not a content/format quirk.
       const under = buf('# Doc\n' + 'The widget fox jumps over the lazy dog. '.repeat(8000)); // ~0.3MB
-      assert.ok((await context.indexBuffer(under, 'under.md', 'kb')) >= 1, 'an under-limit doc ingests');
+      assert.ok((await context.indexBuffer(under, 'under.md', 'kb')).chunks >= 1, 'an under-limit doc ingests');
       // 2MB > the 1MB bound multis wired (and < litectx's 10MB default — so a
       // rejection here can ONLY be multis's configured cap).
       await assert.rejects(
@@ -198,7 +239,7 @@ describe('context wrapper (litectx policy layer)', () => {
       // At a 2-page cap the same PDF ingests; at a 1-page cap it is rejected — and
       // 1 is below litectx's 2000 default, so the cap is multis's configured value.
       context.setBounds({ maxSize: 10 * MB, maxPdfPages: 2, parseTimeoutMs: 30000 });
-      assert.ok((await context.indexBuffer(pdf, 'ok.pdf', 'kb')) >= 1, 'a 2-page PDF ingests at a 2-page cap');
+      assert.ok((await context.indexBuffer(pdf, 'ok.pdf', 'kb')).chunks >= 1, 'a 2-page PDF ingests at a 2-page cap');
 
       context.setBounds({ maxSize: 10 * MB, maxPdfPages: 1, parseTimeoutMs: 30000 });
       await assert.rejects(

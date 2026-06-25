@@ -30,7 +30,6 @@ const pickerTtlMs = (config) => (config.interaction?.picker_ttl_minutes ?? 5) * 
 const wizardTtlMs = (config) => (config.interaction?.wizard_ttl_minutes ?? 30) * 60_000;
 const PKG_VERSION = require('../../package.json').version;
 const { looksLikeCommand } = require('../platforms/message');
-const { mark, startClock } = require('../debug/instr'); // TEMP: timeout instrumentation
 
 // ---------------------------------------------------------------------------
 // Admin presence pause — when owner messages in a business chat, bot pauses
@@ -999,6 +998,14 @@ async function routeRead(msg, platform, config, filePath, toolDeps = {}) {
 // file in chat (a scoped upload), never via a host path.
 // Registry scope vocab: 'kb' = the public KB, 'admin' = owner-private. We accept
 // the user words public|kb|admin and normalise; null scope → ask for the role.
+// One renderer for an ingest outcome so a 0-chunk / blob result reads as "stored
+// but not searchable" instead of a misleading "Indexed 0 chunks". Takes litectx's
+// {chunks, mode} ('chunked' = searchable; 'blob' = stored-only, not recallable).
+function indexOutcomeMsg({ chunks, mode }, name, scope) {
+  if (mode === 'blob' || !chunks) return `Stored ${name} [${scope}] — saved but not searchable (no text chunks).`;
+  return `Indexed ${chunks} chunk${chunks === 1 ? '' : 's'} from ${name} [${scope}]`;
+}
+
 function parseIndexArgs(args) {
   if (!args || !args.trim()) return null;
   const parts = args.trim().split(/\s+/);
@@ -1039,7 +1046,7 @@ async function routeIndex(msg, platform, config, indexer, args, toolDeps = {}) {
     return;
   }
   await sendCapabilityResult(r, platform, msg, {
-    format: (res) => `Indexed ${res.count} chunks from ${parsed.display} [${res.role}]`,
+    format: (res) => indexOutcomeMsg({ chunks: res.count, mode: res.mode }, parsed.display, res.role),
     ownerOnly: 'Owner only command.',
   });
 }
@@ -1166,20 +1173,23 @@ function wrapToolThroughCore(adaptedTool, govCtx, { verifyPin, pinConfigured, ce
           },
         });
         const status = await openAsk(ask, { pending, chatId: govCtx.chatId, senderId: govCtx.senderId });
-        if (status === 'locked') return 'Locked out due to failed PIN attempts. Try again later.';
+        // Locked out: the ceremony prompt already sent the "Locked out…" line to chat
+        // (createCeremonyPrompt). HALT the turn instead of returning a tool-result
+        // string the Loop would feed back for the model to RE-NARRATE — that double
+        // "locked out" message is the wart a live test surfaced. Same clean-exit
+        // pattern as the parked path below; the canned line IS the user-facing signal.
+        if (status === 'locked') throw new HaltError('ceremony locked out', { rule: 'ceremony-locked' });
         if (status !== 'prompted') return 'Could not prompt for the required PIN — action cancelled.';
         // END THE TURN. The PIN prompt is already sent and the action is parked; if
         // we returned a tool-result string the Loop would feed it to the model and
         // keep going — a model that keeps reasoning/re-calling then re-prompts and
         // re-parks every round until limits.maxToolRounds halts it (the NL-door bug,
-        // 2026-06-24). bare-agent only honors HaltError from its GATE SEAMS, NOT from
-        // a tool's execute (that catch wraps it in a ToolError and continues). So we
-        // flag the park here and let the onToolResult seam in runAgentLoop throw the
-        // HaltError — the Loop exits cleanly with error 'halt:ceremony-parked', which
-        // runAgentLoop swallows (the prompt IS the user-facing signal). Return ''
-        // (not a hint string) so nothing extra is fed back before the halt.
-        govCtx._ceremonyParked = true;
-        return '';
+        // 2026-06-24). Throw HaltError straight from the tool body: bare-agent ≥0.18.0
+        // re-throws a HaltError out of the per-tool execute catch like every other
+        // seam (the fix multis filed under M9), so the Loop exits cleanly with
+        // error 'halt:ceremony-parked' (onError skips it by rule; runAgentLoop
+        // swallows it — the prompt IS the user-facing signal). No onToolResult shim.
+        throw new HaltError('ceremony parked for PIN', { rule: 'ceremony-parked' });
       }
       if (r.kind === RESULT.DENIED) return renderDenied(r);
       return 'Action could not be completed.';
@@ -1195,10 +1205,8 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   const adapted = adaptTools(tools, ctx);
 
   // Resolve governance lazily on first call (ESM bareguard requires await import)
-  const _gc = startClock();
   const bundle = gov ? await gov.resolve() : {};
   const { policy, onLlmResult, onToolResult, verifyPin, pinConfigured, ceremonyPrompt, denylist } = bundle;
-  mark('runAgentLoop: gov.resolve done', _gc);
 
   // M9 increment 3 — the LLM door through the one governed core. A tool whose
   // capability can require a ceremony (today: `exec`/run_shell, dynamic severity)
@@ -1239,15 +1247,10 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   const cb = getCircuitBreaker(config);
   const wrappedProvider = cb.wrapProvider(agentProvider, config?.llm?.provider || 'default');
 
-  // Halt the loop when a tool parked a PIN ceremony. bare-agent honors HaltError
-  // from the onToolResult SEAM (not from a tool's execute, which swallows it), so
-  // wrapToolThroughCore flags the park on govCtx and we throw HaltError here — right
-  // after the gate records the tool result — to end the turn cleanly. Without this
-  // the model keeps reasoning/re-calling and burns rounds to a maxToolRounds halt.
-  const onToolResultWithHalt = async (rec) => {
-    if (onToolResult) await onToolResult(rec);
-    if (govCtx._ceremonyParked) throw new HaltError('ceremony parked for PIN', { rule: 'ceremony-parked' });
-  };
+  // A tool that parks a PIN ceremony throws HaltError straight from its execute
+  // body (wrapToolThroughCore); bare-agent ≥0.18.0 re-throws it out of the per-tool
+  // catch like every other seam, so the Loop exits cleanly on 'halt:ceremony-parked'
+  // with no onToolResult shim. onToolResult is now just bareguard's gate.record.
 
   // "Always ask" confirms (e.g. before every exec) are governed by bareguard's
   // flags primitive inside `policy`, routed through the single humanChannel —
@@ -1258,29 +1261,28 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
     retry,
     policy,
     onLlmResult,
-    onToolResult: onToolResultWithHalt,
+    onToolResult,
     throwOnError: false,
     onError: (err, meta) => {
-      // A parked PIN ceremony halts the loop on purpose (onToolResultWithHalt) — a
-      // clean governance exit, not an error. Don't log it as loop_error (the parked
-      // action's govern line is the real audit record); logging it dents fidelity.
-      if (err?.rule === 'ceremony-parked') return;
+      // A ceremony halt — a PIN park or a lockout — ends the loop on purpose (the
+      // tool body throws HaltError) — a clean governance exit, not an error. Don't
+      // log it as loop_error (the message is already in chat; the govern line is the
+      // real audit record).
+      if (err?.rule === 'ceremony-parked' || err?.rule === 'ceremony-locked') return;
       logAudit({ action: 'loop_error', source: meta?.source, error: err?.message, chatId: ctx.chatId, user_id: ctx.senderId });
     },
   });
 
   // Pass _ctx through so humanChannel can route prompts back via platformRegistry.
-  const _rc = startClock();
-  mark('runAgentLoop: loop.run start');
   const result = await loop.run(messages, governed, {
     ctx: govCtx,
   });
-  mark(`runAgentLoop: loop.run done (rounds=${result.toolRounds ?? '?'}, err=${result.error ? 'yes' : 'no'})`, _rc);
   if (result.error) {
-    // A destructive tool parked its PIN ceremony and halted the turn (see
-    // wrapToolThroughCore). The PIN prompt is already in the chat and the action is
-    // parked on PendingRegistry — there is nothing to surface, so end quietly.
-    if (result.error === 'halt:ceremony-parked') return '';
+    // A ceremony halt — a destructive tool parked its PIN prompt, or the owner was
+    // locked out (see wrapToolThroughCore). The user-facing line (the PIN prompt or
+    // the "Locked out…" notice) is already in chat, so end quietly — surfacing a
+    // tool-result string here would make the model re-narrate it (double message).
+    if (result.error === 'halt:ceremony-parked' || result.error === 'halt:ceremony-locked') return '';
     // Other halt errors come back as `error: 'halt:<rule>'` strings — surface as a normal Error
     throw result.error instanceof Error ? result.error : new Error(String(result.error));
   }
@@ -1337,10 +1339,7 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     // null-global, so customer-planted content can't surface in another customer's
     // or the owner's tool-enabled agent loop as trusted instructions (#6).
     const scope = admin ? 'admin' : `user:${msg.chatId}`;
-    const _sc = startClock();
-    mark('routeAsk -> indexer.search');
     const chunks = await indexer.search(question, { scope, n: 5 });
-    mark(`routeAsk <- indexer.search (${chunks.length} chunks)`, _sc);
 
     // Resolve agent for @mention stripping + per-chat provider only. The persona
     // layer is DEFERRED (obedient-bot-first; constitution/persona returns with the
@@ -1386,15 +1385,12 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     // park its PIN ceremony (park-and-resume) instead of blocking the loop.
     const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, platformName: msg.platform, config, platformRegistry, pending, requestText: question };
 
-    const _lc = startClock();
-    mark(`routeAsk -> agent loop (${userTools.length} tools, model ${config?.llm?.model || '?'})`);
     const answer = await runAgentLoop(agentProvider, messages, userTools, {
       system,
       ctx,
       config,
       gov,
     });
-    mark('routeAsk <- agent loop', _lc);
 
     // Empty answer = a destructive tool parked its PIN ceremony and halted the turn
     // (runAgentLoop swallows 'halt:ceremony-parked' → ''). The PIN prompt is already
@@ -1408,10 +1404,7 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
       ? `[${resolved.name}] ${answer}`
       : answer;
 
-    const _pc = startClock();
-    mark('routeAsk -> platform.send');
     await platform.send(msg.chatId, prefixed);
-    mark('routeAsk <- platform.send', _pc);
 
     // Record the COMPLETED exchange as a paired (request → answer) turn (M10 §5
     // rule 2). Written only now — never eagerly — so a turn that instead parked a
@@ -2581,9 +2574,9 @@ function makeIndexAsk({ fileName, srcURL, platform, indexer, msg, config }) {
       try {
         await platform.send(msg.chatId, `Downloading and indexing: ${fileName} (${scope})...`);
         const buffer = await platform.downloadAsset(srcURL);
-        const count = await indexer.indexBuffer(buffer, fileName, scope);
-        await platform.send(msg.chatId, `Indexed ${count} chunks from ${fileName} [${scope}]`);
-        logAudit({ action: 'index_upload', user_id: msg.senderId, filename: fileName, chunks: count, scope, platform: 'beeper' });
+        const res = await indexer.indexBuffer(buffer, fileName, scope);
+        await platform.send(msg.chatId, indexOutcomeMsg(res, fileName, scope));
+        logAudit({ action: 'index_upload', user_id: msg.senderId, filename: fileName, chunks: res.chunks, scope, platform: 'beeper' });
       } catch (err) {
         await platform.send(msg.chatId, `Index error: ${err.message}`);
       }
@@ -2598,7 +2591,7 @@ async function handleBeeperFileIndex(msg, platform, config, indexer, pending) {
     return;
   }
 
-  const supported = ['pdf', 'docx', 'md', 'txt'];
+  const supported = config.documents?.allowedTypes || ['pdf', 'docx', 'md', 'txt'];
   const attachment = msg._attachments.find(a => {
     const ext = (a.fileName || '').split('.').pop().toLowerCase();
     return supported.includes(ext);
@@ -2628,9 +2621,9 @@ async function handleBeeperFileIndex(msg, platform, config, indexer, pending) {
   try {
     await platform.send(msg.chatId, `Downloading and indexing: ${fileName} (${scope})...`);
     const buffer = await platform.downloadAsset(srcURL);
-    const count = await indexer.indexBuffer(buffer, fileName, scope);
-    await platform.send(msg.chatId, `Indexed ${count} chunks from ${fileName} [${scope}]`);
-    logAudit({ action: 'index_upload', user_id: msg.senderId, filename: fileName, chunks: count, scope, platform: 'beeper' });
+    const res = await indexer.indexBuffer(buffer, fileName, scope);
+    await platform.send(msg.chatId, indexOutcomeMsg(res, fileName, scope));
+    logAudit({ action: 'index_upload', user_id: msg.senderId, filename: fileName, chunks: res.chunks, scope, platform: 'beeper' });
   } catch (err) {
     await platform.send(msg.chatId, `Index error: ${err.message}`);
   }
@@ -2648,7 +2641,7 @@ async function handleDocumentUpload(msg, platform, config, indexer) {
 
   const filename = doc.file_name || 'unknown';
   const ext = filename.split('.').pop().toLowerCase();
-  const supported = ['pdf', 'docx', 'md', 'txt'];
+  const supported = config.documents?.allowedTypes || ['pdf', 'docx', 'md', 'txt'];
 
   if (!supported.includes(ext)) {
     await platform.send(msg.chatId, `Unsupported file type: .${ext}\nSupported: ${supported.join(', ')}`);
@@ -2661,9 +2654,9 @@ async function handleDocumentUpload(msg, platform, config, indexer) {
     const response = await fetch(fileLink.href);
     const buffer = Buffer.from(await response.arrayBuffer());
 
-    const count = await indexer.indexBuffer(buffer, filename, 'kb');
-    await platform.send(msg.chatId, `Indexed ${count} chunks from ${filename} [kb]`);
-    logAudit({ action: 'index_upload', user_id: msg.senderId, filename, chunks: count });
+    const res = await indexer.indexBuffer(buffer, filename, 'kb');
+    await platform.send(msg.chatId, indexOutcomeMsg(res, filename, 'kb'));
+    logAudit({ action: 'index_upload', user_id: msg.senderId, filename, chunks: res.chunks });
   } catch (err) {
     await platform.send(msg.chatId, `Index error: ${err.message}`);
     logAudit({ action: 'index_error', user_id: msg.senderId, filename, error: err.message });
@@ -2675,7 +2668,7 @@ async function handleDocumentUpload(msg, platform, config, indexer) {
  * Never sends a reply to the user.
  */
 async function handleSilentAttachment(msg, platform, config, indexer, source) {
-  const supported = ['pdf', 'docx', 'md', 'txt'];
+  const supported = config.documents?.allowedTypes || ['pdf', 'docx', 'md', 'txt'];
 
   if (source === 'telegram') {
     const doc = msg._document;
@@ -2689,8 +2682,8 @@ async function handleSilentAttachment(msg, platform, config, indexer, source) {
       const fileLink = await msg._telegram.getFileLink(doc.file_id);
       const response = await fetch(fileLink.href);
       const buffer = Buffer.from(await response.arrayBuffer());
-      const count = await indexer.indexBuffer(buffer, filename, scope);
-      logAudit({ action: 'silent_index', user_id: msg.senderId, filename, chunks: count, scope, platform: 'telegram' });
+      const res = await indexer.indexBuffer(buffer, filename, scope);
+      logAudit({ action: 'silent_index', user_id: msg.senderId, filename, chunks: res.chunks, scope, platform: 'telegram' });
     } catch (err) {
       console.error(`Silent index error (telegram): ${err.message}`);
     }
@@ -2704,8 +2697,8 @@ async function handleSilentAttachment(msg, platform, config, indexer, source) {
     try {
       const scope = `user:${msg.chatId}`;
       const buffer = await platform.downloadAsset(attachment.srcURL);
-      const count = await indexer.indexBuffer(buffer, attachment.fileName, scope);
-      logAudit({ action: 'silent_index', user_id: msg.senderId, filename: attachment.fileName, chunks: count, scope, platform: 'beeper' });
+      const res = await indexer.indexBuffer(buffer, attachment.fileName, scope);
+      logAudit({ action: 'silent_index', user_id: msg.senderId, filename: attachment.fileName, chunks: res.chunks, scope, platform: 'beeper' });
     } catch (err) {
       console.error(`Silent index error (beeper): ${err.message}`);
     }

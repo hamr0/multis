@@ -85,10 +85,11 @@ function buildLLM(ran) {
     pinManager, pending: new PendingRegistry(), fileless: true, governanceFile: GOV,
   });
   router.registerPlatform('telegram', platform);
-  return { env, platform, router, provider };
+  return { env, platform, router, provider, pinManager };
 }
 
 const pinPrompts = (p) => p.sent.filter((s) => /needs your PIN|Reply with your PIN/i.test(s.text));
+const lockedNotices = (p) => p.sent.filter((s) => /Locked out/i.test(s.text));
 
 describe('LLM-door ceremony halts the loop (no round-cap leak)', () => {
   it('parks ONCE and never leaks a round-cap halt, even when the model keeps calling', async () => {
@@ -125,5 +126,32 @@ describe('LLM-door ceremony halts the loop (no round-cap leak)', () => {
     // 5. The ceremony is parked → the correct PIN resolves it and runs exactly once.
     await router(msg(PIN), platform);
     assert.deepStrictEqual(ran, [COMMAND], 'the correct PIN runs the parked command exactly once');
+  });
+});
+
+describe('LLM-door ceremony: a locked-out owner gets ONE notice, no double message', () => {
+  it('a locked ceremony HALTS with a single "Locked out" line (no model re-narration)', async () => {
+    // Regression (live-surfaced 2026-06-25): the locked path RETURNED a tool-result
+    // string, so the Loop fed it back and the model RE-NARRATED it — owner saw the
+    // canned "Locked out…" AND a paraphrase. With the relentless provider the old
+    // behavior also re-prompts every round to the cap. The fix HALTS (like the parked
+    // path), so the canned notice ceremonyPrompt already sent is the ONLY message.
+    const ran = [];
+    const { platform, router, pinManager } = buildLLM(ran);
+    // Pre-lock the owner: 3 failed attempts, locked for an hour.
+    pinManager.failCounts.set('user1', { count: 3, lockedUntil: Date.now() + 3600_000 });
+
+    const p = router(msg('/ask delete the scratch file'), platform);
+    await waitFor(() => lockedNotices(platform).length > 0, 'locked-out notice');
+    await p;
+
+    // Exactly ONE "Locked out" message — the loop halted, so the model never ran
+    // another round to re-prompt or re-narrate.
+    assert.strictEqual(lockedNotices(platform).length, 1,
+      `expected exactly one "Locked out" notice, got ${lockedNotices(platform).length}: ${JSON.stringify(platform.sent.map((s) => s.text))}`);
+    // No round-cap leak, and a lockout is a clean governance exit, not a loop_error.
+    assert.ok(!platform.sent.some((s) => /too many tool steps|halt:/i.test(s.text)), 'no halt leak to chat');
+    assert.ok(!readAuditLogs(200).some((e) => e.action === 'loop_error'), 'a locked ceremony must not write a loop_error');
+    assert.deepStrictEqual(ran, [], 'nothing executes when the owner is locked out');
   });
 });

@@ -345,6 +345,51 @@ describe('createGate — budget halt via humanChannel', () => {
     assert.ok(captured.action, 'halt event carries action (v0.4)');
     assert.strictEqual(captured.action._ctx.chatId, 'c1');
   });
+
+  it('fail_closed_on_unpriced: an unpriced round under a cost cap HALTS (M11 cost contract)', async () => {
+    // bareguard 0.9.0: a round the meter could not price (unknown model / no
+    // rate-table entry) must not masquerade as free. With a finite cap and the
+    // default-on fail-closed, the next check halts on rule budget.unpriced rather
+    // than silently passing — the cost axis is unenforceable, so fail closed.
+    let captured = null;
+    const bundle = await createGate({
+      config: { security: { max_cost_per_run: 1.00, fail_closed_on_unpriced: true } },
+      governance: GOV,
+      fileless: true,
+      budgetFile: null,
+      humanPrompt: async (event) => { captured = event; return { decision: 'deny' }; },
+    });
+    await bundle.onLlmResult({
+      model: 'totally-unknown-model', usage: { inputTokens: 10, outputTokens: 5 },
+      costUsd: null, pricing: 'unpriced', ctx: { chatId: 'c1' },
+    });
+    try {
+      await bundle.policy('exec', { command: 'ls' }, { isOwner: true, chatId: 'c1', senderId: 'u1' });
+    } catch { /* HaltError on halt is fine */ }
+    assert.ok(captured, 'humanChannel saw the unpriced halt');
+    assert.strictEqual(captured.kind, 'halt');
+    assert.match(captured.rule || '', /budget\.unpriced/, 'halt rule is budget.unpriced');
+  });
+
+  it('fail_closed_on_unpriced=false: an unpriced round does NOT halt (negative control)', async () => {
+    // The opt-out keeps the round observably unpriced (a loud audit phase) but never
+    // halts — proves the flag is the load-bearing trigger, not some other path.
+    let captured = null;
+    const bundle = await createGate({
+      config: { security: { max_cost_per_run: 1.00, fail_closed_on_unpriced: false } },
+      governance: GOV,
+      fileless: true,
+      budgetFile: null,
+      humanPrompt: async (event) => { captured = event; return { decision: 'deny' }; },
+    });
+    await bundle.onLlmResult({
+      model: 'totally-unknown-model', usage: { inputTokens: 10, outputTokens: 5 },
+      costUsd: null, pricing: 'unpriced', ctx: { chatId: 'c1' },
+    });
+    const verdict = await bundle.policy('exec', { command: 'ls' }, { isOwner: true, chatId: 'c1', senderId: 'u1' });
+    assert.strictEqual(captured, null, 'no halt routed to humanChannel when opted out');
+    assert.strictEqual(verdict, true, 'the benign exec still proceeds');
+  });
 });
 
 describe('createGate — thin Axis-A floor (M9 increment 3: the severity ceremony moved to the core)', () => {
