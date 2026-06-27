@@ -7,11 +7,11 @@
  *   - per-CALL scope isolation: a customer recalls own ∪ global-KB, never another
  *     customer's rows, never admin's; the owner (admin) recalls admin ∪ global-KB,
  *     never a customer's (#6).
- *   - memory rides the doc axis (rememberMemory) but searchMemory filters to memory
- *     rows so the recall_memory tool never returns an uploaded document.
- *   - retention is enforced at write time via expiresAt; purge() reclaims expired rows
- *     (admin rows are given a longer life by capture.js — proven via expiresAt here).
+ *   - retention is enforced at write time via expiresAt; purge() reclaims expired rows.
  *   - get(id, scope) is fenced like recall (R2 handle fence).
+ *
+ * The M4 native memory ladder (episode→fact, recall, promotion, tenant-scoped forget) is
+ * covered by the 'native memory ladder (M4)' suite at the bottom of this file.
  *
  * These replace the coverage from the deleted store-scope / recall-memory /
  * memory-prune / sqlite-smoke tests, which exercised the now-removed homegrown store.
@@ -103,11 +103,6 @@ describe('context wrapper (litectx policy layer)', () => {
       /scope is required/,
       'search() with no scope must throw, not see every scope'
     );
-    await assert.rejects(
-      () => context.searchMemory('widget', { n: 20 }),
-      /scope is required/,
-      'searchMemory() with no scope must throw, not see every scope'
-    );
     // 'public'/'kb' map to litectx GLOBAL — the shared KB only (never a tenant). A naive
     // 'public' recall now returns exactly the KB, the safe thing a caller would expect —
     // NOT the old fail-open "every tenant".
@@ -116,80 +111,25 @@ describe('context wrapper (litectx policy layer)', () => {
     assert.doesNotMatch(kb, /customer alpha|customer beta|admin-private/, "'public' recall returns ONLY the KB");
   });
 
-  it('searchMemory returns memory rows only, never an uploaded document', async () => {
-    await context.rememberMemory('admin', 'The widget meeting summary: ship on Friday.', {
-      expiresAt: Date.now() + 86400_000,
-    });
-    // search() (RAG/doc tool) returns both docs and memory...
-    const all = names(await context.search('widget', { scope: 'admin', n: 20 })).join('\n');
-    assert.match(all, /admin-private/, 'search includes the uploaded admin doc');
-    assert.match(all, /meeting summary/, 'search includes the memory row');
-    // ...but searchMemory (recall_memory tool) returns only the memory row.
-    const mem = names(await context.searchMemory('widget', { scope: 'admin', n: 20 })).join('\n');
-    assert.match(mem, /meeting summary/, 'searchMemory returns the memory row');
-    assert.doesNotMatch(mem, /admin-private/, 'searchMemory must NOT return uploaded documents');
-  });
+  // NB: memory recall/isolation (fact/episode) is covered by the 'native memory ladder (M4)'
+  // suite below; these doc-axis cases cover the retention sweep + the R2 handle fence.
 
-  it('memory recall is scope-fenced across tenants (#6)', async () => {
-    await context.rememberMemory('user:A', 'The widget note for alpha only.', { expiresAt: Date.now() + 86400_000 });
-    await context.rememberMemory('user:B', 'The widget note for beta only.', { expiresAt: Date.now() + 86400_000 });
-
-    const a = names(await context.searchMemory('widget', { scope: 'user:A', n: 20 })).join('\n');
-    assert.match(a, /alpha only/, 'A sees its own memory');
-    assert.doesNotMatch(a, /beta only/, 'A must NOT see B memory');
-    assert.doesNotMatch(a, /meeting summary/, 'A must NOT see admin memory');
-
-    const adminMem = names(await context.searchMemory('widget', { scope: 'admin', n: 20 })).join('\n');
-    assert.doesNotMatch(adminMem, /alpha only/, 'admin must NOT see customer memory');
-    assert.doesNotMatch(adminMem, /beta only/, 'admin must NOT see customer memory');
-  });
-
-  it('memory carries a createdAt for the recall_memory date display', async () => {
-    await context.rememberMemory('user:A', 'The widget dated note for alpha.', { expiresAt: Date.now() + 86400_000 });
-    const hits = await context.searchMemory('dated', { scope: 'user:A', n: 5 });
-    assert.ok(hits.length >= 1, 'the dated note is recalled');
-    assert.match(hits[0].createdAt || '', /^\d{4}-\d{2}-\d{2}/, 'createdAt is an ISO timestamp');
-  });
-
-  it('searchMemory falls back to recency on an empty FTS match (litectx 0.20.0 recentMemory)', async () => {
-    // Use an isolated scope so the shared-"widget" seed rows can't satisfy the query.
-    // An all-stopword query ("what did I say") has no FTS term → recall ranks nothing
-    // → the recency fallback surfaces the latest memory rows for the scope instead.
-    await context.rememberMemory('user:RX', 'Reminder to renew the parking permit.', { expiresAt: Date.now() + 86400_000 });
-    await context.rememberMemory('user:RX', 'Birthday gift idea: noise-cancelling headphones.', { expiresAt: Date.now() + 86400_000 });
-    // a different tenant + an expired same-scope row — neither may surface via recency
-    await context.rememberMemory('user:RY', 'Other tenant private grocery list.', { expiresAt: Date.now() + 86400_000 });
-    await context.rememberMemory('user:RX', 'Expired stale note about the old lease.', { expiresAt: Date.now() - 1000 });
-
-    // sanity: the query truly has no FTS match in this scope (so the fallback, not
-    // recall, is what returns anything) — proves the test exercises the new path.
-    const fts = names(await context.search('what did i say', { scope: 'user:RX', n: 20 })).join('\n');
-    assert.doesNotMatch(fts, /parking permit|gift idea/, 'the all-stopword query has no FTS match (fallback, not recall, must answer)');
-
-    const recent = names(await context.searchMemory('what did i say', { scope: 'user:RX', n: 10 })).join('\n');
-    assert.match(recent, /parking permit/, 'recency fallback surfaces a recent memory row');
-    assert.match(recent, /gift idea/, 'recency fallback surfaces both recent rows');
-    assert.doesNotMatch(recent, /Other tenant/, 'recency fallback is scope-fenced (no other tenant)');
-    assert.doesNotMatch(recent, /Expired stale/, 'recency fallback is expiry-aware (no dead row)');
-  });
-
-  it('purge reclaims expired memory rows and spares live ones', async () => {
-    await context.rememberMemory('user:B', 'The widget ephemeral beta note.', { expiresAt: Date.now() - 1000 });
-    await context.rememberMemory('user:B', 'The widget durable beta note.', { expiresAt: Date.now() + 86400_000 });
+  it('purge reclaims expired rows and spares live ones', async () => {
+    await context.indexBuffer(buf('# E\nThe widget ephemeral beta note.'), 'eph.md', 'user:B', { expiresAt: Date.now() - 1000 });
+    await context.indexBuffer(buf('# D\nThe widget durable beta note.'), 'dur.md', 'user:B', { expiresAt: Date.now() + 86400_000 });
 
     const reclaimed = await context.purge();
     assert.ok(reclaimed >= 1, 'purge reclaims at least the expired row');
 
-    const live = names(await context.searchMemory('ephemeral durable', { scope: 'user:B', n: 20 })).join('\n');
+    const live = names(await context.search('ephemeral durable', { scope: 'user:B', n: 20 })).join('\n');
     assert.doesNotMatch(live, /ephemeral/, 'the expired row is gone after purge');
     assert.match(live, /durable/, 'the live row survives purge');
   });
 
-  it('get(handle, scope) is fenced — a mismatched scope returns null', async () => {
-    await context.rememberMemory('user:A', 'The widget secret handle for alpha.', { expiresAt: Date.now() + 86400_000 });
-    // The recallable handle is the chunk path surfaced by search (name/chunkId),
-    // not the doc-level id returned by ingest.
-    const [hit] = await context.searchMemory('secret handle', { scope: 'user:A', n: 1 });
+  it('get(handle, scope) is fenced — a mismatched scope returns null (R2)', async () => {
+    await context.indexBuffer(buf('# S\nThe widget secret handle for alpha.'), 'secret.md', 'user:A');
+    // The recallable handle is the chunk path surfaced by search (name/chunkId).
+    const [hit] = await context.search('secret handle', { scope: 'user:A', n: 1 });
     assert.ok(hit && hit.name, 'the row is recalled and exposes a handle');
 
     const own = await context.get(hit.name, 'user:A');
@@ -248,5 +188,129 @@ describe('context wrapper (litectx policy layer)', () => {
         'a 2-page PDF is rejected at a 1-page cap'
       );
     });
+  });
+});
+
+/**
+ * M4 native memory ladder — episodes (scratchpad, by:'agent') → facts (durable) via promotion
+ * by USE, plus /remember's direct fact write. Runs against the INSTALLED litectx 0.21.0. Every
+ * positive has a negative control; the isolation case is the customer-fencing security boundary (#6).
+ * (NB: /forget is NOT covered here — tenant-scoped forget is blocked on litectx-asks/memory-scope-forget.md.)
+ */
+describe('context wrapper — native memory ladder (M4)', () => {
+  let ctx2, tmp2;
+  const paths = (hits) => hits.map((h) => h.name);
+
+  before(async () => {
+    tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-mem-'));
+    setMultisDir(tmp2);
+    delete require.cache[require.resolve('../../src/context')];
+    delete require.cache[require.resolve('../../src/config')];
+    ctx2 = require('../../src/context');
+    require('../../src/config').setMultisDir(tmp2);
+    await ctx2.init({ documents: {} });
+  });
+
+  after(() => {
+    setMultisDir(null);
+    fs.rmSync(tmp2, { recursive: true, force: true });
+  });
+
+  it('rememberEpisode + recallMemory round-trips a scratchpad episode', async () => {
+    await ctx2.rememberEpisode('admin', 'owner wants the morning news summarized at 7am');
+    const hits = await ctx2.recallMemory('morning news summary', { scope: 'admin', n: 5 });
+    assert.match(hits.map((h) => h.content).join('\n'), /morning news/, 'the episode is recallable');
+  });
+
+  it('rememberFact (by:human) round-trips a durable fact, facts ranked before episodes', async () => {
+    // both a fact and an episode match "budget" — recallMemory must surface the FACT first.
+    await ctx2.rememberEpisode('admin', 'a passing mention of the budget in chat');
+    await ctx2.rememberFact('admin', 'the Q3 budget ceiling is fifty thousand', { by: 'human' });
+    const hits = await ctx2.recallMemory('budget ceiling', { scope: 'admin', n: 5 });
+    const joined = hits.map((h) => h.content).join('\n');
+    assert.match(joined, /budget ceiling is fifty thousand/, 'the durable fact recalls');
+    assert.match(hits[0].content, /fifty thousand/, 'a fact ranks before a scratchpad episode');
+  });
+
+  it('promotionSweep promotes a HOT episode to a durable fact (verbatim, no LLM); a cold one stays', async () => {
+    const HOT = 'customer beta always asks about furniture delivery windows';
+    const COLD = 'a one-off question about parking validation';
+    await ctx2.rememberEpisode('user:beta', HOT);
+    await ctx2.rememberEpisode('user:beta', COLD);
+    // make the HOT episode cross the promotion threshold by USE (recall is the usefulness signal).
+    for (let i = 0; i < 4; i++) await ctx2.recallMemory('furniture delivery windows', { scope: 'user:beta', n: 5 });
+
+    const promoted = await ctx2.promotionSweep('user:beta', { threshold: 3 });
+    assert.ok(promoted >= 1, 'at least the hot episode is promoted');
+
+    // the promoted text now lives on the FACT axis (verbatim copy of the episode body)…
+    const facts = await ctx2.recallMemory('furniture delivery', { scope: 'user:beta', n: 10 });
+    assert.match(facts.map((h) => h.content).join('\n'), /furniture delivery windows/, 'hot episode promoted to a fact');
+    // …and a re-sweep UPSERTS the same fact id rather than duplicating.
+    const again = await ctx2.promotionSweep('user:beta', { threshold: 3 });
+    const factHits = (await ctx2.recallMemory('furniture delivery', { scope: 'user:beta', n: 10 }))
+      .filter((h) => /furniture delivery windows/.test(h.content));
+    assert.ok(factHits.length <= 2, `re-sweep upserts, not duplicates (got ${factHits.length}); promoted again=${again}`);
+
+    // negative control: the COLD episode (recalled 0×) is not a fact.
+    const cold = await ctx2.recallMemory('parking validation', { scope: 'user:beta', n: 10 });
+    assert.doesNotMatch(
+      cold.filter((h) => /parking validation/.test(h.content)).map((h) => h.content).join('\n'),
+      /^(?=.*parking).*fact/i,
+      'cold episode is not spuriously promoted',
+    );
+  });
+
+  it('memory is tenant-fenced: one customer never recalls another customer\'s memory (#6)', async () => {
+    await ctx2.rememberFact('user:alpha', 'alpha secret: the launch code is zephyr', { by: 'human' });
+    await ctx2.rememberFact('user:gamma', 'gamma secret: the vault pin is orchid', { by: 'human' });
+
+    const alpha = paths(await ctx2.recallMemory('secret', { scope: 'user:alpha', n: 10 }));
+    const gamma = paths(await ctx2.recallMemory('secret', { scope: 'user:gamma', n: 10 }));
+
+    const aText = (await ctx2.recallMemory('secret', { scope: 'user:alpha', n: 10 })).map((h) => h.content).join('\n');
+    assert.match(aText, /zephyr/, 'alpha recalls its own fact');
+    assert.doesNotMatch(aText, /orchid/, 'alpha must NOT recall gamma\'s fact [security neg control]');
+
+    const gText = (await ctx2.recallMemory('secret', { scope: 'user:gamma', n: 10 })).map((h) => h.content).join('\n');
+    assert.doesNotMatch(gText, /zephyr/, 'gamma must NOT recall alpha\'s fact [security neg control]');
+    assert.ok(alpha.length > 0 && gamma.length > 0, 'both tenants have their own memory');
+  });
+
+  it('recallMemory with no scope THROWS (fail-closed, never see-everything)', async () => {
+    await assert.rejects(
+      () => ctx2.recallMemory('secret', { n: 10 }),
+      /scope is required/,
+      'a missing scope must throw, not recall every tenant',
+    );
+  });
+
+  it('forgetMemory clears ONE tenant\'s memory, never another\'s (the /forget security boundary)', async () => {
+    // two customers whose ids are prefix-related (user:1 / user:12) — the worst case proving the
+    // fence is owner-based, not id-based (litectx 0.22.0 forget({scope}), validated).
+    await ctx2.rememberFact('user:1', 'one fact: the gate badge is mauve', { by: 'human' });
+    await ctx2.rememberEpisode('user:1', 'one episode: asked about the badge');
+    await ctx2.rememberFact('user:12', 'twelve fact: the locker code is teal', { by: 'human' });
+
+    const before1 = (await ctx2.recallMemory('badge gate', { scope: 'user:1', n: 10 })).map((h) => h.content).join('\n');
+    assert.match(before1, /badge is mauve/, 'tenant 1 has memory before forget');
+
+    const removed = await ctx2.forgetMemory('user:1');
+    assert.ok(removed >= 1, 'forget removed tenant 1\'s rows');
+
+    // tenant 1 is cleared…
+    const after1 = await ctx2.recallMemory('badge gate', { scope: 'user:1', n: 10 });
+    assert.equal(after1.length, 0, 'tenant 1 memory is gone');
+    // …tenant 12 SURVIVES (security neg control — id is a prefix of the forgotten one).
+    const after12 = (await ctx2.recallMemory('locker code', { scope: 'user:12', n: 10 })).map((h) => h.content).join('\n');
+    assert.match(after12, /locker code is teal/, 'tenant 12 memory SURVIVES tenant 1\'s forget [security neg control]');
+  });
+
+  it('forgetMemory with no scope THROWS (fail-closed)', async () => {
+    await assert.rejects(
+      () => ctx2.forgetMemory(),
+      /scope is required/,
+      'a scope-less forget must throw, not wipe every tenant',
+    );
   });
 });

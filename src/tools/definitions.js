@@ -177,11 +177,11 @@ const TOOLS = [
     },
     execute: async ({ query }, ctx) => {
       if (!ctx.indexer) return 'Memory search not available.';
-      // Owner conversation memory is captured under scope 'admin'; a customer's
-      // under 'user:<chatId>'. searchMemory fences to scope ∪ global and filters to
-      // memory rows (never uploaded docs), so a customer can't read owner memory (#6).
+      // Owner memory lives under scope 'admin'; a customer's under 'user:<chatId>'.
+      // recallMemory fences to scope ∪ global over the fact/episode kinds (never docs),
+      // so a customer can't read owner memory (#6).
       const scope = ctx.isOwner ? 'admin' : `user:${ctx.chatId}`;
-      const results = await ctx.indexer.searchMemory(query, { scope, n: 5 });
+      const results = await ctx.indexer.recallMemory(query, { scope, n: 5 });
       if (results.length === 0) return 'No matching memories found.';
       const fmt = (r, i) => {
         const date = r.createdAt?.slice(0, 10) || 'unknown date';
@@ -202,8 +202,10 @@ const TOOLS = [
       required: ['note']
     },
     execute: async ({ note }, ctx) => {
-      if (!ctx.memoryManager) return 'Memory not available.';
-      ctx.memoryManager.appendMemory(note);
+      if (!ctx.indexer) return 'Memory not available.';
+      // A deliberate note → a durable fact (by:'human', top trust), tenant-fenced.
+      const scope = ctx.isOwner ? 'admin' : `user:${ctx.chatId}`;
+      await ctx.indexer.rememberFact(scope, note, { by: 'human' });
       return 'Noted.';
     }
   },

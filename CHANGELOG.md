@@ -4,9 +4,22 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
-### Changed — memory store ready for the native promotion ladder (M4 unblocked)
+### Changed — memory now learns from what you use, not from summarizing every conversation (M4)
 
-Upgraded litectx (0.20 → **0.21**) to consume the per-tenant memory-isolation boundary multis filed for **M4**. A single shared store can now fence each chat's **facts and episodes** — and the promotion ladder that distils them into durable memory — exactly the way it already fences uploaded documents, with a fail-closed guard so a missing scope can never leak one chat's memory into another's. **No user-visible change yet** — the native memory model lands when M4's build replaces the current capture pipeline; this is the foundation it stands on. Validated against the **published** litectx 0.21.0 (16/16, failable — the prior cross-chat leak is closed, the ladder and by-id fetch are fenced, and a deliberately-unfenced control still leaks to prove the test can fail); full suite **526/526**, `npm audit` clean.
+multis's durable memory was rebuilt on litectx's native promotion ladder, **retiring the old two-stage capture pipeline** that ran an extra LLM pass to summarize each conversation and condense the results into a `memory.md` file. The new model is simpler and earns its keep:
+
+- **Every exchange is recorded as a short-lived episode**, scoped to that chat (it expires after 90 days for a customer chat, 365 for your own).
+- **The episodes you keep coming back to are promoted to durable facts** — promotion is by genuine use (an item recalled often within a rolling 30-day window), copied **verbatim, with no summarizer in the loop**. The thin layer of things that actually matter persists; the flood of one-off chatter simply expires.
+- **`/remember <note>`** still saves a durable note instantly (top trust, no waiting).
+
+**Why it's better:** memory reflects what's proven useful rather than what an LLM guessed was important on the spot, and there's no per-conversation summarization cost or drift. Per-chat isolation is enforced at the store — one customer's memory can never surface in another's, and the guard **fails closed** (a missing scope refuses rather than showing everything).
+
+This consumes two litectx boundaries multis filed for M4 — **0.21** (per-tenant fact/episode isolation) and **0.22** (tenant-scoped `forget`) — each validated against the **published** artifact (16/16, failable: the cross-chat leak is closed, the ladder and by-id fetch are fenced, and a deliberately-unfenced control still leaks to prove the test can fail). Full suite **529/529**, `npm audit` clean.
+
+### Changed — `/forget` and `/memory`
+
+- **`/forget`** now clears exactly this chat's durable memory (tenant-fenced at the store) **and** its recent conversation window — a clean slate that cannot touch any other chat's memory or the shared knowledge base.
+- **`/memory`** shows this chat's **recent conversation window**. (Listing durable facts in bulk waits on one more litectx recency verb, filed for M4; until it lands, saved facts surface when you ask a related question, through the assistant's recall.)
 
 ## [0.17.8] — 2026-06-25
 

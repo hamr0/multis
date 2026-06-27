@@ -87,44 +87,36 @@ function setBounds(documents = {}) {
   if (documents.parseTimeoutMs != null) _bounds.parseTimeoutMs = documents.parseTimeoutMs;
 }
 
+/** Process-unique memory row id (Date.now() + seq survives a restart without collision). */
+const memId = () => `mem-${Date.now()}-${_memSeq++}`;
 const toU8 = (b) => (b instanceof Uint8Array ? b : new Uint8Array(b));
 const mapDocHit = (h) => ({ name: h.path, content: h.body || '', chunkId: h.path, format: h.format, score: h.score });
-const mapMemHit = (h) => ({ name: h.path, content: h.body || '', createdAt: h.meta?.createdAt || null, score: h.score });
+// Native memory hits carry `occurredAt` (epoch ms, episodes) + `provenance` via attachMemMeta.
+// `createdAt` is surfaced as an ISO date for the recall_memory display (occurredAt for episodes;
+// facts have none → null = "unknown date", acceptable for durable knowledge).
+const mapMemHit = (h) => ({
+  name: h.path,
+  content: h.body || '',
+  createdAt: h.occurredAt ? new Date(h.occurredAt).toISOString() : null,
+  provenance: h.provenance || null,
+  score: h.score,
+});
 
 /**
  * A scope-bound context handle over litectx's `scoped()` view (module-internal —
  * the public API is the per-call delegators below, which each obtain one of these).
- * Scope is fixed once, so no operation can be reached without it: `search` recalls
- * `scope ∪ GLOBAL`, `indexBuffer`/`rememberMemory` write to exactly the bound scope,
- * `get` is fenced to it. `'kb'`/`'public'` bind the shared KB (GLOBAL).
+ * Scope is fixed once, so no operation can be reached without it: `search`/`recallMemory`
+ * recall `scope ∪ GLOBAL`, `indexBuffer`/`rememberEpisode`/`rememberFact` write to exactly the
+ * bound scope, `get`/`forgetMemory` are fenced to it. `'kb'`/`'public'` bind the shared KB (GLOBAL).
  * @param {string} scope  'admin' | 'user:<chatId>' | 'public' | 'kb'
  */
 function forScope(scope) {
   const view = ctx().scoped(toScope(scope));
   return {
-    /** Unified recall (docs + memory), mapped to {name, content} for the prompt builders. */
+    /** Unified document recall (RAG), mapped to {name, content} for the prompt builders. */
     async search(query, { n = 5 } = {}) {
       const hits = await view.recall(query, { kind: 'doc', n, body: true });
       return hits.map(mapDocHit);
-    },
-    /**
-     * Memory-only recall for the recall_memory tool — same fence as search(), filtered
-     * to rows written by rememberMemory (meta.type==='memory'). Over-fetches then slices
-     * since recall mixes docs + memory in one kind:'doc' ranking.
-     *
-     * Recency fallback (litectx 0.20.0 `recentMemory`): an all-stopword query
-     * (e.g. "what did I say") yields an empty FTS match, so recall ranks nothing and
-     * returns []. We then surface the most recent memory rows for the scope instead —
-     * scope-fenced + expiry-aware via the bound `view`, the same fence as recall. This
-     * restores the legacy `recentByType` tie-break that M3 dropped (the ask is now
-     * DELIVERED; validated against the published 0.20.0 artifact).
-     */
-    async searchMemory(query, { n = 5 } = {}) {
-      const hits = await view.recall(query, { kind: 'doc', n: n * 4, body: true });
-      const mem = hits.filter((h) => h.meta && h.meta.type === 'memory');
-      if (mem.length > 0) return mem.slice(0, n).map(mapMemHit);
-      const recent = await view.recentMemory({ n: n * 4, body: true });
-      return recent.filter((h) => h.meta && h.meta.type === 'memory').slice(0, n).map(mapMemHit);
     },
     /**
      * Ingest an uploaded document buffer into the bound scope.
@@ -141,23 +133,63 @@ function forScope(scope) {
     async indexFile(filePath, opts = {}) {
       return this.indexBuffer(fs.readFileSync(filePath), path.basename(filePath), opts);
     },
-    /**
-     * Persist a memory summary as a scope-tagged doc row. Tagged meta.type='memory'
-     * (forced last) so it's always distinguishable from an uploaded document on recall.
-     */
-    async rememberMemory(text, { expiresAt = null, meta = {} } = {}) {
-      const id = `mem-${Date.now()}-${_memSeq++}`;
-      return view.ingest(toU8(Buffer.from(String(text))), {
-        filename: `${id}.md`,
-        expiresAt,
-        // createdAt rides meta so recall_memory can date a hit (litectx's occurredAt is
-        // fact/episode-only; our memory rides the doc axis). type='memory' forced last.
-        meta: { createdAt: new Date().toISOString(), ...meta, type: 'memory' },
-      });
-    },
     /** Fetch one row by id, fenced to the bound scope (R2 handle fence). */
     get(id) {
       return view.get(id);
+    },
+
+    // --- Native memory ladder (M4) — episodes (scratchpad) → facts (durable), no LLM. ---
+
+    /**
+     * Record one exchange as an `episode` (`by:'agent'`) — the scratchpad rung. Promotes to a
+     * fact by USE (recall count), or expires at `expiresAt`. Tenant-fenced by the bound owner.
+     */
+    async rememberEpisode(text, { expiresAt = null, meta = {} } = {}) {
+      return view.remember(memId(), String(text), { kind: 'episode', by: 'agent', expiresAt, meta });
+    },
+    /**
+     * Write a durable `fact`. `by:'human'` for the explicit `/remember` (top trust); `by:'agent'`
+     * is reserved for promotion (use {@link promotionSweep}). Facts don't expire unless `expiresAt` set.
+     */
+    async rememberFact(text, { by = 'human', expiresAt = null, meta = {} } = {}) {
+      return view.remember(memId(), String(text), { kind: 'fact', by, expiresAt, meta });
+    },
+    /**
+     * Recall durable facts + scratchpad episodes for this tenant, FACTS FIRST (durable over scratch).
+     * `recall(kind:[…])` returns a grouped `{fact, episode}`; we flatten facts-then-episodes and cap at n.
+     * Backs the recall_memory tool. NOTE: an all-stopword query yields no FTS match → `[]` (the doc-axis
+     * `recentMemory` recency fallback does not cover the memory axis — a deferrable nicety, not amnesia).
+     */
+    async recallMemory(query, { n = 5 } = {}) {
+      const g = await view.recall(query, { kind: ['fact', 'episode'], n, body: true });
+      return [...(g.fact || []), ...(g.episode || [])].slice(0, n).map(mapMemHit);
+    },
+    /**
+     * Promotion sweep (the ladder's agent rung): hot `episode`s (recalled ≥threshold within litectx's
+     * 30-day active window) → durable `fact`s, copied VERBATIM (`by:'agent'`, no summarizer — litectx
+     * flags, multis copies). The fact id is derived from the episode path so a re-sweep UPSERTS the same
+     * fact rather than duplicating. Returns the count promoted. Cheap (a SQL query + N copies); the host
+     * runs it fire-and-forget after a response.
+     */
+    async promotionSweep({ threshold } = {}) {
+      const cands = view.promotionCandidates(threshold); // [{ path, hits }]
+      let promoted = 0;
+      for (const c of cands) {
+        const ep = view.get(c.path);
+        if (!ep || !ep.text) continue;
+        await view.remember(`fact-${c.path}`, ep.text, { kind: 'fact', by: 'agent' });
+        promoted++;
+      }
+      return promoted;
+    },
+    /**
+     * Clear this tenant's whole conversational memory (`fact` + `episode`) — the `/forget` verb.
+     * Tenant-fenced on the bound owner (litectx 0.22.0 `ScopedView.forget`, validated): removes ONLY
+     * this scope's rows, never another tenant's and never the shared/global tier. Leaves uploaded docs
+     * untouched (a separate axis). @returns {number} rows removed.
+     */
+    forgetMemory() {
+      return view.forget();
     },
   };
 }
@@ -171,11 +203,14 @@ function forScope(scope) {
 const indexBuffer = async (buffer, filename, scope, opts = {}) => forScope(scope).indexBuffer(buffer, filename, opts);
 /** @param {string} scope @returns {Promise<{chunks:number, mode:string}>} */
 const indexFile = async (filePath, scope, opts = {}) => forScope(scope).indexFile(filePath, opts);
-const rememberMemory = async (scope, text, opts = {}) => forScope(scope).rememberMemory(text, opts);
+// --- Native memory ladder (M4) — each delegates to a scope-bound handle (tenant-fenced). ---
+const rememberEpisode = async (scope, text, opts = {}) => forScope(scope).rememberEpisode(text, opts);
+const rememberFact = async (scope, text, opts = {}) => forScope(scope).rememberFact(text, opts);
+const recallMemory = async (query, { scope, n = 5 } = {}) => forScope(scope).recallMemory(query, { n });
+const promotionSweep = async (scope, opts = {}) => forScope(scope).promotionSweep(opts);
+const forgetMemory = async (scope) => forScope(scope).forgetMemory();
 /** @param {string} query @param {{ scope: string, n?: number }} opts  scope REQUIRED (fail-closed) */
 const search = async (query, { scope, n = 5 } = {}) => forScope(scope).search(query, { n });
-/** @param {string} query @param {{ scope: string, n?: number }} opts  scope REQUIRED (fail-closed) */
-const searchMemory = async (query, { scope, n = 5 } = {}) => forScope(scope).searchMemory(query, { n });
 /** Fetch one row by id, fenced to scope (R2 handle fence). */
 const get = (id, scope) => forScope(scope).get(id);
 
@@ -194,5 +229,7 @@ function raw() { return ctx(); }
 
 module.exports = {
   init, setBounds, raw,
-  indexFile, indexBuffer, rememberMemory, search, searchMemory, get, purge, stats,
+  indexFile, indexBuffer, search, get, purge, stats,
+  // M4 native memory ladder
+  rememberEpisode, rememberFact, recallMemory, promotionSweep, forgetMemory,
 };

@@ -3,10 +3,9 @@ const { logAudit } = require('../governance/audit');
 const { addAllowedUser, isOwner, saveConfig, backupConfig, updateChatMeta, getMultisDir, PATHS, defaultModeForRole, roleLabel, normalizeRole } = require('../config');
 const { listSkills } = require('../skills/executor');
 const context = require('../context');
-const { createProvider, simpleGenerate } = require('../llm/provider-adapter');
+const { createProvider } = require('../llm/provider-adapter');
 const { buildRAGPrompt, buildMemorySystemPrompt, buildBusinessPrompt } = require('../llm/prompts');
 const { getMemoryManager } = require('../memory/manager');
-const { runCapture, runCondenseMemory } = require('../memory/capture');
 const { PinManager, hashPin } = require('../security/pin');
 const { RateLimiter } = require('../security/rate-limit');
 const { detectInjection, logInjectionAttempt } = require('../security/injection');
@@ -245,6 +244,21 @@ function isPaired(msgOrCtx, config) {
 // Platform-agnostic handlers (work with Message + Platform)
 // ---------------------------------------------------------------------------
 
+// --- M4 memory ladder helpers (module-level so both the router and the top-level
+// routeAsk/scheduler can use them). An exchange/observation → a litectx `episode`
+// (by:'agent', tenant-fenced, expiring at the role's retention); useful episodes
+// auto-promote to durable facts via the sweep. Both fire-and-forget + guarded — a
+// memory write must never break the reply path. recent.json + daily logs are written
+// separately (ChatMemoryManager). ---
+const memScopeFor = (admin, chatId) => (admin ? 'admin' : `user:${chatId}`);
+const rememberEpisodeFor = (indexer, memCfg, admin, chatId, text) =>
+  indexer.rememberEpisode(memScopeFor(admin, chatId), text, {
+    expiresAt: Date.now() + (admin ? memCfg.admin_retention_days : memCfg.retention_days) * 86400000,
+  }).catch((e) => console.error(`[memory] episode write failed: ${e.message}`));
+const sweepPromotionsFor = (indexer, memCfg, admin, chatId) =>
+  indexer.promotionSweep(memScopeFor(admin, chatId), { threshold: memCfg.promote_threshold })
+    .catch((e) => console.error(`[memory] promotion sweep failed: ${e.message}`));
+
 /**
  * Main message dispatcher for all platforms.
  * Takes a normalized Message and routes to the appropriate handler.
@@ -286,9 +300,16 @@ function createMessageRouter(config, deps = {}) {
   // Memory config defaults
   const memCfg = {
     recent_window: config.memory?.recent_window || 20,
-    capture_threshold: config.memory?.capture_threshold || 20,
+    promote_threshold: config.memory?.promote_threshold || 10,
+    retention_days: config.memory?.retention_days || 90,
+    admin_retention_days: config.memory?.admin_retention_days || 365,
     ...config.memory
   };
+
+  // M4 memory ladder helpers — thin closures binding indexer+memCfg to the module-level
+  // helpers (which routeAsk/the scheduler also use, being top-level functions).
+  const rememberEpisode = (admin, chatId, text) => rememberEpisodeFor(indexer, memCfg, admin, chatId, text);
+  const sweepPromotions = (admin, chatId) => sweepPromotionsFor(indexer, memCfg, admin, chatId);
 
   // Create LLM provider if configured (null if no API key)
   // Accept deps.provider (new) or deps.llm (legacy test compat)
@@ -392,7 +413,7 @@ function createMessageRouter(config, deps = {}) {
           // just announce — a late reply must not fall through to the RAG pipeline as
           // a search query (the orphaned-reply bug this de-tangle exists to kill).
           if (entry.kind === ASK_KIND) {
-            await expireAsk(entry, { platform, getMem, chatId: msg.chatId });
+            await expireAsk(entry, { platform, getMem, chatId: msg.chatId, rememberEpisode });
             return;
           }
           await platform.send(msg.chatId, entry.expireMsg
@@ -407,7 +428,7 @@ function createMessageRouter(config, deps = {}) {
             // interpret it. A /command-cancel returns { fallThrough } so the command
             // routes normally (the pickers' prior escape UX); everything else is
             // consumed here.
-            const res = await resumeAsk(entry, text, { pending, platform, getMem, chatId: msg.chatId, senderId: msg.senderId });
+            const res = await resumeAsk(entry, text, { pending, platform, getMem, chatId: msg.chatId, senderId: msg.senderId, rememberEpisode });
             if (res && res.fallThrough) break;
             return;
           }
@@ -432,7 +453,7 @@ function createMessageRouter(config, deps = {}) {
     // Off mode: defense-in-depth — no logging, no processing
     if (msg.routeAs === 'off') return;
 
-    // Silent mode: archive to memory, trigger capture pipeline, no response
+    // Silent mode: observe only — log + record as a memory episode, no response.
     if (msg.routeAs === 'silent') {
       const admin = isOwner(msg.senderId, config, msg);
       const mem = getMem(msg.chatId, { isAdmin: admin });
@@ -449,29 +470,9 @@ function createMessageRouter(config, deps = {}) {
           updateChatMeta(config, msg.chatId, fields);
         }
 
-        // Fire two-stage capture when threshold reached
-        if (mem.shouldCapture(memCfg.capture_threshold)) {
-          const captureRole = admin ? 'admin' : `user:${msg.chatId}`;
-          runCapture(msg.chatId, mem, simpleGenerate(provider), indexer, {
-            keepLast: 5,
-            role: captureRole,
-            retentionDays: memCfg.retention_days,
-            adminRetentionDays: memCfg.admin_retention_days,
-            maxSections: memCfg.memory_max_sections
-          }).then(() => {
-            // Stage 2: condense if memory.md sections >= cap
-            const sectionCap = memCfg.memory_section_cap || 5;
-            if (mem.countMemorySections() >= sectionCap) {
-              return runCondenseMemory(msg.chatId, mem, simpleGenerate(provider), indexer, {
-                sectionCap, keepRecent: 3, role: captureRole,
-                retentionDays: memCfg.retention_days,
-                adminRetentionDays: memCfg.admin_retention_days
-              });
-            }
-          }).catch(err => {
-            console.error(`[capture] Silent background error: ${err.message}`);
-          });
-        }
+        // The observed message → a memory episode; then sweep hot episodes → facts.
+        await rememberEpisode(admin, msg.chatId, `${role}: ${msg.text}`);
+        sweepPromotions(admin, msg.chatId);
       }
       return;
     }
@@ -496,13 +497,21 @@ function createMessageRouter(config, deps = {}) {
           const pauseMin = config.business?.escalation?.admin_pause_minutes ?? 30;
           setAdminPause(msg.chatId, pauseMin);
           const mem = getMem(msg.chatId, { isAdmin: true });
-          if (mem) { mem.appendMessage('user', msg.text); mem.appendToLog('user', msg.text); }
+          if (mem) {
+            mem.appendMessage('user', msg.text);
+            mem.appendToLog('user', msg.text);
+            await rememberEpisode(true, msg.chatId, `user: ${msg.text}`);
+          }
           return;
         }
         if (isAdminPaused(msg.chatId)) {
           // Customer messages while admin is active → silently archive, no LLM
           const mem = getMem(msg.chatId, { isAdmin: false });
-          if (mem) { mem.appendMessage('user', msg.text); mem.appendToLog('user', msg.text); }
+          if (mem) {
+            mem.appendMessage('user', msg.text);
+            mem.appendToLog('user', msg.text);
+            await rememberEpisode(false, msg.chatId, `user: ${msg.text}`);
+          }
           return;
         }
 
@@ -512,7 +521,11 @@ function createMessageRouter(config, deps = {}) {
           const verdict = rateLimiter.consume(msg.senderId);
           if (!verdict.allowed) {
             const mem = getMem(msg.chatId, { isAdmin: false });
-            if (mem) { mem.appendMessage('user', msg.text); mem.appendToLog('user', msg.text); }
+            if (mem) {
+              mem.appendMessage('user', msg.text);
+              mem.appendToLog('user', msg.text);
+              await rememberEpisode(false, msg.chatId, `user: ${msg.text}`);
+            }
             if (verdict.notify) {
               const note = config.business?.rate_limit_message
                 || "Thanks for your patience — I've reached my limit here for now and have flagged a human to follow up with you.";
@@ -557,7 +570,7 @@ function createMessageRouter(config, deps = {}) {
     // command severity, read/index by the owner floor — all at dispatch time,
     // with one PendingRegistry. The old PIN_PROTECTED double-path is retired.
 
-    await executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, { allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, gov, pending });
+    await executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, { indexer, allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, gov, pending });
   };
 
   router.registerPlatform = (name, instance) => {
@@ -793,7 +806,7 @@ function buildSlashDeps(bundle, config, toolDeps) {
     floorPolicy: bundle.floorPolicy,
     denylist: bundle.denylist,
     indexer,
-    appExec: buildAppExec(config, getMem),
+    appExec: buildAppExec(config, getMem, indexer),
   });
 }
 
@@ -847,14 +860,21 @@ function makeCeremonyAsk({ capability, args, ctx, deps, ceremonyPrompt, echo, re
  * any of these run. The getMem-backed verbs are only reachable from routes that
  * pass getMem in toolDeps (forget/remember/memory), so the closures are safe.
  */
-function buildAppExec(config, getMem) {
+function buildAppExec(config, getMem, indexer) {
   const mem = (ctx) => getMem(ctx.chatId, { isAdmin: ctx.isOwner });
+  const scopeOf = (ctx) => (ctx.isOwner ? 'admin' : `user:${ctx.chatId}`);
   return {
     // set_mode commits the resolved (chatId, mode) — off ceremonies via the core.
     set_mode: (args) => { setChatMode(config, args.target, args.mode); return { target: args.target, mode: args.mode }; },
-    forget:   (args, ctx) => { mem(ctx).clearMemory(); return { chatId: ctx.chatId }; },
-    remember: (args, ctx) => { mem(ctx).appendMemory(args.note); return { note: args.note }; },
-    memory:   (args, ctx) => ({ memory: mem(ctx).loadMemory() }),
+    // forget = wipe this tenant's durable memory (litectx fact+episode, tenant-fenced) AND the
+    // recent.json conversation window — a clean slate for the chat.
+    forget:   async (args, ctx) => { await indexer.forgetMemory(scopeOf(ctx)); mem(ctx).saveRecent([]); return { chatId: ctx.chatId }; },
+    // remember = a deliberate durable fact (by:'human', top trust), tenant-fenced.
+    remember: async (args, ctx) => { await indexer.rememberFact(scopeOf(ctx), args.note, { by: 'human' }); return { note: args.note }; },
+    // memory = show what we have for this chat. INTERIM: the recent conversation window —
+    // listing durable facts needs litectx's recent-memory-by-scope (open ask); until then,
+    // durable facts surface via questions (the recall_memory tool), not a bulk list.
+    memory:   (args, ctx) => ({ memory: mem(ctx).loadRecent().map((m) => `[${m.role}] ${m.content}`).join('\n') }),
   };
 }
 
@@ -1359,9 +1379,12 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     }
     const cleanQuestion = resolved.text;
 
-    // Build messages array from recent conversation
+    // Build messages array from the conversation thread (recent.json).
     const recent = mem ? mem.loadRecent() : [];
-    const memoryMd = mem ? mem.loadMemory() : '';
+    // Durable memory: facts/episodes recalled for this tenant by relevance to the question,
+    // formatted as notes for buildMemorySystemPrompt (which takes a string; empty = none).
+    const memHits = mem ? await indexer.recallMemory(cleanQuestion, { scope: memScopeFor(admin, msg.chatId), n: 5 }) : [];
+    const memoryMd = memHits.map((h) => `- ${h.content}`).join('\n');
     const system = buildMemorySystemPrompt(memoryMd, chunks, agentPersona);
 
     // Build messages array: recent history is past COMPLETED turns only (the live
@@ -1414,34 +1437,14 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
       mem.appendToLog('user', question);
       mem.appendMessage('assistant', answer);
       mem.appendToLog('assistant', answer);
+      // The completed exchange → one memory episode (combined, a coherent recall unit);
+      // then sweep hot episodes → durable facts (fire-and-forget, cheap).
+      await rememberEpisodeFor(indexer, memCfg, admin, msg.chatId, `User: ${question}\nAssistant: ${answer}`);
+      sweepPromotionsFor(indexer, memCfg, admin, msg.chatId);
     }
 
     logAudit({ action: 'ask', user_id: msg.senderId, question, chunks: chunks.length, routeAs: msg.routeAs, agent: resolved.name });
     // litectx self-tracks recall demand-signal; no manual access recording needed.
-
-    // Fire-and-forget two-stage capture if threshold reached
-    if (mem && memCfg && mem.shouldCapture(memCfg.capture_threshold)) {
-      const captureRole = admin ? 'admin' : `user:${msg.chatId}`;
-      runCapture(msg.chatId, mem, simpleGenerate(provider), indexer, {
-        keepLast: 5,
-        role: captureRole,
-        retentionDays: memCfg.retention_days,
-        adminRetentionDays: memCfg.admin_retention_days,
-        maxSections: memCfg.memory_max_sections
-      }).then(() => {
-        // Stage 2: condense if memory.md sections >= cap
-        const sectionCap = memCfg.memory_section_cap || 5;
-        if (mem.countMemorySections() >= sectionCap) {
-          return runCondenseMemory(msg.chatId, mem, simpleGenerate(provider), indexer, {
-            sectionCap, keepRecent: 3, role: captureRole,
-            retentionDays: memCfg.retention_days,
-            adminRetentionDays: memCfg.admin_retention_days
-          });
-        }
-      }).catch(err => {
-        console.error(`[capture] Background error: ${err.message}`);
-      });
-    }
   } catch (err) {
     await platform.send(msg.chatId, `LLM error: ${err.message || err}`);
   }
@@ -1996,10 +1999,11 @@ function createSchedulerTick({ platformRegistry, config, provider, indexer, getM
       const admin = true; // agentic jobs always run as owner
       const userTools = getToolsForUser(allTools || [], admin, toolsConfig);
       const mem = getMem ? getMem(job.chatId, { isAdmin: admin }) : null;
-      const memoryMd = mem ? mem.loadMemory() : '';
       // Agentic jobs run as owner, so recall is scoped to 'admin' (admin ∪ global-KB)
       // — identical to the owner's interactive /ask. recall() is fail-closed and never
       // crosses into customer (user:*) scopes, even for an owner-run job.
+      const memHits = indexer ? await indexer.recallMemory(job.action, { scope: 'admin', n: 5 }) : [];
+      const memoryMd = memHits.map((h) => `- ${h.content}`).join('\n');
       const chunks = indexer ? await indexer.search(job.action, { scope: 'admin', n: 5 }) : [];
       const system = buildMemorySystemPrompt(memoryMd, chunks);
 

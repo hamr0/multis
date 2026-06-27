@@ -45,8 +45,10 @@ const CANCEL_RE = /^(cancel|stop|abort|no)$/i;
  * Only when the ask carried a conversational request (the LLM door). Slash-door
  * asks carry no request -> nothing is recorded (a command is not conversation).
  * The PIN keystrokes and prompts are NEVER passed here — only the clean summary.
+ * `rememberEpisode(admin, chatId, text)` (optional, M4) also records the exchange as a
+ * litectx memory episode — guarded so callers without it (tests) just skip the durable write.
  */
-function recordOutcome(entry, summary, getMem) {
+function recordOutcome(entry, summary, getMem, rememberEpisode) {
   if (!entry.request || typeof getMem !== 'function') return;
   const mem = getMem(entry.chatId, { isAdmin: !!entry.isOwner });
   if (!mem) return;
@@ -56,6 +58,9 @@ function recordOutcome(entry, summary, getMem) {
   if (line) {
     mem.appendMessage('assistant', line);
     mem.appendToLog('assistant', line);
+  }
+  if (typeof rememberEpisode === 'function') {
+    rememberEpisode(!!entry.isOwner, entry.chatId, `User: ${entry.request}\nAssistant: ${line || '(no answer)'}`);
   }
 }
 
@@ -102,7 +107,7 @@ async function openAsk(ask, { pending, chatId, senderId }) {
  * recorded. `handle`/`showPrompt` already own the capability-specific chat output;
  * this owns lifecycle + recording only.
  */
-async function resumeAsk(entry, text, { pending, platform, getMem, chatId, senderId }) {
+async function resumeAsk(entry, text, { pending, platform, getMem, chatId, senderId, rememberEpisode }) {
   const ask = entry.ask;
   const t = String(text || '').trim();
 
@@ -112,7 +117,7 @@ async function resumeAsk(entry, text, { pending, platform, getMem, chatId, sende
   // default: the PIN ceremony deliberately STICKS on a stray /command (fail-safe).
   if (ask.commandCancels && t.startsWith('/')) {
     pending.clear(chatId, senderId);
-    recordOutcome(entry, 'cancelled — didn\'t run', getMem);
+    recordOutcome(entry, 'cancelled — didn\'t run', getMem, rememberEpisode);
     if (ask.cancelMsg) { try { await platform.send(chatId, ask.cancelMsg); } catch { /* best-effort */ } }
     return { fallThrough: true };
   }
@@ -120,7 +125,7 @@ async function resumeAsk(entry, text, { pending, platform, getMem, chatId, sende
   // cancel — uniform across every ask type.
   if (CANCEL_RE.test(t)) {
     pending.clear(chatId, senderId);
-    recordOutcome(entry, 'cancelled — didn\'t run', getMem);
+    recordOutcome(entry, 'cancelled — didn\'t run', getMem, rememberEpisode);
     try { await platform.send(chatId, ask.cancelMsg || 'Cancelled — that action will not run.'); } catch { /* best-effort */ }
     return;
   }
@@ -159,7 +164,7 @@ async function resumeAsk(entry, text, { pending, platform, getMem, chatId, sende
 
   // done (terminal) -> record (request -> summary). handle already sent the
   // user-facing result. Recording here fixes the replay bug for every type.
-  recordOutcome(entry, outcome.summary, getMem);
+  recordOutcome(entry, outcome.summary, getMem, rememberEpisode);
 }
 
 /**
@@ -167,8 +172,8 @@ async function resumeAsk(entry, text, { pending, platform, getMem, chatId, sende
  * deleted the entry (get -> { expired:true }); record the terminal "expired"
  * outcome so the request doesn't dangle, and announce it once.
  */
-async function expireAsk(entry, { platform, getMem, chatId }) {
-  recordOutcome(entry, 'expired — didn\'t run', getMem);
+async function expireAsk(entry, { platform, getMem, chatId, rememberEpisode }) {
+  recordOutcome(entry, 'expired — didn\'t run', getMem, rememberEpisode);
   try {
     await platform.send(chatId, entry.expireMsg || 'That prompt expired — please re-send the command.');
   } catch { /* best-effort */ }

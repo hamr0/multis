@@ -96,6 +96,7 @@ function buildRouter(ran, execOpts = {}) {
   const router = createMessageRouter(env.config, {
     provider,
     indexer: { search: () => [], indexFile: async () => 0, indexBuffer: async () => 0,
+      recallMemory: async () => [], rememberEpisode: async () => ({}), rememberFact: async () => ({}), promotionSweep: async () => 0, forgetMemory: async () => 0,
       getStats: () => ({ indexedFiles: 0, totalChunks: 0, byType: {} }), store: { recordSearchAccess: () => {} } },
     tools: [execStub(ran, execOpts)], toolsConfig: {}, runtimePlatform: 'linux',
     pinManager, pending, fileless: true, governanceFile: GOV,

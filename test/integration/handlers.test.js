@@ -427,52 +427,53 @@ describe('App-verb door — governed-core ceremony (M9 increment 2)', () => {
     const pinManager = new PinManager(env.config);
     pinManager.sessions = {};
     const pending = new PendingRegistry();
+    const indexer = stubIndexer();
     const router = createMessageRouter(env.config, {
-      llm: mockLLM(), indexer: stubIndexer(), pinManager, pending,
+      llm: mockLLM(), indexer, pinManager, pending,
       fileless: true,
       governanceFile: { commands: { allowlist: ['.*'], denylist: [] }, paths: { allowed: ['.*'], denied: [] } },
       memoryBaseDir: env.memoryBaseDir,
     });
     router.registerPlatform('telegram', platform);
     router.registerPlatform('beeper', platform);
-    return { env, platform, router, pending };
+    return { env, platform, router, pending, indexer };
   }
 
   it('a destructive /forget prompts for the PIN, then clears memory after the correct PIN', async () => {
-    const { platform, router } = buildPin();
-    await router(msg('/remember keep-this-note'), platform); // benign seed, no PIN
+    const { platform, router, indexer } = buildPin();
     const forgetP = router(msg('/forget'), platform);
     await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
     await router(msg('1234'), platform);
     await forgetP;
     assert.ok(platform.sent.some((s) => /Memory cleared/i.test(s.text)), 'memory cleared after PIN');
-    await router(msg('/memory'), platform);
-    assert.match(platform.lastTo('chat1').text, /No memory notes/, 'memory is empty after the cleared forget');
+    // the tenant-scoped litectx forget ran exactly once, after the correct PIN.
+    assert.equal(indexer.forgetCalls.length, 1, 'forgetMemory called once after the correct PIN');
   });
 
   it('a wrong PIN on /forget does NOT clear memory and stays retry-able', async () => {
     // Wrong PIN re-parks (retry-able, "attempts remaining"), never a terminal
     // cancel; memory is untouched until a correct PIN. (Corrected 2026-06-23.)
-    const { platform, router } = buildPin();
-    await router(msg('/remember keep-this-note'), platform);
+    const { platform, router, indexer } = buildPin();
     const forgetP = router(msg('/forget'), platform);
     await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
     await router(msg('9999'), platform); // wrong
     await forgetP;
     assert.ok(platform.sent.some((s) => /attempts remaining/i.test(s.text)), 'wrong PIN → retry-able');
     assert.ok(!platform.sent.some((s) => /cancelled/i.test(s.text)), 'a retry-able wrong PIN is NOT cancelled');
-    // The ceremony is still parked (retry-able), so `cancel` to abort it before
-    // checking memory — a non-PIN reply would just hit the park-and-remind.
     await router(msg('cancel'), platform);
-    await router(msg('/memory'), platform);
-    assert.match(platform.lastTo('chat1').text, /keep-this-note/, 'memory survived the declined forget');
+    // memory was never wiped — the litectx forget never ran on a wrong/declined PIN.
+    assert.equal(indexer.forgetCalls.length, 0, 'forgetMemory NEVER called without the correct PIN');
   });
 
   it('a benign /remember runs free even when a PIN is configured', async () => {
-    const { platform, router } = buildPin();
+    const { platform, router, indexer } = buildPin();
     await router(msg('/remember hello-note'), platform);
     assert.ok(!platform.sent.some((s) => /PIN/i.test(s.text)), 'no ceremony for a benign write');
     assert.ok(platform.sent.some((s) => /Noted/i.test(s.text)), 'note saved');
+    // the note was written as a durable fact (by:'human'), tenant-fenced.
+    assert.equal(indexer.factCalls.length, 1, 'rememberFact called once');
+    assert.match(indexer.factCalls[0].text, /hello-note/, 'the note text is written');
+    assert.equal(indexer.factCalls[0].opts.by, 'human', 'a /remember note is a human-trust fact');
   });
 
   // The mode picker is now an owner-ask on the one dispatcher (M10). Drive it
@@ -824,26 +825,26 @@ describe('Injection detection', () => {
 // ---------------------------------------------------------------------------
 
 describe('Memory commands', () => {
-  it('/remember saves a note, /memory shows it, /forget clears it', async () => {
+  it('/remember writes a durable fact; /forget clears the chat (no PIN → runs free)', async () => {
+    // M4: /remember → a litectx human-trust fact; /forget → a tenant-scoped litectx forget.
+    // (Listing durable facts via /memory awaits litectx recent-memory-by-scope; until then
+    // /memory shows the conversation window — so this asserts the writes via the indexer spy.)
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();
-    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+    const indexer = stubIndexer();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer });
 
-    // Remember
+    // Remember → human-trust fact, tenant-fenced
     await router(msg('/remember buy milk'), platform);
     assert.match(platform.lastTo('chat1').text, /Noted/);
+    assert.equal(indexer.factCalls.length, 1, 'a fact is written');
+    assert.match(indexer.factCalls[0].text, /buy milk/);
+    assert.equal(indexer.factCalls[0].opts.by, 'human');
 
-    // Memory shows it
-    await router(msg('/memory'), platform);
-    assert.match(platform.lastTo('chat1').text, /buy milk/);
-
-    // Forget
+    // Forget (no PIN configured → no ceremony) → tenant-scoped litectx forget
     await router(msg('/forget'), platform);
     assert.match(platform.lastTo('chat1').text, /Memory cleared/);
-
-    // Memory is now empty
-    await router(msg('/memory'), platform);
-    assert.match(platform.lastTo('chat1').text, /No memory notes/);
+    assert.equal(indexer.forgetCalls.length, 1, 'the tenant memory is cleared');
   });
 
   it('/remember without note shows usage', async () => {
@@ -2206,19 +2207,23 @@ describe('/mode chat directory is beeperbox-live, not config-bloating', () => {
 
 function stubIndexer(chunks = [], stats = {}) {
   const searchCalls = [];
+  const factCalls = [];   // M4: records rememberFact(scope, text, opts) for spy assertions
+  const forgetCalls = []; // M4: records forgetMemory(scope)
   return {
     search: async (query, opts = {}) => {
       searchCalls.push({ query, opts });
       return chunks;
     },
-    searchMemory: async (query, opts = {}) => {
-      searchCalls.push({ query, opts, memory: true });
-      return chunks;
-    },
     searchCalls,
+    factCalls,
+    forgetCalls,
     indexFile: async () => 0,
     indexBuffer: async () => 0,
-    rememberMemory: async () => ({ chunks: 1 }),
+    recallMemory: async () => [],
+    rememberEpisode: async () => ({}),
+    rememberFact: async (scope, text, opts = {}) => { factCalls.push({ scope, text, opts }); return {}; },
+    promotionSweep: async () => 0,
+    forgetMemory: async (scope) => { forgetCalls.push({ scope }); return 1; },
     purge: async () => 0,
     stats: () => ({ total: stats.total ?? stats.totalChunks ?? 0 }),
   };

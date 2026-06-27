@@ -247,10 +247,11 @@ function loadConfig() {
   config.memory = {
     enabled: true,
     recent_window: 20,
-    capture_threshold: 10,
-    memory_section_cap: 5,
-    decay_rate: 0.05,
-    memory_max_sections: 12,
+    // M4: durable memory is the litectx episode→fact ladder. promote_threshold = episode
+    // recalls (within litectx's 30-day active window) that auto-promote it to a durable fact.
+    // retention_days/admin_retention_days double as the episode TTL. litectx owns decay/ranking
+    // (no more ACT-R decay_rate, capture_threshold, or memory.md section caps).
+    promote_threshold: 10,
     retention_days: 90,
     admin_retention_days: 365,
     log_retention_days: 30,

@@ -305,9 +305,9 @@ Set this up with `multis init` option 3 (Business chatbot). A Telegram bot can't
 | `/search <query>` | Search indexed documents (no LLM, just FTS5 results) |
 | `/docs` | Show how many documents and chunks are indexed |
 | `/status` | Bot version, platform, your role, LLM provider |
-| `/memory` | Show saved memory notes for this chat |
-| `/remember <note>` | Save a note to this chat's memory |
-| `/forget` | Clear all memory for this chat |
+| `/memory` | Show this chat's recent conversation window |
+| `/remember <note>` | Save a durable note to this chat's memory |
+| `/forget` | Clear this chat's memory and conversation window |
 | `/skills` | List available skills |
 | `/help` | Show available commands — grouped by intent (Ask / Remember / Schedule / Run / Manage) and filtered to your role; send `/help <command>` (e.g. `/help mode`) for one command's details |
 | *(plain text)* | Drives the full tool-using agent (`/ask`): searches your documents and, on your machine, will find/read files and run things directly rather than telling you to do it yourself |
@@ -357,7 +357,7 @@ When the LLM determines a customer needs human attention (refunds, complaints, r
 
 ### Silent Mode
 
-The bot archives all messages and periodically summarizes them for later search. No responses. Useful for chats you want to monitor without the bot interfering.
+The bot logs all messages and records them as memory for later recall. No responses. Useful for chats you want to monitor without the bot interfering.
 
 ### Off Mode
 
@@ -528,26 +528,29 @@ Each chat has its own memory that persists across conversations.
 ### Manual Notes
 
 ```
-/remember Customer prefers email over phone    # Save a note
-/memory                                        # View saved notes
-/forget                                        # Clear all notes
+/remember Customer prefers email over phone    # Save a durable note instantly
+/memory                                        # Show this chat's recent conversation
+/forget                                        # Clear this chat's memory + conversation window
 ```
+
+- **`/remember <note>`** saves a durable fact for this chat immediately — top trust, never expires.
+- **`/memory`** shows this chat's **recent conversation window**. Durable facts aren't listed in bulk here yet (that waits on one upstream litectx feature); instead they surface naturally when you ask a related question.
+- **`/forget`** wipes this chat's durable memory **and** its conversation window — a clean slate. It's tenant-scoped: it can only ever clear *this* chat, never another's, and never the shared knowledge base.
 
 ### Automatic Memory
 
-When a conversation reaches 10 messages (configurable), multis automatically:
-1. Summarizes the conversation using the LLM
-2. Saves the summary to the chat's `memory.md`
-3. Indexes the summary for future search
-4. Trims the rolling window to keep the 5 most recent messages
-5. Older summaries are periodically condensed into long-term searchable chunks
+You don't have to save anything manually — multis learns from use:
 
-This means the bot remembers key facts from past conversations without you manually saving them.
+1. **Every exchange is recorded as a short-lived episode** for that chat.
+2. **The episodes you keep coming back to are promoted to durable facts** — promotion is by genuine use (recalled often within a rolling 30-day window), copied **verbatim** with no LLM summarization step.
+3. **One-off chatter simply expires** (after 90 days for a customer chat, 365 for your own); only the thin layer that proves useful persists.
+
+This means the bot remembers what's actually proven important across past conversations — not what a summarizer guessed on the spot.
 
 ### Memory Scope
 
-- **Admin memory** is shared across all platforms (Telegram + Beeper personal chats use the same `admin/memory.md`)
-- **Customer memory** is per-chat (each Beeper contact has their own memory)
+- **Admin memory** (your own personal chats, across Telegram + Beeper) shares one `admin` scope.
+- **Customer memory** is per-chat (each Beeper contact has their own isolated `user:<chat>` scope — fenced at the store so it can never leak into another chat).
 
 ---
 
@@ -1016,7 +1019,7 @@ Beeper: the poller seeds its "seen" set on startup, so old messages aren't repro
 | `~/.multis/auth/beeper-token.json` | Beeper OAuth token |
 | `~/.multis/auth/pin_sessions.json` | Active PIN sessions |
 | `~/.multis/data/documents.db` | SQLite database (FTS5 index, chunks, ACT-R activation) |
-| `~/.multis/data/memory/chats/` | Per-chat memory files (recent.json, memory.md, daily logs) |
+| `~/.multis/data/memory/chats/` | Per-chat conversation window (recent.json) + raw daily logs |
 | `~/.multis/logs/daemon.log` | Daemon stdout/stderr |
 | `~/.multis/logs/audit.log` | Audit trail (all commands, pairings, escalations) |
 | `~/.multis/run/multis.pid` | Daemon PID file |

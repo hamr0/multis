@@ -7,25 +7,23 @@ const MEMORY_BASE = path.join(
 );
 
 /**
- * Per-chat memory manager — handles profile, recent messages, durable memory, and daily logs.
+ * Per-chat conversation window + raw daily log.
+ *
+ * Since M4, durable memory (facts/episodes, recall, promotion, retention) lives in litectx
+ * (see src/context). This manager keeps ONLY the two things litectx does not:
+ *   - recent.json — the short-term conversation thread the agent loop replays across messages
+ *     (litectx has no time-ordered episode-recency verb yet; that is the open
+ *     `recent-memory-by-scope` ask / M5 `assemble`). Cap'd, no LLM.
+ *   - daily logs — a verbatim, never-indexed forensic transcript.
  * All I/O is synchronous (single process, no concurrency).
  */
 class ChatMemoryManager {
   constructor(chatId, options = {}) {
     this.chatId = String(chatId);
-    this.isAdmin = !!options.isAdmin;
     const base = options.baseDir || MEMORY_BASE;
     this.dir = path.join(base, this.chatId);
     this.recentPath = path.join(this.dir, 'recent.json');
     this.logDir = path.join(this.dir, 'log');
-    // Admin chats share a single memory.md across platforms
-    if (this.isAdmin) {
-      const adminDir = path.join(base, 'admin');
-      if (!fs.existsSync(adminDir)) fs.mkdirSync(adminDir, { recursive: true });
-      this.memoryPath = path.join(adminDir, 'memory.md');
-    } else {
-      this.memoryPath = path.join(this.dir, 'memory.md');
-    }
     this.ensureDirectories();
   }
 
@@ -34,7 +32,7 @@ class ChatMemoryManager {
     if (!fs.existsSync(this.logDir)) fs.mkdirSync(this.logDir, { recursive: true });
   }
 
-  // --- Recent messages (rolling window) ---
+  // --- Recent messages (rolling conversation window) ---
 
   loadRecent() {
     if (!fs.existsSync(this.recentPath)) return [];
@@ -68,39 +66,7 @@ class ChatMemoryManager {
     return trimmed;
   }
 
-  // --- Durable memory (memory.md) ---
-
-  loadMemory() {
-    if (!fs.existsSync(this.memoryPath)) return '';
-    return fs.readFileSync(this.memoryPath, 'utf-8');
-  }
-
-  appendMemory(notes) {
-    const header = `\n## ${new Date().toISOString()}\n\n`;
-    fs.appendFileSync(this.memoryPath, header + notes.trim() + '\n');
-  }
-
-  clearMemory() {
-    fs.writeFileSync(this.memoryPath, '');
-  }
-
-  pruneMemory(maxSections = 5) {
-    const content = this.loadMemory();
-    if (!content.trim()) return;
-    // Split by date-stamped section headers
-    const sections = content.split(/(?=\n## \d{4}-)/);
-    if (sections.length <= maxSections) return;
-    const kept = sections.slice(-maxSections);
-    fs.writeFileSync(this.memoryPath, kept.join('').trimStart());
-  }
-
-  countMemorySections() {
-    const content = this.loadMemory();
-    if (!content.trim()) return 0;
-    return (content.match(/^## \d{4}-/gm) || []).length;
-  }
-
-  // --- Daily log (append-only) ---
+  // --- Daily log (append-only, never indexed) ---
 
   appendToLog(role, content) {
     const now = new Date();
@@ -109,13 +75,6 @@ class ChatMemoryManager {
     const logFile = path.join(this.logDir, `${dateStr}.md`);
     const entry = `### ${timeStr} [${role}]\n${content}\n\n`;
     fs.appendFileSync(logFile, entry);
-  }
-
-  // --- Capture threshold ---
-
-  shouldCapture(threshold = 20) {
-    const messages = this.loadRecent();
-    return messages.length >= threshold;
   }
 }
 
