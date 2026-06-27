@@ -15,6 +15,8 @@ function stubIndexer() {
     rememberFact: async () => ({}),
     promotionSweep: async () => 0,
     forgetMemory: async () => 0,
+    recentMemory: async () => [],
+    countMemory: async () => 0,
     getStats: () => ({ indexedFiles: 0, totalChunks: 0, byType: {} }),
     store: { recordSearchAccess: () => {} }
   };
@@ -257,7 +259,7 @@ describe('createSchedulerTick', () => {
       config: { owner_id: 'user1', llm: { provider: 'mock' } },
       provider: llm,
       indexer: stubIndexer(),
-      getMem: () => ({ loadMemory: () => '', loadRecent: () => [] }),
+      getMem: () => ({ appendToLog: () => {} }),
       memCfg: {},
       allTools: [],
       toolsConfig: {},
@@ -305,7 +307,7 @@ describe('createSchedulerTick', () => {
       config: { owner_id: 'user1', llm: { provider: 'mock' } },
       provider: badProvider,
       indexer: stubIndexer(),
-      getMem: () => ({ loadMemory: () => '', loadRecent: () => [] }),
+      getMem: () => ({ appendToLog: () => {} }),
       memCfg: {},
       allTools: [],
       toolsConfig: {},

@@ -248,12 +248,17 @@ function isPaired(msgOrCtx, config) {
 // routeAsk/scheduler can use them). An exchange/observation → a litectx `episode`
 // (by:'agent', tenant-fenced, expiring at the role's retention); useful episodes
 // auto-promote to durable facts via the sweep. Both fire-and-forget + guarded — a
-// memory write must never break the reply path. recent.json + daily logs are written
-// separately (ChatMemoryManager). ---
+// memory write must never break the reply path. The episode IS the conversation thread:
+// `meta.turns` carries the role-tagged turns so the agent's message history reconstructs
+// from litectx recency (no recent.json). Daily logs are written separately (ChatMemoryManager). ---
 const memScopeFor = (admin, chatId) => (admin ? 'admin' : `user:${chatId}`);
-const rememberEpisodeFor = (indexer, memCfg, admin, chatId, text) =>
-  indexer.rememberEpisode(memScopeFor(admin, chatId), text, {
+// turns: [{role:'user'|'assistant', content}]. body = the readable transcript (for recall/promotion);
+// meta.turns = the structured turns (for faithful window reconstruction — litectx never parses the body).
+const fmtTurns = (turns) => turns.map((t) => `${t.role === 'assistant' ? 'Assistant' : 'User'}: ${t.content}`).join('\n');
+const rememberEpisodeFor = (indexer, memCfg, admin, chatId, turns) =>
+  indexer.rememberEpisode(memScopeFor(admin, chatId), fmtTurns(turns), {
     expiresAt: Date.now() + (admin ? memCfg.admin_retention_days : memCfg.retention_days) * 86400000,
+    meta: { turns },
   }).catch((e) => console.error(`[memory] episode write failed: ${e.message}`));
 const sweepPromotionsFor = (indexer, memCfg, admin, chatId) =>
   indexer.promotionSweep(memScopeFor(admin, chatId), { threshold: memCfg.promote_threshold })
@@ -308,7 +313,7 @@ function createMessageRouter(config, deps = {}) {
 
   // M4 memory ladder helpers — thin closures binding indexer+memCfg to the module-level
   // helpers (which routeAsk/the scheduler also use, being top-level functions).
-  const rememberEpisode = (admin, chatId, text) => rememberEpisodeFor(indexer, memCfg, admin, chatId, text);
+  const rememberEpisode = (admin, chatId, turns) => rememberEpisodeFor(indexer, memCfg, admin, chatId, turns);
   const sweepPromotions = (admin, chatId) => sweepPromotionsFor(indexer, memCfg, admin, chatId);
 
   // Create LLM provider if configured (null if no API key)
@@ -459,7 +464,6 @@ function createMessageRouter(config, deps = {}) {
       const mem = getMem(msg.chatId, { isAdmin: admin });
       if (mem) {
         const role = msg.isSelf ? 'user' : 'contact';
-        mem.appendMessage(role, msg.text);
         mem.appendToLog(role, msg.text);
 
         // Persist chat metadata to config.chats
@@ -471,7 +475,7 @@ function createMessageRouter(config, deps = {}) {
         }
 
         // The observed message → a memory episode; then sweep hot episodes → facts.
-        await rememberEpisode(admin, msg.chatId, `${role}: ${msg.text}`);
+        await rememberEpisode(admin, msg.chatId, [{ role, content: msg.text }]);
         sweepPromotions(admin, msg.chatId);
       }
       return;
@@ -498,9 +502,8 @@ function createMessageRouter(config, deps = {}) {
           setAdminPause(msg.chatId, pauseMin);
           const mem = getMem(msg.chatId, { isAdmin: true });
           if (mem) {
-            mem.appendMessage('user', msg.text);
             mem.appendToLog('user', msg.text);
-            await rememberEpisode(true, msg.chatId, `user: ${msg.text}`);
+            await rememberEpisode(true, msg.chatId, [{ role: 'user', content: msg.text }]);
           }
           return;
         }
@@ -508,9 +511,8 @@ function createMessageRouter(config, deps = {}) {
           // Customer messages while admin is active → silently archive, no LLM
           const mem = getMem(msg.chatId, { isAdmin: false });
           if (mem) {
-            mem.appendMessage('user', msg.text);
             mem.appendToLog('user', msg.text);
-            await rememberEpisode(false, msg.chatId, `user: ${msg.text}`);
+            await rememberEpisode(false, msg.chatId, [{ role: 'user', content: msg.text }]);
           }
           return;
         }
@@ -522,9 +524,8 @@ function createMessageRouter(config, deps = {}) {
           if (!verdict.allowed) {
             const mem = getMem(msg.chatId, { isAdmin: false });
             if (mem) {
-              mem.appendMessage('user', msg.text);
               mem.appendToLog('user', msg.text);
-              await rememberEpisode(false, msg.chatId, `user: ${msg.text}`);
+              await rememberEpisode(false, msg.chatId, [{ role: 'user', content: msg.text }]);
             }
             if (verdict.notify) {
               const note = config.business?.rate_limit_message
@@ -866,15 +867,22 @@ function buildAppExec(config, getMem, indexer) {
   return {
     // set_mode commits the resolved (chatId, mode) — off ceremonies via the core.
     set_mode: (args) => { setChatMode(config, args.target, args.mode); return { target: args.target, mode: args.mode }; },
-    // forget = wipe this tenant's durable memory (litectx fact+episode, tenant-fenced) AND the
-    // recent.json conversation window — a clean slate for the chat.
-    forget:   async (args, ctx) => { await indexer.forgetMemory(scopeOf(ctx)); mem(ctx).saveRecent([]); return { chatId: ctx.chatId }; },
+    // forget = wipe this tenant's durable memory (litectx fact+episode, tenant-fenced) — the episodes
+    // ARE the conversation thread now, so this clears the window too. Raw daily logs are kept by design.
+    forget:   async (args, ctx) => { await indexer.forgetMemory(scopeOf(ctx)); return { chatId: ctx.chatId }; },
     // remember = a deliberate durable fact (by:'human', top trust), tenant-fenced.
     remember: async (args, ctx) => { await indexer.rememberFact(scopeOf(ctx), args.note, { by: 'human' }); return { note: args.note }; },
-    // memory = show what we have for this chat. INTERIM: the recent conversation window —
-    // listing durable facts needs litectx's recent-memory-by-scope (open ask); until then,
-    // durable facts surface via questions (the recall_memory tool), not a bulk list.
-    memory:   (args, ctx) => ({ memory: mem(ctx).loadRecent().map((m) => `[${m.role}] ${m.content}`).join('\n') }),
+    // memory = this chat's recent memory, newest-first: durable facts AND scratchpad episodes
+    // (litectx 0.23.0 recentMemory, tenant-fenced), with a per-kind count header (O1 count()).
+    memory:   async (args, ctx) => {
+      const scope = scopeOf(ctx);
+      const [hits, facts, episodes] = await Promise.all([
+        indexer.recentMemory(scope, { kind: ['fact', 'episode'], n: 20 }),
+        indexer.countMemory(scope, { kind: 'fact' }),
+        indexer.countMemory(scope, { kind: 'episode' }),
+      ]);
+      return { memory: hits.map((h) => `[${h.kind}] ${h.content}`).join('\n'), summary: `${facts} fact(s), ${episodes} episode(s)` };
+    },
   };
 }
 
@@ -1379,8 +1387,11 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     }
     const cleanQuestion = resolved.text;
 
-    // Build messages array from the conversation thread (recent.json).
-    const recent = mem ? mem.loadRecent() : [];
+    // Build the conversation thread from litectx episode recency (M4: no recent.json). Newest-first
+    // → reverse to oldest-first, reconstruct role-tagged turns from each episode's meta.turns (litectx
+    // never parsed the body), then bound to the recent_window most-recent turns.
+    const recentEps = mem ? await indexer.recentMemory(memScopeFor(admin, msg.chatId), { kind: 'episode', n: memCfg.recent_window }) : [];
+    const recent = [...recentEps].reverse().flatMap((h) => h.meta?.turns || []).slice(-memCfg.recent_window);
     // Durable memory: facts/episodes recalled for this tenant by relevance to the question,
     // formatted as notes for buildMemorySystemPrompt (which takes a string; empty = none).
     const memHits = mem ? await indexer.recallMemory(cleanQuestion, { scope: memScopeFor(admin, msg.chatId), n: 5 }) : [];
@@ -1433,13 +1444,11 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     // rule 2). Written only now — never eagerly — so a turn that instead parked a
     // ceremony leaves no dangling request for the model to replay.
     if (mem) {
-      mem.appendMessage('user', question);
       mem.appendToLog('user', question);
-      mem.appendMessage('assistant', answer);
       mem.appendToLog('assistant', answer);
-      // The completed exchange → one memory episode (combined, a coherent recall unit);
-      // then sweep hot episodes → durable facts (fire-and-forget, cheap).
-      await rememberEpisodeFor(indexer, memCfg, admin, msg.chatId, `User: ${question}\nAssistant: ${answer}`);
+      // The completed exchange → one memory episode (combined body = a coherent recall unit; meta.turns =
+      // the role-tagged turns for window replay); then sweep hot episodes → durable facts (fire-and-forget).
+      await rememberEpisodeFor(indexer, memCfg, admin, msg.chatId, [{ role: 'user', content: question }, { role: 'assistant', content: answer }]);
       sweepPromotionsFor(indexer, memCfg, admin, msg.chatId);
     }
 
@@ -1457,8 +1466,8 @@ async function routeMemory(msg, platform, config, getMem, toolDeps = {}) {
   const r = await dispatchCapability('memory', {}, msg, config, { ...toolDeps, getMem });
   await sendCapabilityResult(r, platform, msg, {
     format: (res) => (res.memory && res.memory.trim())
-      ? `Memory notes:\n\n${res.memory}`
-      : 'No memory notes for this chat yet.',
+      ? `Memory for this chat — ${res.summary}:\n\n${res.memory}`
+      : 'No memory for this chat yet.',
   });
 }
 

@@ -232,6 +232,37 @@ describe('context wrapper — native memory ladder (M4)', () => {
     assert.match(hits[0].content, /fifty thousand/, 'a fact ranks before a scratchpad episode');
   });
 
+  it('recentMemory returns this tenant\'s episodes newest-first with meta.turns intact (window source, R3)', async () => {
+    const S = 'user:win';
+    await ctx2.rememberEpisode(S, 'User: hi\nAssistant: hello', { meta: { turns: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hello' }] } });
+    await ctx2.rememberEpisode(S, 'User: bye\nAssistant: later', { meta: { turns: [{ role: 'user', content: 'bye' }, { role: 'assistant', content: 'later' }] } });
+    const hits = await ctx2.recentMemory(S, { kind: 'episode', n: 10 });
+    assert.strictEqual(hits.length, 2, 'both episodes returned, tenant-fenced');
+    assert.match(hits[0].content, /bye/, 'newest-first');
+    assert.deepStrictEqual(hits[0].meta.turns, [{ role: 'user', content: 'bye' }, { role: 'assistant', content: 'later' }],
+      'meta.turns round-trips verbatim → faithful window reconstruction without parsing the body');
+    assert.strictEqual((await ctx2.recentMemory('user:other-win', { kind: 'episode', n: 10 })).length, 0, 'fenced: another tenant sees none');
+  });
+
+  it('recentMemory ordering is deterministic under a same-ms write burst (monotonic occurredAt) — POC regression', async () => {
+    const S = 'user:burst';
+    // A fast loop lands all four episodes in (almost) the same millisecond. Without the wrapper's monotonic
+    // occurredAt these tie on Date.now(), and litectx's path tiebreak reconstructs the window out of order.
+    for (const i of [1, 2, 3, 4]) await ctx2.rememberEpisode(S, `turn ${i}`, { meta: { turns: [{ role: 'user', content: `t${i}` }] } });
+    const hits = await ctx2.recentMemory(S, { kind: 'episode', n: 10 });
+    const reconstructed = [...hits].reverse().flatMap((h) => h.meta.turns).map((t) => t.content);
+    assert.deepStrictEqual(reconstructed, ['t1', 't2', 't3', 't4'], 'oldest-first reconstruction stays faithful even in a same-ms burst');
+  });
+
+  it('countMemory is per-kind and tenant-fenced (O1)', async () => {
+    const S = 'user:cnt';
+    await ctx2.rememberEpisode(S, 'an episode');
+    await ctx2.rememberFact(S, 'a durable fact', { by: 'human' });
+    assert.strictEqual(await ctx2.countMemory(S, { kind: 'episode' }), 1, 'one episode for this tenant');
+    assert.strictEqual(await ctx2.countMemory(S, { kind: 'fact' }), 1, 'one fact for this tenant');
+    assert.strictEqual(await ctx2.countMemory('user:cnt-other', { kind: 'episode' }), 0, 'fenced: another tenant counts zero');
+  });
+
   it('promotionSweep promotes a HOT episode to a durable fact (verbatim, no LLM); a cold one stays', async () => {
     const HOT = 'customer beta always asks about furniture delivery windows';
     const COLD = 'a one-off question about parking validation';

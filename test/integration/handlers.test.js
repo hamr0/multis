@@ -2224,6 +2224,8 @@ function stubIndexer(chunks = [], stats = {}) {
     rememberFact: async (scope, text, opts = {}) => { factCalls.push({ scope, text, opts }); return {}; },
     promotionSweep: async () => 0,
     forgetMemory: async (scope) => { forgetCalls.push({ scope }); return 1; },
+    recentMemory: async () => [],
+    countMemory: async () => 0,
     purge: async () => 0,
     stats: () => ({ total: stats.total ?? stats.totalChunks ?? 0 }),
   };

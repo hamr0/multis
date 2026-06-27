@@ -64,6 +64,9 @@ async function init(opts = {}) {
     const dbPath = path.join(dataDir, 'litectx.db');  // own DB
     fs.mkdirSync(root, { recursive: true });
     const cfg = { root, dbPath, strictScope: true };  // fail-closed: missing scope throws (multis is multi-tenant)
+    // R4: semantic recall (BM25 + KNN paraphrase). Opt-in per call so the test suite stays BM25-only
+    // (deterministic, no model load); production passes embeddings:true (config.memory.semantic).
+    if (opts.embeddings) cfg.embeddings = true;
     if (opts.writeGate) cfg.writeGate = opts.writeGate;
     if (opts.writeAudit) cfg.writeAudit = opts.writeAudit;
     _ctx = new LiteCtx(cfg);
@@ -89,6 +92,14 @@ function setBounds(documents = {}) {
 
 /** Process-unique memory row id (Date.now() + seq survives a restart without collision). */
 const memId = () => `mem-${Date.now()}-${_memSeq++}`;
+let _lastOccurred = 0;
+/**
+ * Strictly-increasing episode timestamp. Stays ≈ now, but never equals/trails the previous write — so a
+ * burst of same-millisecond episodes still orders deterministically. litectx `recentMemory` breaks ties on
+ * `path` (not write-order), so without this a fast burst (or a test) reconstructs the conversation window
+ * out of order (POC-confirmed against 0.23.0). Per-process monotonic, like `memId`'s seq.
+ */
+const nextOccurredAt = () => { _lastOccurred = Math.max(Date.now(), _lastOccurred + 1); return _lastOccurred; };
 const toU8 = (b) => (b instanceof Uint8Array ? b : new Uint8Array(b));
 const mapDocHit = (h) => ({ name: h.path, content: h.body || '', chunkId: h.path, format: h.format, score: h.score });
 // Native memory hits carry `occurredAt` (epoch ms, episodes) + `provenance` via attachMemMeta.
@@ -145,7 +156,7 @@ function forScope(scope) {
      * fact by USE (recall count), or expires at `expiresAt`. Tenant-fenced by the bound owner.
      */
     async rememberEpisode(text, { expiresAt = null, meta = {} } = {}) {
-      return view.remember(memId(), String(text), { kind: 'episode', by: 'agent', expiresAt, meta });
+      return view.remember(memId(), String(text), { kind: 'episode', by: 'agent', occurredAt: nextOccurredAt(), expiresAt, meta });
     },
     /**
      * Write a durable `fact`. `by:'human'` for the explicit `/remember` (top trust); `by:'agent'`
@@ -191,6 +202,20 @@ function forScope(scope) {
     forgetMemory() {
       return view.forget();
     },
+    /**
+     * Time-ordered recent memory for this tenant, newest-first (litectx 0.23.0 memory-axis `recentMemory`).
+     * No FTS query, does NOT bump the promotion signal. Surfaces the opaque `meta` (where episode writes park
+     * `turns`/role) + `kind` so the caller reconstructs a faithful conversation window WITHOUT parsing the body.
+     * Backs the agent's message history (kind:'episode') and `/memory`.
+     */
+    async recentMemory({ kind = ['fact', 'episode'], n = 20 } = {}) {
+      const hits = await view.recentMemory({ kind, n, body: true });
+      return hits.map((h) => ({ ...mapMemHit(h), kind: h.kind, meta: h.meta || null }));
+    },
+    /** Per-tenant memory count by kind (litectx 0.23.0 O1) — tenant-fenced, expiry-aware. */
+    async count({ kind } = {}) {
+      return view.count(kind ? { kind } : {});
+    },
   };
 }
 
@@ -209,6 +234,9 @@ const rememberFact = async (scope, text, opts = {}) => forScope(scope).rememberF
 const recallMemory = async (query, { scope, n = 5 } = {}) => forScope(scope).recallMemory(query, { n });
 const promotionSweep = async (scope, opts = {}) => forScope(scope).promotionSweep(opts);
 const forgetMemory = async (scope) => forScope(scope).forgetMemory();
+// Time-ordered recency (litectx 0.23.0): the conversation window + /memory source from here (retires recent.json).
+const recentMemory = async (scope, opts = {}) => forScope(scope).recentMemory(opts);
+const countMemory = async (scope, opts = {}) => forScope(scope).count(opts);
 /** @param {string} query @param {{ scope: string, n?: number }} opts  scope REQUIRED (fail-closed) */
 const search = async (query, { scope, n = 5 } = {}) => forScope(scope).search(query, { n });
 /** Fetch one row by id, fenced to scope (R2 handle fence). */
@@ -232,4 +260,5 @@ module.exports = {
   indexFile, indexBuffer, search, get, purge, stats,
   // M4 native memory ladder
   rememberEpisode, rememberFact, recallMemory, promotionSweep, forgetMemory,
+  recentMemory, countMemory,
 };

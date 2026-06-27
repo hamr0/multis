@@ -7,14 +7,12 @@ const MEMORY_BASE = path.join(
 );
 
 /**
- * Per-chat conversation window + raw daily log.
+ * Per-chat raw daily log.
  *
- * Since M4, durable memory (facts/episodes, recall, promotion, retention) lives in litectx
- * (see src/context). This manager keeps ONLY the two things litectx does not:
- *   - recent.json — the short-term conversation thread the agent loop replays across messages
- *     (litectx has no time-ordered episode-recency verb yet; that is the open
- *     `recent-memory-by-scope` ask / M5 `assemble`). Cap'd, no LLM.
- *   - daily logs — a verbatim, never-indexed forensic transcript.
+ * Since M4, durable memory AND the conversation thread both live in litectx (see src/context):
+ * every exchange is an `episode`, and the agent's message window is reconstructed from litectx
+ * episode-recency (`recentMemory`, 0.23.0) — so the old `recent.json` window is gone. This manager
+ * keeps ONLY the one thing litectx does not: the verbatim, never-indexed daily log (forensic backup).
  * All I/O is synchronous (single process, no concurrency).
  */
 class ChatMemoryManager {
@@ -22,7 +20,6 @@ class ChatMemoryManager {
     this.chatId = String(chatId);
     const base = options.baseDir || MEMORY_BASE;
     this.dir = path.join(base, this.chatId);
-    this.recentPath = path.join(this.dir, 'recent.json');
     this.logDir = path.join(this.dir, 'log');
     this.ensureDirectories();
   }
@@ -30,40 +27,6 @@ class ChatMemoryManager {
   ensureDirectories() {
     if (!fs.existsSync(this.dir)) fs.mkdirSync(this.dir, { recursive: true });
     if (!fs.existsSync(this.logDir)) fs.mkdirSync(this.logDir, { recursive: true });
-  }
-
-  // --- Recent messages (rolling conversation window) ---
-
-  loadRecent() {
-    if (!fs.existsSync(this.recentPath)) return [];
-    try {
-      return JSON.parse(fs.readFileSync(this.recentPath, 'utf-8'));
-    } catch {
-      return [];
-    }
-  }
-
-  saveRecent(messages) {
-    fs.writeFileSync(this.recentPath, JSON.stringify(messages, null, 2));
-  }
-
-  appendMessage(role, content, timestamp = null) {
-    const messages = this.loadRecent();
-    messages.push({
-      role,
-      content,
-      timestamp: timestamp || new Date().toISOString()
-    });
-    this.saveRecent(messages);
-    return messages;
-  }
-
-  trimRecent(keepLast = 5) {
-    const messages = this.loadRecent();
-    if (messages.length <= keepLast) return messages;
-    const trimmed = messages.slice(-keepLast);
-    this.saveRecent(trimmed);
-    return trimmed;
   }
 
   // --- Daily log (append-only, never indexed) ---

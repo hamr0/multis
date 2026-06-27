@@ -4,34 +4,35 @@
  * KEYSTONE REGRESSION (M10 — owner-ask gate redesign, §6).
  *
  * The "stuck on delete" bug (live 2026-06-24): a parked destructive request is
- * written to recent.json with NO recorded ending, so the model replays the
+ * written to conversation memory with NO recorded ending, so the model replays the
  * dangling destructive request on every subsequent turn.
  *
- * Root cause (handlers.js): routeAsk appends the user message BEFORE the agent
+ * Root cause (handlers.js): routeAsk recorded the user message BEFORE the agent
  * loop; the loop parks the PIN ceremony and halts; routeAsk returns early and
- * the outcome is NEVER appended. The ceremony_action resume has no memory access
- * either, so the PIN reply records nothing. recent.json is left holding a bare
- * user request with no outcome — a dangling turn the model re-issues.
+ * the outcome is NEVER recorded. The ceremony_action resume records request→outcome
+ * only at completion — a bare user request with no outcome is a dangling turn the
+ * model re-issues.
  *
  * Definition of done (§6): a destructive request → park → {resolve | cancel} →
- * the conversation (recent.json) reads request→outcome, never a dangling request.
+ * the conversation reads request→outcome, never a dangling request.
  *
- * Two invariants from §5, both of which FAIL on today's code:
- *   1. While an ask is PENDING, recent.json holds NOTHING about this turn (pure
- *      control state, invisible to the model). Today the request is eagerly
- *      appended → recent.json has a dangling user line.
- *   2. At completion the turn enters recent.json as a paired (request → outcome)
- *      exchange. Today no outcome is ever recorded → the request dangles forever.
+ * SINCE M4 the conversation thread is the litectx episode ladder (no recent.json):
+ * each exchange is written as ONE episode at completion (meta.turns = the paired
+ * request→outcome turns), and the agent's window is reconstructed from episode
+ * recency (recentMemory). So the two §5 invariants now read against the episode store:
+ *   1. While an ask is PENDING, NO episode is written about this turn (pure control
+ *      state, invisible to the model — recentMemory returns nothing).
+ *   2. At completion the turn enters as ONE episode with paired (request → outcome)
+ *      turns. A bare request with no outcome would dangle and replay.
  *
  * This drives the REAL createMessageRouter LLM door with the REAL governed core +
- * REAL PinManager + REAL PendingRegistry + REAL per-chat memory. The PIN keystrokes
- * must NEVER appear in recent.json.
+ * REAL PinManager + REAL PendingRegistry. A STATEFUL episode mock reads back through
+ * recentMemory exactly as litectx would, so the window→provider replay path is real.
+ * The PIN keystrokes must NEVER appear in any episode.
  */
 
 const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert');
-const fs = require('fs');
-const path = require('path');
 
 const { createMessageRouter } = require('../../src/bot/handlers');
 const { createTestEnv, mockPlatform, msg } = require('../helpers/setup');
@@ -93,18 +94,26 @@ function buildRouter(ran, execOpts = {}) {
   const pinManager = new PinManager(env.config); pinManager.sessions = {};
   const provider = destructiveThenPlainProvider();
   const pending = new PendingRegistry();
+  // Stateful episode store — the conversation thread since M4. rememberEpisode appends; recentMemory
+  // reads back newest-first (with meta.turns), exactly as litectx 0.23.0 does. So the window the agent
+  // loop replays is the REAL reconstructed-from-episodes window, and a dangling/eager write WOULD surface.
+  const episodes = [];
   const router = createMessageRouter(env.config, {
     provider,
     indexer: { search: () => [], indexFile: async () => 0, indexBuffer: async () => 0,
-      recallMemory: async () => [], rememberEpisode: async () => ({}), rememberFact: async () => ({}), promotionSweep: async () => 0, forgetMemory: async () => 0,
+      recallMemory: async () => [], rememberFact: async () => ({}), promotionSweep: async () => 0, forgetMemory: async () => 0,
+      rememberEpisode: async (scope, body, opts = {}) => { episodes.push({ scope, body, meta: opts.meta || null }); return {}; },
+      recentMemory: async (scope, { kind } = {}) => [...episodes].reverse().map((e) => ({ kind: 'episode', content: e.body, body: e.body, meta: e.meta })),
+      countMemory: async () => episodes.length,
       getStats: () => ({ indexedFiles: 0, totalChunks: 0, byType: {} }), store: { recordSearchAccess: () => {} } },
     tools: [execStub(ran, execOpts)], toolsConfig: {}, runtimePlatform: 'linux',
     pinManager, pending, fileless: true, governanceFile: GOV,
     memoryBaseDir: env.memoryBaseDir,
   });
   router.registerPlatform('telegram', platform);
-  const recentPath = path.join(env.memoryBaseDir, 'chat1', 'recent.json');
-  const readRecent = () => (fs.existsSync(recentPath) ? JSON.parse(fs.readFileSync(recentPath, 'utf-8')) : []);
+  // The conversation, oldest-first, as role-tagged turns reconstructed from the episodes (what the
+  // model would see). Empty while a turn is parked; a paired exchange once it completes.
+  const readRecent = () => episodes.flatMap((e) => (e.meta?.turns) || [{ role: 'user', content: e.body }]);
   return { env, platform, router, provider, readRecent };
 }
 

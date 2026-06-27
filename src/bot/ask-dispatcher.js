@@ -45,22 +45,20 @@ const CANCEL_RE = /^(cancel|stop|abort|no)$/i;
  * Only when the ask carried a conversational request (the LLM door). Slash-door
  * asks carry no request -> nothing is recorded (a command is not conversation).
  * The PIN keystrokes and prompts are NEVER passed here — only the clean summary.
- * `rememberEpisode(admin, chatId, text)` (optional, M4) also records the exchange as a
- * litectx memory episode — guarded so callers without it (tests) just skip the durable write.
+ * `rememberEpisode(admin, chatId, turns)` (optional, M4) records the exchange as a litectx
+ * memory episode (the conversation thread; meta.turns drives window replay) — guarded so callers
+ * without it (tests) just skip the durable write. The daily log is kept; recent.json is gone (M4).
  */
 function recordOutcome(entry, summary, getMem, rememberEpisode) {
   if (!entry.request || typeof getMem !== 'function') return;
   const mem = getMem(entry.chatId, { isAdmin: !!entry.isOwner });
   if (!mem) return;
-  mem.appendMessage('user', entry.request);
-  mem.appendToLog('user', entry.request);
   const line = summary == null ? '' : String(summary).trim();
-  if (line) {
-    mem.appendMessage('assistant', line);
-    mem.appendToLog('assistant', line);
-  }
+  mem.appendToLog('user', entry.request);
+  if (line) mem.appendToLog('assistant', line);
   if (typeof rememberEpisode === 'function') {
-    rememberEpisode(!!entry.isOwner, entry.chatId, `User: ${entry.request}\nAssistant: ${line || '(no answer)'}`);
+    const turns = [{ role: 'user', content: entry.request }, { role: 'assistant', content: line || '(no answer)' }];
+    rememberEpisode(!!entry.isOwner, entry.chatId, turns);
   }
 }
 

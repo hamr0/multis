@@ -255,6 +255,10 @@ function loadConfig() {
     retention_days: 90,
     admin_retention_days: 365,
     log_retention_days: 30,
+    // R4: semantic (KNN) recall — litectx blends BM25 + embeddings so a reworded question still
+    // finds the fact (paraphrase recall), tenant-fence intact. Pulls @huggingface/transformers +
+    // loads a small model (~2s once per process). Set false to stay BM25-only (no model, no dep load).
+    semantic: true,
     ...config.memory
   };
 

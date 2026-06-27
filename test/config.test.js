@@ -134,6 +134,7 @@ describe('loadConfig — default merging', () => {
     assert.strictEqual(config.memory.retention_days, 90);
     assert.strictEqual(config.memory.admin_retention_days, 365);
     assert.strictEqual(config.memory.log_retention_days, 30);
+    assert.strictEqual(config.memory.semantic, true);
   });
 
   it('preserves custom memory values', () => {
