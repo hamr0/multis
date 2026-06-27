@@ -305,7 +305,7 @@ Set this up with `multis init` option 3 (Business chatbot). A Telegram bot can't
 | `/search <query>` | Search indexed documents (no LLM, just FTS5 results) |
 | `/docs` | Show how many documents and chunks are indexed |
 | `/status` | Bot version, platform, your role, LLM provider |
-| `/memory` | Show this chat's recent conversation window |
+| `/memory` | List this chat's durable facts + recent episodes (newest first) |
 | `/remember <note>` | Save a durable note to this chat's memory |
 | `/forget` | Clear this chat's memory and conversation window |
 | `/skills` | List available skills |
@@ -529,12 +529,12 @@ Each chat has its own memory that persists across conversations.
 
 ```
 /remember Customer prefers email over phone    # Save a durable note instantly
-/memory                                        # Show this chat's recent conversation
+/memory                                        # List durable facts + recent episodes
 /forget                                        # Clear this chat's memory + conversation window
 ```
 
 - **`/remember <note>`** saves a durable fact for this chat immediately — top trust, never expires.
-- **`/memory`** shows this chat's **recent conversation window**. Durable facts aren't listed in bulk here yet (that waits on one upstream litectx feature); instead they surface naturally when you ask a related question.
+- **`/memory`** lists this chat's **durable facts and recent episodes**, newest-first, with a count of each. Recall also matches **meaning, not just keywords** — a reworded question still finds the right memory (semantic recall, on by default).
 - **`/forget`** wipes this chat's durable memory **and** its conversation window — a clean slate. It's tenant-scoped: it can only ever clear *this* chat, never another's, and never the shared knowledge base.
 
 ### Automatic Memory
@@ -1019,7 +1019,7 @@ Beeper: the poller seeds its "seen" set on startup, so old messages aren't repro
 | `~/.multis/auth/beeper-token.json` | Beeper OAuth token |
 | `~/.multis/auth/pin_sessions.json` | Active PIN sessions |
 | `~/.multis/data/documents.db` | SQLite database (FTS5 index, chunks, ACT-R activation) |
-| `~/.multis/data/memory/chats/` | Per-chat conversation window (recent.json) + raw daily logs |
+| `~/.multis/data/memory/chats/` | Per-chat raw daily logs (durable memory + conversation thread live in `litectx.db`) |
 | `~/.multis/logs/daemon.log` | Daemon stdout/stderr |
 | `~/.multis/logs/audit.log` | Audit trail (all commands, pairings, escalations) |
 | `~/.multis/run/multis.pid` | Daemon PID file |

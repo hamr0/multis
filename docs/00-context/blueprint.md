@@ -269,14 +269,13 @@ Every chat gets its own memory. No global state. No cross-chat contamination.
 
 ```
 ~/.multis/data/memory/chats/<chatId>/
-├── recent.json       # rolling conversation window (last ~20 messages)
 └── log/
     └── YYYY-MM-DD.md # raw daily log (append-only, auto-cleaned at 30 days)
 
-~/.multis/data/litectx.db  # durable memory (facts + episodes) — tenant-scoped, ONE store
+~/.multis/data/litectx.db  # durable memory + conversation thread (facts + episodes) — tenant-scoped, ONE store
 ```
 
-Since M4, durable memory does NOT live in per-chat files. It lives in the single litectx store (`litectx.db`), fenced per tenant by scope (`admin` / `user:<chatId>`) — the same fence that isolates uploaded documents. Per-chat files keep only the two things litectx doesn't: the `recent.json` conversation window (the cross-message thread the agent loop replays) and the raw daily logs (verbatim forensic backup, never indexed).
+Since M4, neither durable memory nor the conversation thread lives in per-chat files. Both live in the single litectx store (`litectx.db`), fenced per tenant by scope (`admin` / `user:<chatId>`) — the same fence that isolates uploaded documents. Every exchange is an `episode`; the agent's message window is reconstructed from litectx episode-recency (`recentMemory`, 0.23.0), so the old `recent.json` window file is **gone**. Per-chat files keep only the one thing litectx doesn't: the raw daily logs (verbatim forensic backup, never indexed).
 
 Chat metadata (name, network, platform, mode, lastActive) is stored in `config.chats[chatId]` — a single source of truth in config.json, not per-chat files.
 
@@ -284,16 +283,13 @@ Admin identity aggregation — admin talks from multiple platforms (Telegram, Be
 
 ```
 ~/.multis/data/memory/chats/
-  ├── tg-12345/                # telegram chat (admin) — own conversation window
-  │   ├── recent.json
+  ├── tg-12345/                # telegram chat (admin) — daily log only
   │   └── log/
-  ├── beeper-xyz/              # beeper chat (admin) — own conversation window
-  │   ├── recent.json
+  ├── beeper-xyz/              # beeper chat (admin) — daily log only
   │   └── log/
-  └── beeper-customer-abc/     # customer chat — own conversation window
-      ├── recent.json
+  └── beeper-customer-abc/     # customer chat — daily log only
       └── log/
-# durable facts/episodes for all of the above live in litectx.db, scoped:
+# durable memory AND the conversation thread for all of the above live in litectx.db, scoped:
 #   admin chats → scope 'admin' (shared)      customer chats → scope 'user:<chatId>' (isolated)
 ```
 
@@ -302,8 +298,7 @@ Admin identity aggregation — admin talks from multiple platforms (Telegram, Be
 | File | Written by | Read by | Purpose |
 |------|-----------|---------|---------|
 | `config.chats[chatId]` | Router (`updateChatMeta`) | Router, `/mode`, `listBeeperChats` | Chat metadata (name, network, platform, mode, lastActive) |
-| `recent.json` | Router (every message) | LLM calls | Conversation context window |
-| `litectx.db` | `rememberEpisode`/`rememberFact` + promotion sweep | `recallMemory` (prompt build + `recall_memory` tool) | Durable memory (facts + episodes), tenant-scoped |
+| `litectx.db` | `rememberEpisode`/`rememberFact` + promotion sweep | `recallMemory` (relevance) + `recentMemory` (the conversation window) + `recall_memory` tool | Durable memory AND the conversation thread (facts + episodes), tenant-scoped |
 | `log/*.md` | Router (every message) | Human (backup only) | Raw append-only backup, NOT indexed |
 
 ### Two memory tiers (the promotion ladder)
@@ -312,7 +307,7 @@ Durable memory is litectx's native episode→fact ladder — **no LLM summarizat
 
 | Tier | Storage | What | Lifecycle |
 |------|---------|------|-----------|
-| **Conversation window** (`recent.json`) | File | Last ~20 raw messages | The cross-message thread the agent loop replays. Trimmed; no LLM |
+| **Conversation window** (litectx episode-recency) | `litectx.db` | Last ~20 turns, reconstructed from recent episodes' `meta.turns` | The cross-message thread the agent loop replays. `recentMemory`, newest-first; no separate file |
 | **Episodes** (litectx `episode`) | `litectx.db` | Every exchange, recorded verbatim (`by:'agent'`), tenant-scoped | Expire at TTL (90d customer / 365d admin). The "scratchpad" rung |
 | **Facts** (litectx `fact`) | `litectx.db` | The durable subset — `/remember` (`by:'human'`, instant) or promoted episodes (`by:'agent'`, verbatim) | Don't expire. Recalled facts-first |
 
@@ -321,10 +316,11 @@ Durable memory is litectx's native episode→fact ladder — **no LLM summarizat
 ### Exchange → episode → promotion cycle
 
 ```
-Message / exchange → append to recent.json + daily log
+Message / exchange → append to daily log + write the episode (the conversation thread)
                      │
                      ▼
-              rememberEpisode(scope, text)   # by:'agent', expiresAt = role TTL (90d / 365d)
+              rememberEpisode(scope, turns)  # by:'agent', meta.turns = role-tagged turns (window replay),
+                     │                        # monotonic occurredAt, expiresAt = role TTL (90d / 365d)
                      │    scope = 'admin' (admin chat) | 'user:<chatId>' (customer)
                      ▼
               promotionSweep(scope)  (fire-and-forget, after a response):
@@ -337,10 +333,12 @@ Message / exchange → append to recent.json + daily log
 
 /remember <note>  →  rememberFact(scope, note, by:'human')   # durable immediately, top trust
 recall (prompt build + recall_memory tool)  →  recallMemory(query, {scope})  # facts-first ∪ episodes, scope ∪ GLOBAL
-/forget           →  forgetMemory(scope)  +  clear recent.json   # tenant-only; never another chat, never the shared KB
+/memory           →  recentMemory(scope, {kind:['fact','episode']}) + count   # list durable facts + recent episodes
+window (agent msg history)  →  recentMemory(scope, {kind:'episode'})  # newest-first → reverse → meta.turns
+/forget           →  forgetMemory(scope)   # tenant-only (clears facts+episodes = the thread); never another chat or the KB
 ```
 
-**Episodes = hot scratchpad, facts = what earned its place.** When the LLM needs durable context, `recall_memory` (and the prompt builder) call `recallMemory`, which fences to `scope ∪ GLOBAL` over the fact/episode kinds. Daily logs stay raw backup only, never indexed. *(Interim: `/memory` shows the conversation window and bulk fact-listing awaits litectx's `recent-memory-by-scope` verb — §7; facts surface on demand via recall until then.)*
+**Episodes = hot scratchpad, facts = what earned its place.** When the LLM needs durable context, `recall_memory` (and the prompt builder) call `recallMemory`, which fences to `scope ∪ GLOBAL` over the fact/episode kinds; the conversation window comes from `recentMemory(kind:'episode')`. Recall blends BM25 + semantic (KNN) so a reworded question still matches (`memory.semantic`, on by default). Daily logs stay raw backup only, never indexed.
 
 ### Retention and cleanup
 
@@ -364,7 +362,7 @@ System prompt:
   └─ RAG chunks: scoped document search results (if applicable)
 
 Messages:
-  ├─ recent.json: last N messages as conversation history
+  ├─ conversation window: recentMemory(scope, {kind:'episode'}) → reverse → meta.turns (last N turns)
   └─ Current message
 ```
 
@@ -372,8 +370,8 @@ Messages:
 
 | Command | What it does |
 |---------|-------------|
-| `/memory` | Show this chat's recent conversation window (interim — bulk fact-listing awaits litectx `recent-memory-by-scope`, §7) |
-| `/forget` | Clear this tenant's facts + episodes (tenant-fenced) and the conversation window; raw logs kept |
+| `/memory` | List this tenant's durable facts + recent episodes (newest-first, via `recentMemory`) with a per-kind `count` |
+| `/forget` | Clear this tenant's facts + episodes (tenant-fenced) — that's the thread too; raw logs kept |
 | `/remember <note>` | Write a durable `fact` (`by:'human'`, top trust, instant) |
 
 ### recall_memory tool

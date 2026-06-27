@@ -14,12 +14,16 @@ multis's durable memory was rebuilt on litectx's native promotion ladder, **reti
 
 **Why it's better:** memory reflects what's proven useful rather than what an LLM guessed was important on the spot, and there's no per-conversation summarization cost or drift. Per-chat isolation is enforced at the store — one customer's memory can never surface in another's, and the guard **fails closed** (a missing scope refuses rather than showing everything).
 
-This consumes two litectx boundaries multis filed for M4 — **0.21** (per-tenant fact/episode isolation) and **0.22** (tenant-scoped `forget`) — each validated against the **published** artifact (16/16, failable: the cross-chat leak is closed, the ladder and by-id fetch are fenced, and a deliberately-unfenced control still leaks to prove the test can fail). Full suite **529/529**, `npm audit` clean.
+This consumes the litectx boundaries multis filed for M4 — **0.21** (per-tenant fact/episode isolation), **0.22** (tenant-scoped `forget`), and **0.23** (time-ordered recency + per-scope count + semantic-recall fence) — each validated against the **published** artifact (failable, with deliberately-unfenced controls that still leak to prove the tests can fail). The bot also **no longer keeps a separate `recent.json` conversation file** — the conversation thread it replays is now the memory ladder itself. Full suite **532/532**, `npm audit` clean.
+
+### Added — the assistant understands reworded questions (semantic recall)
+
+Memory recall now matches **meaning, not just keywords**: ask *"how often should I cycle access tokens?"* and it finds the note that says *"rotate credentials every 90 days"* — even with no words in common. Previously a question had to share a keyword with the saved memory to match. (On by default — `memory.semantic`; the first run downloads a small local model and adds ~2s to startup. Set it to `false` to stay keyword-only with no model.)
 
 ### Changed — `/forget` and `/memory`
 
-- **`/forget`** now clears exactly this chat's durable memory (tenant-fenced at the store) **and** its recent conversation window — a clean slate that cannot touch any other chat's memory or the shared knowledge base.
-- **`/memory`** shows this chat's **recent conversation window**. (Listing durable facts in bulk waits on one more litectx recency verb, filed for M4; until it lands, saved facts surface when you ask a related question, through the assistant's recall.)
+- **`/forget`** now clears exactly this chat's durable memory (tenant-fenced at the store) **and** its conversation thread — a clean slate that cannot touch any other chat's memory or the shared knowledge base.
+- **`/memory`** now lists this chat's **durable facts and recent episodes**, newest-first, with a count of each — instead of a raw dump of the recent conversation.
 
 ## [0.17.8] — 2026-06-25
 
