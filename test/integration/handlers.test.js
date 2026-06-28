@@ -2220,6 +2220,7 @@ function stubIndexer(chunks = [], stats = {}) {
     indexFile: async () => 0,
     indexBuffer: async () => 0,
     recallMemory: async () => [],
+    factCandidates: async () => [],   // M4 W4: no existing facts → the supersede judge short-circuits (no LLM call)
     rememberEpisode: async () => ({}),
     rememberFact: async (scope, text, opts = {}) => { factCalls.push({ scope, text, opts }); return {}; },
     promotionSweep: async () => 0,

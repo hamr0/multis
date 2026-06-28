@@ -47,10 +47,11 @@
     "enabled": true,
     "recent_window": 20,
     "promote_threshold": 10,
-    "retention_days": 90,
-    "admin_retention_days": 365,
+    "episode_window_days": 90,
     "log_retention_days": 30,
-    "semantic": true
+    "semantic": true,
+    "supersede": true,
+    "supersede_candidates": 5
   },
   "documents": {
     "maxSize": 10485760,

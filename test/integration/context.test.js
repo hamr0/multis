@@ -344,4 +344,46 @@ describe('context wrapper — native memory ladder (M4)', () => {
       'a scope-less forget must throw, not wipe every tenant',
     );
   });
+
+  // --- W4 supersession mechanic (litectx 0.24.0 (scope,id) upsert) ---
+
+  it('rememberFact with an explicit id UPSERTS in place — a restated fact never piles up (W4)', async () => {
+    const S = 'user:w4-upsert';
+    await ctx2.rememberFact(S, 'the project deadline is Tuesday', { by: 'human', id: 'fact:deadline' });
+    await ctx2.rememberFact(S, 'the project deadline is Thursday', { by: 'human', id: 'fact:deadline' });
+    assert.strictEqual(await ctx2.countMemory(S, { kind: 'fact' }), 1, 'one row after restating the same id');
+    const hits = (await ctx2.recallMemory('project deadline', { scope: S, n: 10 })).map((h) => h.content).join('\n');
+    assert.match(hits, /Thursday/, 'the latest value wins');
+    assert.doesNotMatch(hits, /Tuesday/, 'the superseded value is gone (replaced, not duplicated)');
+  });
+
+  it('rememberFact WITHOUT an id mints a fresh fact each time — no accidental upsert', async () => {
+    const S = 'user:w4-newid';
+    await ctx2.rememberFact(S, 'I like tea', { by: 'human' });
+    await ctx2.rememberFact(S, 'I like coffee', { by: 'human' });
+    assert.strictEqual(await ctx2.countMemory(S, { kind: 'fact' }), 2, 'two distinct facts (id auto-minted, never collides)');
+  });
+
+  it('the same id under a DIFFERENT scope is a separate row — the upsert is tenant-fenced (W4 neg control)', async () => {
+    await ctx2.rememberFact('user:w4-a', 'tenant-a value', { by: 'human', id: 'fact:shared-key' });
+    await ctx2.rememberFact('user:w4-b', 'tenant-b value', { by: 'human', id: 'fact:shared-key' });
+    const a = (await ctx2.recallMemory('value', { scope: 'user:w4-a', n: 10 })).map((h) => h.content).join('\n');
+    const b = (await ctx2.recallMemory('value', { scope: 'user:w4-b', n: 10 })).map((h) => h.content).join('\n');
+    assert.match(a, /tenant-a value/, 'tenant a keeps its own row under the shared id');
+    assert.doesNotMatch(a, /tenant-b/, 'tenant b never overwrote tenant a by id [security neg control]');
+    assert.match(b, /tenant-b value/, 'tenant b keeps its own row under the shared id');
+  });
+
+  it('factCandidates returns this tenant\'s existing facts as {id,text}, scope-fenced (the judge\'s input)', async () => {
+    await ctx2.rememberFact('user:w4-cand', 'the deploy window is Tuesday at 9am', { by: 'human' });
+    const cands = await ctx2.factCandidates('user:w4-cand', 'deploy window', { n: 5 });
+    assert.ok(cands.length >= 1, 'the existing fact is surfaced as a candidate');
+    assert.ok(cands.every((c) => typeof c.id === 'string' && typeof c.text === 'string'), 'shape is {id,text}');
+    assert.match(cands.map((c) => c.text).join('\n'), /deploy window is Tuesday/, 'candidate carries the fact text');
+    // the id round-trips: re-passing it to rememberFact upserts the same row, not a new one
+    await ctx2.rememberFact('user:w4-cand', 'the deploy window is Thursday at 2pm', { by: 'human', id: cands[0].id });
+    assert.strictEqual(await ctx2.countMemory('user:w4-cand', { kind: 'fact' }), 1, 'candidate id round-trips as the upsert key');
+    const other = await ctx2.factCandidates('user:w4-other', 'deploy window', { n: 5 });
+    assert.strictEqual(other.length, 0, 'fenced: another tenant sees no candidates [security neg control]');
+  });
 });

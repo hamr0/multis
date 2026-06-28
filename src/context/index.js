@@ -67,6 +67,9 @@ async function init(opts = {}) {
     // R4: semantic recall (BM25 + KNN paraphrase). Opt-in per call so the test suite stays BM25-only
     // (deterministic, no model load); production passes embeddings:true (config.memory.semantic).
     if (opts.embeddings) cfg.embeddings = true;
+    // litectx 0.25.0: the episode retention+promotion window (config.memory.episode_window_days, default
+    // 90). One coupled window — retention AND promote-eligibility. Unset → litectx's 30d default.
+    if (opts.episodeWindowDays != null) cfg.episodeWindowDays = opts.episodeWindowDays;
     if (opts.writeGate) cfg.writeGate = opts.writeGate;
     if (opts.writeAudit) cfg.writeAudit = opts.writeAudit;
     _ctx = new LiteCtx(cfg);
@@ -152,18 +155,36 @@ function forScope(scope) {
     // --- Native memory ladder (M4) — episodes (scratchpad) → facts (durable), no LLM. ---
 
     /**
-     * Record one exchange as an `episode` (`by:'agent'`) — the scratchpad rung. Promotes to a
-     * fact by USE (recall count), or expires at `expiresAt`. Tenant-fenced by the bound owner.
+     * Record one exchange as an `episode` (`by:'agent'`) — the scratchpad rung. Promotes to a durable
+     * fact by USE (recall count); otherwise litectx self-prunes it on a fixed 30-day rolling window.
+     * Episodes carry NO per-row TTL (`expiresAt` is doc-axis only — ignored for fact/episode, litectx
+     * 0.24.0), so durability is the promotion ladder, not an expiry. Tenant-fenced by the bound owner.
      */
-    async rememberEpisode(text, { expiresAt = null, meta = {} } = {}) {
-      return view.remember(memId(), String(text), { kind: 'episode', by: 'agent', occurredAt: nextOccurredAt(), expiresAt, meta });
+    async rememberEpisode(text, { meta = {} } = {}) {
+      return view.remember(memId(), String(text), { kind: 'episode', by: 'agent', occurredAt: nextOccurredAt(), meta });
     },
     /**
      * Write a durable `fact`. `by:'human'` for the explicit `/remember` (top trust); `by:'agent'`
-     * is reserved for promotion (use {@link promotionSweep}). Facts don't expire unless `expiresAt` set.
+     * is reserved for promotion (use {@link promotionSweep}). Facts are durable until `forget`.
+     *
+     * `id` (W4 supersession, litectx 0.24.0): when supplied, the write UPSERTS that id — re-asserting
+     * the SAME (scope, id) REPLACES the prior value in place (no contradiction pile-up), tenant-fenced
+     * so a given id under another tenant's scope is a different row. Omit `id` (the default) to mint a
+     * fresh `memId()` — a brand-new fact. The caller decides "same subject → reuse the id" (see
+     * src/memory/supersede.js); litectx only guarantees the keyed, fenced upsert.
      */
-    async rememberFact(text, { by = 'human', expiresAt = null, meta = {} } = {}) {
-      return view.remember(memId(), String(text), { kind: 'fact', by, expiresAt, meta });
+    async rememberFact(text, { by = 'human', id = null, meta = {} } = {}) {
+      return view.remember(id || memId(), String(text), { kind: 'fact', by, meta });
+    },
+    /**
+     * The existing durable facts most relevant to `text`, scope-fenced — the candidate set the
+     * supersession judge weighs (W4). `log:false`: an internal same-subject check is not user demand,
+     * so it must not inflate the recall/`use` signal. Returns `[{ id, text }]` (id = the public path,
+     * re-passable to {@link rememberFact} as the upsert key).
+     */
+    async factCandidates(text, { n = 5 } = {}) {
+      const hits = await view.recall(String(text), { kind: 'fact', n, body: true, log: false });
+      return hits.map((h) => ({ id: h.path, text: h.body || '' }));
     },
     /**
      * Recall durable facts + scratchpad episodes for this tenant, FACTS FIRST (durable over scratch).
@@ -231,6 +252,7 @@ const indexFile = async (filePath, scope, opts = {}) => forScope(scope).indexFil
 // --- Native memory ladder (M4) — each delegates to a scope-bound handle (tenant-fenced). ---
 const rememberEpisode = async (scope, text, opts = {}) => forScope(scope).rememberEpisode(text, opts);
 const rememberFact = async (scope, text, opts = {}) => forScope(scope).rememberFact(text, opts);
+const factCandidates = async (scope, text, opts = {}) => forScope(scope).factCandidates(text, opts);
 const recallMemory = async (query, { scope, n = 5 } = {}) => forScope(scope).recallMemory(query, { n });
 const promotionSweep = async (scope, opts = {}) => forScope(scope).promotionSweep(opts);
 const forgetMemory = async (scope) => forScope(scope).forgetMemory();
@@ -259,6 +281,6 @@ module.exports = {
   init, setBounds, raw,
   indexFile, indexBuffer, search, get, purge, stats,
   // M4 native memory ladder
-  rememberEpisode, rememberFact, recallMemory, promotionSweep, forgetMemory,
+  rememberEpisode, rememberFact, factCandidates, recallMemory, promotionSweep, forgetMemory,
   recentMemory, countMemory,
 };

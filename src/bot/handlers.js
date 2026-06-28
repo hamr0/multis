@@ -6,6 +6,7 @@ const context = require('../context');
 const { createProvider } = require('../llm/provider-adapter');
 const { buildRAGPrompt, buildMemorySystemPrompt, buildBusinessPrompt } = require('../llm/prompts');
 const { getMemoryManager } = require('../memory/manager');
+const { rememberWithSupersede } = require('../memory/supersede');
 const { PinManager, hashPin } = require('../security/pin');
 const { RateLimiter } = require('../security/rate-limit');
 const { detectInjection, logInjectionAttempt } = require('../security/injection');
@@ -255,11 +256,12 @@ const memScopeFor = (admin, chatId) => (admin ? 'admin' : `user:${chatId}`);
 // turns: [{role:'user'|'assistant', content}]. body = the readable transcript (for recall/promotion);
 // meta.turns = the structured turns (for faithful window reconstruction — litectx never parses the body).
 const fmtTurns = (turns) => turns.map((t) => `${t.role === 'assistant' ? 'Assistant' : 'User'}: ${t.content}`).join('\n');
-const rememberEpisodeFor = (indexer, memCfg, admin, chatId, turns) =>
-  indexer.rememberEpisode(memScopeFor(admin, chatId), fmtTurns(turns), {
-    expiresAt: Date.now() + (admin ? memCfg.admin_retention_days : memCfg.retention_days) * 86400000,
-    meta: { turns },
-  }).catch((e) => console.error(`[memory] episode write failed: ${e.message}`));
+// Episodes carry NO per-row TTL — litectx self-prunes them on a fixed 30-day rolling window
+// (expiresAt is doc-axis only, ignored for fact/episode; litectx 0.24.0 clarification). Durability is
+// the promotion ladder's job: a hot episode is copied to a durable fact before that window lapses.
+const rememberEpisodeFor = (indexer, _memCfg, admin, chatId, turns) =>
+  indexer.rememberEpisode(memScopeFor(admin, chatId), fmtTurns(turns), { meta: { turns } })
+    .catch((e) => console.error(`[memory] episode write failed: ${e.message}`));
 const sweepPromotionsFor = (indexer, memCfg, admin, chatId) =>
   indexer.promotionSweep(memScopeFor(admin, chatId), { threshold: memCfg.promote_threshold })
     .catch((e) => console.error(`[memory] promotion sweep failed: ${e.message}`));
@@ -306,8 +308,6 @@ function createMessageRouter(config, deps = {}) {
   const memCfg = {
     recent_window: config.memory?.recent_window || 20,
     promote_threshold: config.memory?.promote_threshold || 10,
-    retention_days: config.memory?.retention_days || 90,
-    admin_retention_days: config.memory?.admin_retention_days || 365,
     ...config.memory
   };
 
@@ -571,7 +571,7 @@ function createMessageRouter(config, deps = {}) {
     // command severity, read/index by the owner floor — all at dispatch time,
     // with one PendingRegistry. The old PIN_PROTECTED double-path is retired.
 
-    await executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, { indexer, allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, gov, pending });
+    await executeCommand(command, args, msg, platform, config, indexer, provider, getMem, memCfg, pinManager, agentRegistry, { indexer, provider, memCfg, allTools, toolsConfig, runtimePlatform, maxToolRounds, platformRegistry, gov, pending });
   };
 
   router.registerPlatform = (name, instance) => {
@@ -800,14 +800,14 @@ function buildGovernCtx(msg, config) {
 // The governed-action deps for the slash door (full floor + appExec + ceremony).
 // verifyPin = park-and-resume (no inline await → no serial-poll deadlock).
 function buildSlashDeps(bundle, config, toolDeps) {
-  const { indexer, getMem } = toolDeps;
+  const { indexer, getMem, provider, memCfg } = toolDeps;
   return buildGovernDeps({
     verifyPin: bundle.verifyPin,
     pinConfigured: bundle.pinConfigured,
     floorPolicy: bundle.floorPolicy,
     denylist: bundle.denylist,
     indexer,
-    appExec: buildAppExec(config, getMem, indexer),
+    appExec: buildAppExec(config, getMem, indexer, provider, memCfg),
   });
 }
 
@@ -861,7 +861,7 @@ function makeCeremonyAsk({ capability, args, ctx, deps, ceremonyPrompt, echo, re
  * any of these run. The getMem-backed verbs are only reachable from routes that
  * pass getMem in toolDeps (forget/remember/memory), so the closures are safe.
  */
-function buildAppExec(config, getMem, indexer) {
+function buildAppExec(config, getMem, indexer, provider, memCfg) {
   const mem = (ctx) => getMem(ctx.chatId, { isAdmin: ctx.isOwner });
   const scopeOf = (ctx) => (ctx.isOwner ? 'admin' : `user:${ctx.chatId}`);
   return {
@@ -870,8 +870,13 @@ function buildAppExec(config, getMem, indexer) {
     // forget = wipe this tenant's durable memory (litectx fact+episode, tenant-fenced) — the episodes
     // ARE the conversation thread now, so this clears the window too. Raw daily logs are kept by design.
     forget:   async (args, ctx) => { await indexer.forgetMemory(scopeOf(ctx)); return { chatId: ctx.chatId }; },
-    // remember = a deliberate durable fact (by:'human', top trust), tenant-fenced.
-    remember: async (args, ctx) => { await indexer.rememberFact(scopeOf(ctx), args.note, { by: 'human' }); return { note: args.note }; },
+    // remember = a deliberate durable fact (by:'human', top trust), tenant-fenced. W4: if the note
+    // RESTATES-AND-UPDATES an existing fact, the judge overwrites it in place instead of piling up a
+    // contradiction (degrades to a plain new-fact write when superseding is off / no provider).
+    remember: async (args, ctx) => {
+      await rememberWithSupersede({ indexer, provider, scope: scopeOf(ctx), note: args.note, memCfg });
+      return { note: args.note };
+    },
     // memory = this chat's recent memory, newest-first: durable facts AND scratchpad episodes
     // (litectx 0.23.0 recentMemory, tenant-fenced), with a per-kind count header (O1 count()).
     memory:   async (args, ctx) => {
@@ -1417,7 +1422,7 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     const userTools = getToolsForUser(allTools, admin, tCfg);
     // pending: the shared PendingRegistry, so a destructive tool on the LLM door can
     // park its PIN ceremony (park-and-resume) instead of blocking the loop.
-    const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, platformName: msg.platform, config, platformRegistry, pending, requestText: question };
+    const ctx = { senderId: msg.senderId, chatId: msg.chatId, isOwner: admin, runtimePlatform, indexer, provider, memoryManager: mem, platform, platformName: msg.platform, config, platformRegistry, pending, requestText: question };
 
     const answer = await runAgentLoop(agentProvider, messages, userTools, {
       system,
@@ -2018,7 +2023,7 @@ function createSchedulerTick({ platformRegistry, config, provider, indexer, getM
 
       const answer = await runAgentLoop(provider, [{ role: 'user', content: job.action }], userTools, {
         system,
-        ctx: { senderId: config.owner_id, chatId: job.chatId, isOwner: admin, runtimePlatform, indexer, memoryManager: mem, platform, platformName: job.platformName, config, platformRegistry },
+        ctx: { senderId: config.owner_id, chatId: job.chatId, isOwner: admin, runtimePlatform, indexer, provider, memoryManager: mem, platform, platformName: job.platformName, config, platformRegistry },
         config,
         gov,
       });

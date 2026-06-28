@@ -12,6 +12,7 @@
  */
 
 const { execCommand, execArgv, readFile } = require('../skills/executor');
+const { rememberWithSupersede } = require('../memory/supersede');
 
 // Single-quote shell escaper for the few tools that genuinely need a shell
 // (pipes, `||` fallbacks). Single quotes disable ALL shell expansion; the
@@ -203,9 +204,11 @@ const TOOLS = [
     },
     execute: async ({ note }, ctx) => {
       if (!ctx.indexer) return 'Memory not available.';
-      // A deliberate note → a durable fact (by:'human', top trust), tenant-fenced.
+      // A deliberate note → a durable fact (by:'human', top trust), tenant-fenced. W4: if it
+      // RESTATES-AND-UPDATES an existing fact, overwrite that one in place rather than pile up a
+      // contradiction (degrades to a plain new-fact write when superseding is off / no provider).
       const scope = ctx.isOwner ? 'admin' : `user:${ctx.chatId}`;
-      await ctx.indexer.rememberFact(scope, note, { by: 'human' });
+      await rememberWithSupersede({ indexer: ctx.indexer, provider: ctx.provider, scope, note, memCfg: ctx.config?.memory });
       return 'Noted.';
     }
   },
