@@ -28,36 +28,32 @@ const { simpleGenerate } = require('../llm/provider-adapter');
 /** Build the user-channel judge prompt. `candidates` are shown under 1-based numeric labels. */
 function buildPrompt(note, candidates) {
   const list = candidates.map((c, i) => `  ${i + 1}: ${c.text}`).join('\n');
-  return `Decide whether a NEW memory RESTATES-AND-UPDATES one of the user's EXISTING memories.
+  return `A user just saved a NEW note. Decide if it UPDATES one of their existing facts, or is a NEW fact.
 
-Pick an existing number ONLY when the new memory asserts the SAME attribute of the SAME subject as that memory, so the old value is now WRONG and must be replaced (a changed deadline, a corrected fact, an updated address/job/phone).
+UPDATE <n>: the new note is about the SAME subject as existing fact <n> and revises its value, so the old value is now obsolete. This includes BOTH explicit changes ("moved", "now", "actually", "changed") AND a plain new value for a SINGULAR attribute the user has only one of (their weight, their wedding date, their flight time, their address, their job, their deadline). Pick the single best-matching fact.
 
-Answer NONE when:
-- the new memory is about a DIFFERENT subject (e.g. "my sister" vs "I"), even if the attribute type matches
-- it is a DIFFERENT attribute of the same subject (job vs coffee preference) — these COEXIST
-- it is a distinct event/fact that contradicts nothing
-- you are not confident the old value becomes wrong
-When in doubt, answer NONE. Overwriting a still-true memory is the worst outcome.
+NEW: no existing fact is about the same subject — a different subject is always NEW even if a day/number coincides ("my X" vs "my sister's X" differ; "my wedding" vs "my meeting" differ). Also choose NEW if you genuinely can't tell whether it's the same subject (keeping both is safer than wrongly overwriting).
 
-EXISTING memories:
+EXISTING facts:
 ${list}
 
-NEW memory:
+NEW note:
   ${note}
 
-Reply with ONLY the number of the existing memory it replaces (e.g. 2), or the word NONE. No other text.`;
+Reply with ONLY "UPDATE <n>" or "NEW". No other text.`;
 }
 
 /**
- * Parse the model's reply into a 1-based index, or null. Fail-toward-keep: an explicit NONE wins even
- * if a stray digit is also present (a reply like "1st, but NONE" must NOT merge — a false-merge is the
- * dangerous direction), then the first integer, else null. Range validation is the caller's.
+ * Parse the model's reply into a 1-based index (UPDATE) or null (NEW). Fail-toward-keep: an explicit
+ * NEW wins even if a stray digit is also present (a reply like "NEW, not 1" must NOT merge — a
+ * false-merge is the dangerous direction); otherwise the first integer (`UPDATE 2` or a bare `2`),
+ * else null. Range validation is the caller's.
  */
 function parseChoice(raw) {
   const t = String(raw || '').trim();
-  if (/\bnone\b/i.test(t)) return null; // NONE wins ties → never a false-merge on an ambiguous reply
+  if (/\bnew\b/i.test(t)) return null; // NEW wins ties → never a false-merge on an ambiguous reply
   const num = t.match(/\d+/);
-  return num ? parseInt(num[0], 10) : null; // no number and no NONE → keep (fail safe)
+  return num ? parseInt(num[0], 10) : null; // "UPDATE <n>" / bare number → that index; nothing → keep
 }
 
 /**
@@ -90,10 +86,15 @@ async function resolveSupersedeId({ provider, candidates, note }) {
  * pre-W4 behavior — when superseding is disabled (`memCfg.supersede === false`) or no provider is
  * available (e.g. a context with no LLM), so the judge is strictly additive and never load-bearing
  * for the write itself.
- * @returns {Promise<{id:string|null, superseded:boolean}>}  id = the overwritten fact id (else null)
+ *
+ * `supersededText` (the overwritten fact's prior value) is returned so the caller can SHOW what it
+ * replaced ("…was: X") — auto-update + tell-me (owner decision 2026-06-28): no confirm dialog, but
+ * every overwrite is surfaced with its old value, so a wrong auto-update is visible and recoverable
+ * (re-`/remember` the old value) rather than a silent destroy.
+ * @returns {Promise<{id:string|null, superseded:boolean, supersededText:string|null}>}
  */
 async function rememberWithSupersede({ indexer, provider, scope, note, memCfg = {} }) {
-  let id = null;
+  let id = null, supersededText = null;
   // The judge is strictly additive — fail-toward-keep. Disabled / no provider skips it; and ANY error
   // in the candidate-fetch or judgment degrades to a plain new-fact write so a deliberate note is NEVER
   // dropped (a transient recall failure must not lose the write — the rememberFact below is the single,
@@ -102,12 +103,13 @@ async function rememberWithSupersede({ indexer, provider, scope, note, memCfg = 
     try {
       const candidates = await indexer.factCandidates(scope, note, { n: memCfg.supersede_candidates ?? 5 });
       id = await resolveSupersedeId({ provider, candidates, note });
+      if (id) supersededText = candidates.find((c) => c.id === id)?.text ?? null; // capture BEFORE the overwrite
     } catch {
       id = null;
     }
   }
   await indexer.rememberFact(scope, note, { by: 'human', id });
-  return { id, superseded: !!id };
+  return { id, superseded: !!id, supersededText };
 }
 
 module.exports = { resolveSupersedeId, rememberWithSupersede, buildPrompt, parseChoice };

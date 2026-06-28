@@ -208,8 +208,10 @@ const TOOLS = [
       // RESTATES-AND-UPDATES an existing fact, overwrite that one in place rather than pile up a
       // contradiction (degrades to a plain new-fact write when superseding is off / no provider).
       const scope = ctx.isOwner ? 'admin' : `user:${ctx.chatId}`;
-      await rememberWithSupersede({ indexer: ctx.indexer, provider: ctx.provider, scope, note, memCfg: ctx.config?.memory });
-      return 'Noted.';
+      const r = await rememberWithSupersede({ indexer: ctx.indexer, provider: ctx.provider, scope, note, memCfg: ctx.config?.memory });
+      // Tell the model what happened so it can relay it (auto-update + tell-me) — naming the replaced
+      // value lets the user catch and correct a wrong overwrite.
+      return r.superseded ? `Noted — updated an earlier note (replaced: "${r.supersededText}").` : 'Noted.';
     }
   },
 

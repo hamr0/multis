@@ -874,8 +874,8 @@ function buildAppExec(config, getMem, indexer, provider, memCfg) {
     // RESTATES-AND-UPDATES an existing fact, the judge overwrites it in place instead of piling up a
     // contradiction (degrades to a plain new-fact write when superseding is off / no provider).
     remember: async (args, ctx) => {
-      await rememberWithSupersede({ indexer, provider, scope: scopeOf(ctx), note: args.note, memCfg });
-      return { note: args.note };
+      const r = await rememberWithSupersede({ indexer, provider, scope: scopeOf(ctx), note: args.note, memCfg });
+      return { note: args.note, superseded: r.superseded, supersededText: r.supersededText };
     },
     // memory = this chat's recent memory, newest-first: durable facts AND scratchpad episodes
     // (litectx 0.23.0 recentMemory, tenant-fenced), with a per-kind count header (O1 count()).
@@ -1488,7 +1488,11 @@ async function routeRemember(msg, platform, config, getMem, note, toolDeps = {})
   const r = await dispatchCapability('remember', { note: note || '' }, msg, config, { ...toolDeps, getMem });
   await sendCapabilityResult(r, platform, msg, {
     usage: 'Usage: /remember <note>',
-    format: () => 'Noted.',
+    // Auto-update + tell-me: when the note superseded an existing fact, show the prior value so a
+    // wrong overwrite is visible and recoverable (re-/remember it) — no confirm dialog.
+    format: (result) => (result?.superseded
+      ? `Noted — updated your earlier note (was: "${result.supersededText}").`
+      : 'Noted.'),
   });
 }
 
