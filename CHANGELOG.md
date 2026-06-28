@@ -4,6 +4,8 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-06-28
+
 ### Changed — memory now learns from what you use, not from summarizing every conversation (M4)
 
 multis's durable memory was rebuilt on litectx's native promotion ladder, **retiring the old two-stage capture pipeline** that ran an extra LLM pass to summarize each conversation and condense the results into a `memory.md` file. The new model is simpler and earns its keep:

@@ -533,7 +533,7 @@ Each chat has its own memory that persists across conversations.
 /forget                                        # Clear this chat's memory + conversation window
 ```
 
-- **`/remember <note>`** saves a durable fact for this chat immediately — top trust, never expires.
+- **`/remember <note>`** saves a durable fact for this chat immediately — top trust, never expires. If your note **restates something it already knows** (a moved deadline, a corrected detail, a new weight/address), it **updates that fact in place** and tells you what it replaced (`Noted — updated your earlier note (was: …)`), so a wrong update is visible and you can correct it. Distinct facts are kept side by side.
 - **`/memory`** lists this chat's **durable facts and recent episodes**, newest-first, with a count of each. Recall also matches **meaning, not just keywords** — a reworded question still finds the right memory (semantic recall, on by default).
 - **`/forget`** wipes this chat's durable memory **and** its conversation window — a clean slate. It's tenant-scoped: it can only ever clear *this* chat, never another's, and never the shared knowledge base.
 
@@ -542,8 +542,8 @@ Each chat has its own memory that persists across conversations.
 You don't have to save anything manually — multis learns from use:
 
 1. **Every exchange is recorded as a short-lived episode** for that chat.
-2. **The episodes you keep coming back to are promoted to durable facts** — promotion is by genuine use (recalled often within a rolling 30-day window), copied **verbatim** with no LLM summarization step.
-3. **One-off chatter simply expires** (after 90 days for a customer chat, 365 for your own); only the thin layer that proves useful persists.
+2. **The episodes you keep coming back to are promoted to durable facts** — promotion is by genuine use (recalled often within the episode window), copied **verbatim** with no LLM summarization step.
+3. **One-off chatter simply expires** (after ~90 days by default — `memory.episode_window_days`); only the thin layer that proves useful persists as durable facts.
 
 This means the bot remembers what's actually proven important across past conversations — not what a summarizer guessed on the spot.
 
