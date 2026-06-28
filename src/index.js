@@ -18,7 +18,12 @@ async function main() {
   console.log(`LLM provider: ${config.llm.provider}`);
 
   // Bring up litectx (process-wide doc + memory store) before the router/platforms.
-  await context.init({ documents: config.documents });
+  // embeddings: semantic recall (R4) on unless config.memory.semantic === false (loads a model ~2s).
+  await context.init({
+    documents: config.documents,
+    embeddings: config.memory?.semantic !== false,
+    episodeWindowDays: config.memory?.episode_window_days, // litectx 0.25.0 episode retention+promotion window (default 90)
+  });
   context.setBounds(config.documents);
 
   const handler = createMessageRouter(config);

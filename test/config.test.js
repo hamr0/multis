@@ -130,25 +130,26 @@ describe('loadConfig — default merging', () => {
 
     assert.strictEqual(config.memory.enabled, true);
     assert.strictEqual(config.memory.recent_window, 20);
-    assert.strictEqual(config.memory.capture_threshold, 10);
-    assert.strictEqual(config.memory.decay_rate, 0.05);
-    assert.strictEqual(config.memory.memory_max_sections, 12);
-    assert.strictEqual(config.memory.retention_days, 90);
-    assert.strictEqual(config.memory.admin_retention_days, 365);
+    assert.strictEqual(config.memory.promote_threshold, 10);
+    assert.strictEqual(config.memory.episode_window_days, 90); // litectx 0.25.0 episode retention+promotion window
     assert.strictEqual(config.memory.log_retention_days, 30);
+    assert.strictEqual(config.memory.semantic, true);
+    // W4 supersession knobs (no retention_days/admin_retention_days — episodes have no per-row TTL)
+    assert.strictEqual(config.memory.supersede, true);
+    assert.strictEqual(config.memory.supersede_candidates, 5);
   });
 
   it('preserves custom memory values', () => {
     const multisDir = path.join(tmpDir, '.multis');
     const config = JSON.parse(fs.readFileSync(path.join(multisDir, 'config.json'), 'utf-8'));
-    config.memory = { retention_days: 180, enabled: false };
+    config.memory = { promote_threshold: 25, enabled: false };
     fs.writeFileSync(path.join(multisDir, 'config.json'), JSON.stringify(config, null, 2));
 
     delete require.cache[require.resolve('../src/config')];
     const { loadConfig } = require('../src/config');
     const loaded = loadConfig();
 
-    assert.strictEqual(loaded.memory.retention_days, 180);
+    assert.strictEqual(loaded.memory.promote_threshold, 25, 'a custom value overrides the default');
     assert.strictEqual(loaded.memory.enabled, false);
     assert.strictEqual(loaded.memory.log_retention_days, 30, 'should fill in missing defaults');
   });

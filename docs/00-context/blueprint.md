@@ -6,7 +6,7 @@ The master reference for all decisions, flows, and architecture. If it's not her
 
 ## 1. What multis Is
 
-A personal and business AI agent that lives in your chat apps. Runs locally on your machine, indexes your documents, remembers conversations per-chat with activation decay, and auto-responds to contacts when you want it to.
+A personal and business AI agent that lives in your chat apps. Runs locally on your machine, indexes your documents, remembers conversations per-chat via a use-based promotion ladder (episodes → durable facts), and auto-responds to contacts when you want it to.
 
 **Core principles:**
 - Local-first — all data on your machine
@@ -55,7 +55,7 @@ Message arrives
   ├─ msg.routeAs === 'off'? → SKIP (defense-in-depth, no logging)
   │
   ├─ msg.routeAs === 'silent'? (chat in silent mode)
-  │   └─ YES → archive to memory + two-stage capture pipeline, NO response
+  │   └─ YES → log + record an episode (feeds the promotion ladder), NO response
   │
   ├─ Is a command? (/ on all platforms, personal chats only on Beeper)
   │   └─ YES → parse command → switch (ask, mode, exec, read, index, search, ...)
@@ -269,30 +269,28 @@ Every chat gets its own memory. No global state. No cross-chat contamination.
 
 ```
 ~/.multis/data/memory/chats/<chatId>/
-├── recent.json       # rolling window (last ~20 messages)
-├── memory.md         # LLM-summarized durable notes (append-only, pruned at retention)
 └── log/
     └── YYYY-MM-DD.md # raw daily log (append-only, auto-cleaned at 30 days)
+
+~/.multis/data/litectx.db  # durable memory + conversation thread (facts + episodes) — tenant-scoped, ONE store
 ```
+
+Since M4, neither durable memory nor the conversation thread lives in per-chat files. Both live in the single litectx store (`litectx.db`), fenced per tenant by scope (`admin` / `user:<chatId>`) — the same fence that isolates uploaded documents. Every exchange is an `episode`; the agent's message window is reconstructed from litectx episode-recency (`recentMemory`, 0.23.0), so the old `recent.json` window file is **gone**. Per-chat files keep only the one thing litectx doesn't: the raw daily logs (verbatim forensic backup, never indexed).
 
 Chat metadata (name, network, platform, mode, lastActive) is stored in `config.chats[chatId]` — a single source of truth in config.json, not per-chat files.
 
-Admin identity aggregation — admin talks from multiple platforms (Telegram, Beeper Note to Self, WhatsApp self-chat). All admin chats share a unified admin memory:
+Admin identity aggregation — admin talks from multiple platforms (Telegram, Beeper Note to Self, WhatsApp self-chat). All admin chats share one `admin` memory scope in litectx (a customer's facts/episodes are fenced under `user:<chatId>`, never cross-visible):
 
 ```
 ~/.multis/data/memory/chats/
-  ├── admin/                    # shared admin memory
-  │   └── memory.md            # unified durable notes across all admin chats
-  ├── tg-12345/                # telegram chat (admin) — own rolling window
-  │   ├── recent.json
+  ├── tg-12345/                # telegram chat (admin) — daily log only
   │   └── log/
-  ├── beeper-xyz/              # beeper chat (admin) — own rolling window
-  │   ├── recent.json
+  ├── beeper-xyz/              # beeper chat (admin) — daily log only
   │   └── log/
-  └── beeper-customer-abc/     # customer chat — fully isolated
-      ├── recent.json
-      ├── memory.md            # their memory only
+  └── beeper-customer-abc/     # customer chat — daily log only
       └── log/
+# durable memory AND the conversation thread for all of the above live in litectx.db, scoped:
+#   admin chats → scope 'admin' (shared)      customer chats → scope 'user:<chatId>' (isolated)
 ```
 
 ### What each file does
@@ -300,92 +298,83 @@ Admin identity aggregation — admin talks from multiple platforms (Telegram, Be
 | File | Written by | Read by | Purpose |
 |------|-----------|---------|---------|
 | `config.chats[chatId]` | Router (`updateChatMeta`) | Router, `/mode`, `listBeeperChats` | Chat metadata (name, network, platform, mode, lastActive) |
-| `recent.json` | Router (every message) | LLM calls | Conversation context window |
-| `memory.md` | Capture (LLM) + `/remember` | LLM system prompt | Durable facts for this chat |
+| `litectx.db` | `rememberEpisode`/`rememberFact` + promotion sweep | `recallMemory` (relevance) + `recentMemory` (the conversation window) + `recall_memory` tool | Durable memory AND the conversation thread (facts + episodes), tenant-scoped |
 | `log/*.md` | Router (every message) | Human (backup only) | Raw append-only backup, NOT indexed |
 
-### Three memory tiers
+### Two memory tiers (the promotion ladder)
+
+Durable memory is litectx's native episode→fact ladder — **no LLM summarization step**. Memory is earned by use, not extracted on a timer.
 
 | Tier | Storage | What | Lifecycle |
 |------|---------|------|-----------|
-| **Rolling** (`recent.json`) | File | Last ~20 raw messages | Trimmed to last 5 after capture |
-| **Hot summary** (`memory.md`) | File | Fresh LLM-extracted facts, last N captures | Always in system prompt. Pruned aggressively — old sections drop off as new ones arrive |
-| **Indexed archive** (SQLite FTS) | DB | All memory summaries as chunks + document chunks | Searchable long-term archive. 90 days (admin 365d), activation-decayed |
+| **Conversation window** (litectx episode-recency) | `litectx.db` | Last ~20 turns, reconstructed from recent episodes' `meta.turns` | The cross-message thread the agent loop replays. `recentMemory`, newest-first; no separate file |
+| **Episodes** (litectx `episode`) | `litectx.db` | Every exchange, recorded verbatim (`by:'agent'`), tenant-scoped | Expire at TTL (90d customer / 365d admin). The "scratchpad" rung |
+| **Facts** (litectx `fact`) | `litectx.db` | The durable subset — `/remember` (`by:'human'`, instant) or promoted episodes (`by:'agent'`, verbatim) | Don't expire. Recalled facts-first |
 
-**Key insight:** memory.md stays small and fresh. It's loaded into every LLM call. Old summaries graduate to FTS where they're findable by search but don't bloat the prompt. Daily logs are raw backup only, never indexed.
+**Key insight:** every exchange is a cheap, expiring episode; the thin layer you keep coming back to is promoted to a permanent fact — copied **verbatim, no summarizer**. The flood of one-off chatter simply expires. Promotion is driven by *recall* (use), so the same retrieval that builds the prompt is the signal that earns permanence.
 
-### Rolling window → capture cycle
+### Exchange → episode → promotion cycle
 
 ```
-Message arrives → append to recent.json + daily log
+Message / exchange → append to daily log + write the episode (the conversation thread)
                      │
                      ▼
-              recent.json > threshold (default 20)?
-                     │
-                YES  │  NO → done
+              rememberEpisode(scope, turns)  # by:'agent', meta.turns = role-tagged turns (window replay),
+                     │                        # monotonic occurredAt, expiresAt = role TTL (90d / 365d)
+                     │    scope = 'admin' (admin chat) | 'user:<chatId>' (customer)
                      ▼
-              Capture fires (fire-and-forget, one event):
+              promotionSweep(scope)  (fire-and-forget, after a response):
                      │
-                     ├─ 1. LLM extracts facts (sees existing memory.md to avoid duplicates)
+                     ├─ promotionCandidates(threshold=10)  # episodes recalled ≥10× within
+                     │                                      # the episode window (episode_window_days, default 90)
                      │
-                     ├─ 2. APPEND new timestamped section to memory.md
-                     │
-                     ├─ 3. INDEX that same summary as ONE chunk in FTS5
-                     │      role=admin (admin chat) or role=user:<chatId> (customer)
-                     │      type='conv', element='chat'
-                     │
-                     ├─ 4. PRUNE memory.md — keep only last N sections (default 12)
-                     │      Dropped sections already indexed in step 3, nothing lost
-                     │
-                     └─ 5. Trim recent.json to last 5
+                     └─ for each hot candidate: copy episode text VERBATIM → fact (by:'agent')
+                            (re-sweep UPSERTS the same fact id — no duplicates)
+
+/remember <note>  →  rememberFact(scope, note, by:'human')   # durable immediately, top trust
+recall (prompt build + recall_memory tool)  →  recallMemory(query, {scope})  # facts-first ∪ episodes, scope ∪ GLOBAL
+/memory           →  recentMemory(scope, {kind:['fact','episode']}) + count   # list durable facts + recent episodes
+window (agent msg history)  →  recentMemory(scope, {kind:'episode'})  # newest-first → reverse → meta.turns
+/forget           →  forgetMemory(scope)   # tenant-only (clears facts+episodes = the thread); never another chat or the KB
 ```
 
-**memory.md = hot scratchpad.** Small, recent, always fresh. When the LLM needs older context, the `recall_memory` tool searches FTS for `type='conv'` chunks from the 90-day indexed archive. This keeps system prompts lean while preserving full history.
+**Episodes = hot scratchpad, facts = what earned its place.** When the LLM needs durable context, `recall_memory` (and the prompt builder) call `recallMemory`, which fences to `scope ∪ GLOBAL` over the fact/episode kinds; the conversation window comes from `recentMemory(kind:'episode')`. Recall blends BM25 + semantic (KNN) so a reworded question still matches (`memory.semantic`, on by default). Daily logs stay raw backup only, never indexed.
 
 ### Retention and cleanup
 
 | What | Default | Config key | Cleanup |
 |------|---------|------------|---------|
-| memory.md sections | Last 12 captures | `memory.memory_max_sections` | Pruned at each capture — oldest sections drop off |
-| FTS summary chunks | 90 days | `memory.retention_days` | Delete old chunks on startup / daily |
-| Admin FTS chunks | 365 days | `memory.admin_retention_days` | Same |
+| Episodes | ~90 days (configurable) | `memory.episode_window_days` (default 90) | litectx self-prunes on the rolling window (litectx 0.25.0 `episodeWindowDays`); the **same** window also gates promotion-eligibility (one coupled clock). Durability is promotion-to-fact, not the timer |
+| Facts | Permanent | — | Promoted/`/remember`'d facts don't expire (drop them with `/forget`) |
 | Daily logs | 30 days | `memory.log_retention_days` | Delete old `log/YYYY-MM-DD.md` files |
 
-### Capture skill
+### Promotion (no capture skill, no LLM)
 
-Human-written `skills/capture.md` tells the LLM what to extract:
-- Decisions made
-- Action items (who, what, when)
-- Preferences ("I prefer...", "always do X")
-- Key facts (names, dates, relationships)
-- Tone/style notes
+Since M4 there is **no LLM capture/summarize step** and no human-written `capture.md`. Durable memory is earned by use: every exchange is an `episode`; `promotionSweep` copies an episode **verbatim** to a `fact` once it's been recalled ≥`promote_threshold` (10) times within the episode window (`memory.episode_window_days`, default 90 — litectx 0.25.0; the window is BOTH retention and promotion-eligibility, one coupled clock) — an episode that never gets that hot simply prunes at the window edge (durability lives in the fact tier, not in the episode timer). `/remember` writes a `fact` directly, and a restated same-subject note **supersedes** the prior fact in place rather than piling up a contradiction (an LLM judge picks the fact to overwrite; tenant-fenced, fail-toward-keep — see Memory supersession below). litectx owns ranking (BM25 + optional KNN when `memory.semantic` is on, the default), decay, and retention — multis only writes episodes/facts and reads them back.
 
-Users can write custom capture skills for different use cases. A business user might want "extract leads and follow-ups." A personal user might want "extract book recommendations and ideas."
+### Memory supersession (W4 — restated facts update in place)
 
-### ACT-R activation decay
+litectx 0.24.0 makes `remember(id, …)` a **tenant-fenced upsert by `(scope, id)`**: re-asserting the same id under the same scope replaces the value in place; the same id under another scope is a separate row. litectx delivers the keyed write; deciding *"this new fact restates-and-updates an existing one"* is multis's job (`src/memory/supersede.js`). On every `/remember` (both the slash app-verb and the LLM `remember` tool flow through `rememberWithSupersede`):
 
-Applied to all indexed chunks (documents + memory summaries):
+1. Recall the most-relevant existing facts for this tenant (`factCandidates`, scope-fenced, `log:false` so the check doesn't inflate the use signal).
+2. An LLM judge (`memory.supersede`, default on; `memory.supersede_candidates`, default 5) classifies the note as **`UPDATE <n>`** — same subject as candidate *n*, value revised, so the old is obsolete (explicit changes like "moved"/"now" **and** a new value for a singular attribute the user has one of: weight, wedding date, address, deadline) — or **`NEW`** (distinct subject, or genuinely can't tell → keep both).
+3. Write under the chosen id (overwrite) or a fresh id (new fact).
 
-```
-activation = base_activation + ln(access_count) - decay_rate × age_in_days
-```
+**Auto-update + tell-me (owner decision 2026-06-28):** an `UPDATE` overwrites silently-but-visibly — the reply names the prior value (`Noted — updated your earlier note (was: "…")`; the agent tool returns the same so the model relays it), so a wrong auto-update is **seen and recoverable** (re-`/remember` the old value) rather than a hidden destroy. No confirm dialog — the transparency is what makes aggressive update-detection safe, which is why the judge is tuned to *catch* singular changes rather than ask. Customer-scope facts (agent-created) auto-update silently; the tell-me surfaces on the owner's own chats.
 
-- New chunks: high activation (recently created)
-- Frequently accessed: stays high (ln of access count)
-- Old + untouched: fades away
-- Search results ranked by: FTS5 BM25 score × activation boost
+Two invariants bound the risk: **fail toward keeping** — any uncertainty (`NEW`), a hallucinated/out-of-range choice, an LLM error, a recall failure, no provider, or `supersede:false` all degrade to a plain new-fact write (a false-merge that overwrites a still-true fact is the worst outcome, so ambiguity never destroys); and **scope-fenced blast radius** — candidates come from a scope-bound recall, so even a wrong merge can only touch this tenant's own memory, never another's. The judge is characterized by real-LLM POCs (binary UPDATE/NEW 12/12, incl. the live-observed misses now caught — moved wedding, changed deadline — and zero false-merge across distinct subjects); its safety wrapper is unit-tested deterministically.
 
 ### Memory in LLM calls
 
 ```
 System prompt:
   ├─ Base: "You are multis, a personal/business assistant..."
-  ├─ Chat memory.md: durable notes for THIS chat
-  │   (admin chats load admin/memory.md; customer chats load their own)
+  ├─ Recalled memory: recallMemory(query, {scope}) → facts-first ∪ episodes for THIS tenant
+  │   (admin chats → scope 'admin'; customer chats → scope 'user:<chatId>')
   └─ RAG chunks: scoped document search results (if applicable)
 
 Messages:
-  ├─ recent.json: last N messages as conversation history
+  ├─ conversation window: recentMemory(scope, {kind:'episode'}) → reverse → meta.turns (last N turns)
   └─ Current message
 ```
 
@@ -393,13 +382,13 @@ Messages:
 
 | Command | What it does |
 |---------|-------------|
-| `/memory` | Show this chat's memory.md |
-| `/forget` | Clear memory.md (keeps raw logs) |
-| `/remember <note>` | Manually add a note to memory.md |
+| `/memory` | List this tenant's durable facts + recent episodes (newest-first, via `recentMemory`) with a per-kind `count` |
+| `/forget` | Clear this tenant's facts + episodes (tenant-fenced) — that's the thread too; raw logs kept |
+| `/remember <note>` | Write a durable `fact` (`by:'human'`, top trust, instant) |
 
 ### recall_memory tool
 
-The LLM has a `recall_memory` tool that searches only `type='conv'` chunks (not documents). Used when the user references something discussed before ("do you remember...", "my wife's name", "what did I say about..."). The system prompt nudges the LLM to use it for older memories not visible in the current memory.md section.
+The LLM has a `recall_memory` tool that recalls this tenant's `fact`/`episode` memory (never documents). Used when the user references something discussed before ("do you remember...", "my wife's name", "what did I say about..."). It fences to `scope ∪ GLOBAL`, facts ranked before episodes.
 
 - **Role-filtered**: owner sees all roles; non-owner only sees `role='user:<chatId>'` memories
 - **Type-filtered**: `store.search()` accepts a `types` option that adds `AND c.type IN (...)` to the SQL query
@@ -460,7 +449,7 @@ Chunks outside role **never reach the LLM context**. This is the hard boundary.
 | Layer | What | How |
 |-------|------|-----|
 | **Hard role filter** | SQL WHERE clause | Chunks from other users never in LLM context |
-| **Excluded context** | No admin memory.md in business prompts | Business-mode system prompt only loads customer memory + kb chunks |
+| **Excluded context** | No admin-scope memory in business prompts | Business-mode prompts recall only the customer's `user:<chatId>` scope + the shared KB — never the `admin` scope |
 | **Pattern detection** | Flag suspicious queries | "ignore instructions", "system prompt", "show all users", "SELECT", references to other users |
 | **Rate limiting** | Track queries per chatId per hour | Flag anomalies (many broad queries, repeated "show all" patterns) |
 | **Dedicated audit** | `~/.multis/logs/injection.log` | userId, timestamp, full text, matched pattern, result (blocked/flagged/allowed) |
@@ -659,8 +648,7 @@ Duration format: `1m`, `5m`, `1h`, `2h`, `1d`, etc. Cron uses standard 5-field e
 | Job | Frequency | What it does |
 |-----|-----------|-------------|
 | **Log cleanup** | Daily (on startup + 24h interval) | Delete daily logs older than `log_retention_days` |
-| **Memory pruning** | Daily | Prune memory.md sections + FTS chunks older than `retention_days` |
-| **Activation decay** | On access (or periodic if needed) | Recalculate activation scores |
+| **Memory retention** | Daily | litectx `purge()` reclaims episodes past their `expiresAt` (90d / admin 365d); ranking/decay owned by litectx |
 
 ### Customer reminders
 Customers cannot create cron jobs. If a customer requests a follow-up, the bot sends a note to admin. Admin decides whether to create a reminder.
@@ -815,13 +803,12 @@ All behavioral settings are configurable. Sane defaults applied when missing.
   },
   "memory": {
     "recent_window": 20,
-    "capture_threshold": 10,
-    "memory_section_cap": 5,
-    "memory_max_sections": 12,
-    "retention_days": 90,
-    "admin_retention_days": 365,
+    "promote_threshold": 10,
+    "episode_window_days": 90,
     "log_retention_days": 30,
-    "decay_rate": 0.05
+    "semantic": true,
+    "supersede": true,
+    "supersede_candidates": 5
   },
   "security": {
     "pin_hash": "...",
@@ -937,9 +924,9 @@ Never reveal internal processes or admin information.
 | **openclaw** | memory.md approach | Per-chat (not global), LLM-written |
 | **openclaw** | Daily log files | Same: `YYYY-MM-DD.md` append-only |
 | **openclaw** | Cron scheduler | Same pattern: jobs.json, periodic agent turns |
-| **openclaw** | Pre-compaction flush | Our capture skill replaces it |
+| **openclaw** | Pre-compaction flush | Our promotion ladder (litectx episode→fact) replaces it |
 | **Aurora** | Document indexing | Ported: PDF/DOCX → chunking → FTS5 |
-| **Aurora** | ACT-R activation decay | Same formula, applied to conversations too |
+| **Aurora** | ACT-R activation decay | Inspiration only — ranking/decay now owned by litectx; conversations use the promotion ladder, not ACT-R |
 | **Aurora** | Hierarchical chunking | Same: section path + sentence boundaries |
 | **Aurora** | SQLite FTS5 | Same, but FTS5 BM25 replaces custom scorer |
 | **mcp-gov** | Governance layer | Same: allowlist/denylist JSON + audit |

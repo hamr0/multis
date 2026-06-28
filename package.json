@@ -1,6 +1,6 @@
 {
   "name": "multis",
-  "version": "0.17.8",
+  "version": "0.18.0",
   "description": "A personal chatbot and assistant that runs on your computer",
   "main": "src/index.js",
   "bin": {
@@ -33,10 +33,11 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
     "bare-agent": "^0.19.0",
     "bareguard": "^0.9.0",
     "better-sqlite3": "^11.7.0",
-    "litectx": "^0.20.0",
+    "litectx": "^0.25.0",
     "mammoth": "^1.8.0",
     "pdfjs-dist": "^5.4.624",
     "telegraf": "^4.16.3"

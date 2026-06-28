@@ -4,6 +4,29 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-06-28
+
+### Changed — memory now learns from what you use, not from summarizing every conversation (M4)
+
+multis's durable memory was rebuilt on litectx's native promotion ladder, **retiring the old two-stage capture pipeline** that ran an extra LLM pass to summarize each conversation and condense the results into a `memory.md` file. The new model is simpler and earns its keep:
+
+- **Every exchange is recorded as a short-lived episode**, scoped to that chat — it lives on a rolling window (**default ~90 days**, set by `memory.episode_window_days`) and then expires unless it earns promotion. So a chat you pick back up after weeks still has its thread.
+- **The episodes you keep coming back to are promoted to durable facts** — promotion is by genuine use (an item recalled often within that window), copied **verbatim, with no summarizer in the loop**. The thin layer of things that actually matter persists as durable facts; the flood of one-off chatter expires. (Durability is the promotion ladder, not the expiry timer — anything worth keeping becomes a fact and never expires.)
+- **`/remember <note>`** still saves a durable note instantly (top trust, no waiting) — and now, if your note **restates something it already knows** (a moved deadline, a corrected detail, a new weight/address), it **updates that fact in place** and **tells you what it replaced** (`Noted — updated your earlier note (was: …)`), so a wrong update is visible and you can correct it. Distinct facts are kept side by side; only a genuine same-subject update overwrites, and never across chats.
+
+**Why it's better:** memory reflects what's proven useful rather than what an LLM guessed was important on the spot, and there's no per-conversation summarization cost or drift. Per-chat isolation is enforced at the store — one customer's memory can never surface in another's, and the guard **fails closed** (a missing scope refuses rather than showing everything).
+
+This consumes the litectx boundaries multis filed for M4 — **0.21** (per-tenant fact/episode isolation), **0.22** (tenant-scoped `forget`), **0.23** (time-ordered recency + per-scope count + semantic-recall fence), **0.24** (tenant-fenced supersede-by-key, behind the same-subject judge above), and **0.25** (configurable episode window, set to 90 days) — each validated against the **published** artifact (failable, with deliberately-unfenced controls that still leak to prove the tests can fail). The bot also **no longer keeps a separate `recent.json` conversation file** — the conversation thread it replays is now the memory ladder itself. Full suite **555/555**, `npm audit` clean.
+
+### Added — the assistant understands reworded questions (semantic recall)
+
+Memory recall now matches **meaning, not just keywords**: ask *"how often should I cycle access tokens?"* and it finds the note that says *"rotate credentials every 90 days"* — even with no words in common. Previously a question had to share a keyword with the saved memory to match. (On by default — `memory.semantic`; the first run downloads a small local model and adds ~2s to startup. Set it to `false` to stay keyword-only with no model.)
+
+### Changed — `/forget` and `/memory`
+
+- **`/forget`** now clears exactly this chat's durable memory (tenant-fenced at the store) **and** its conversation thread — a clean slate that cannot touch any other chat's memory or the shared knowledge base.
+- **`/memory`** now lists this chat's **durable facts and recent episodes**, newest-first, with a count of each — instead of a raw dump of the recent conversation.
+
 ## [0.17.8] — 2026-06-25
 
 ### Added — plain-text/CSV files are searchable, and vague questions recall your recent notes

@@ -247,13 +247,32 @@ function loadConfig() {
   config.memory = {
     enabled: true,
     recent_window: 20,
-    capture_threshold: 10,
-    memory_section_cap: 5,
-    decay_rate: 0.05,
-    memory_max_sections: 12,
-    retention_days: 90,
-    admin_retention_days: 365,
+    // M4: durable memory is the litectx episode→fact ladder. promote_threshold = episode recalls
+    // (within the episode window below) that auto-promote it to a durable fact. Facts are durable
+    // until /forget. litectx owns decay/ranking (no ACT-R, no memory.md caps).
+    promote_threshold: 10,
+    // episode_window_days (litectx 0.25.0 episodeWindowDays) — ONE coupled window that is BOTH how long
+    // an episode is retained AND how long it stays promote-eligible. Default 90: episodes (the
+    // conversation thread + promotion fuel) live ~90 days, so a chat resumed after a gap keeps its
+    // context; durable facts still persist via promotion regardless. NOTE the coupling: raising this
+    // also lengthens the promotion window (more time to reach promote_threshold → more facts promote);
+    // there is no "retain 90 but promote in 30" — they're one window. Must be > the promote-and-prove
+    // time (litectx rejects ≤0); 30 is litectx's safe default, lower it only for data-minimization.
+    episode_window_days: 90,
     log_retention_days: 30,
+    // R4: semantic (KNN) recall — litectx blends BM25 + embeddings so a reworded question still
+    // finds the fact (paraphrase recall), tenant-fence intact. Pulls @huggingface/transformers +
+    // loads a small model (~2s once per process). Set false to stay BM25-only (no model, no dep load).
+    semantic: true,
+    // W4: same-subject supersession on /remember — before writing a new durable fact, an LLM judge
+    // checks whether it RESTATES-AND-UPDATES an existing fact (changed deadline, corrected detail); if
+    // so the new value overwrites that fact in place (litectx 0.24.0 tenant-fenced (scope,id) upsert)
+    // instead of piling up a contradiction. Costs one extra LLM call per /remember (human-initiated,
+    // low-frequency). false → always write a new fact (no judge). supersede_candidates = how many
+    // most-relevant existing facts the judge weighs (scope-fenced, so a mis-judge only ever touches
+    // this tenant's own memory). A judge error/uncertainty falls back to a new fact (never destroys).
+    supersede: true,
+    supersede_candidates: 5,
     ...config.memory
   };
 

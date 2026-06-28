@@ -12,6 +12,7 @@
  */
 
 const { execCommand, execArgv, readFile } = require('../skills/executor');
+const { rememberWithSupersede } = require('../memory/supersede');
 
 // Single-quote shell escaper for the few tools that genuinely need a shell
 // (pipes, `||` fallbacks). Single quotes disable ALL shell expansion; the
@@ -177,11 +178,11 @@ const TOOLS = [
     },
     execute: async ({ query }, ctx) => {
       if (!ctx.indexer) return 'Memory search not available.';
-      // Owner conversation memory is captured under scope 'admin'; a customer's
-      // under 'user:<chatId>'. searchMemory fences to scope ∪ global and filters to
-      // memory rows (never uploaded docs), so a customer can't read owner memory (#6).
+      // Owner memory lives under scope 'admin'; a customer's under 'user:<chatId>'.
+      // recallMemory fences to scope ∪ global over the fact/episode kinds (never docs),
+      // so a customer can't read owner memory (#6).
       const scope = ctx.isOwner ? 'admin' : `user:${ctx.chatId}`;
-      const results = await ctx.indexer.searchMemory(query, { scope, n: 5 });
+      const results = await ctx.indexer.recallMemory(query, { scope, n: 5 });
       if (results.length === 0) return 'No matching memories found.';
       const fmt = (r, i) => {
         const date = r.createdAt?.slice(0, 10) || 'unknown date';
@@ -202,9 +203,16 @@ const TOOLS = [
       required: ['note']
     },
     execute: async ({ note }, ctx) => {
-      if (!ctx.memoryManager) return 'Memory not available.';
-      ctx.memoryManager.appendMemory(note);
-      return 'Noted.';
+      if (!ctx.indexer) return 'Memory not available.';
+      // A deliberate note → a durable fact (by:'human', top trust), tenant-fenced. W4: if it
+      // RESTATES-AND-UPDATES an existing fact, overwrite that one in place rather than pile up a
+      // contradiction (degrades to a plain new-fact write when superseding is off / no provider).
+      const scope = ctx.isOwner ? 'admin' : `user:${ctx.chatId}`;
+      const r = await rememberWithSupersede({ indexer: ctx.indexer, provider: ctx.provider, scope, note, memCfg: ctx.config?.memory });
+      // Tell the model what happened so it can relay it (auto-update + tell-me) — naming the replaced
+      // value lets the user catch and correct a wrong overwrite. An identical re-save (supersededText
+      // null) is a plain "Noted." (no misleading "replaced: <same>").
+      return r.supersededText ? `Noted — updated an earlier note (replaced: "${r.supersededText}").` : 'Noted.';
     }
   },
 

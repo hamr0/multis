@@ -46,12 +46,12 @@
   "memory": {
     "enabled": true,
     "recent_window": 20,
-    "capture_threshold": 10,
-    "decay_rate": 0.05,
-    "memory_max_sections": 12,
-    "retention_days": 90,
-    "admin_retention_days": 365,
-    "log_retention_days": 30
+    "promote_threshold": 10,
+    "episode_window_days": 90,
+    "log_retention_days": 30,
+    "semantic": true,
+    "supersede": true,
+    "supersede_candidates": 5
   },
   "documents": {
     "maxSize": 10485760,
