@@ -94,6 +94,13 @@ describe('rememberWithSupersede', () => {
     assert.strictEqual(ix.calls.fact[0].opts.id, 'fact:a', 'writes under the superseded id (overwrite in place)');
   });
 
+  it('re-saving an IDENTICAL fact upserts the same id but reports no change (supersededText null → plain "Noted.")', async () => {
+    const ix = makeIndexer([{ id: 'fact:a', text: 'my wedding on Wednesday' }]);
+    const r = await rememberWithSupersede({ indexer: ix, provider: fakeProvider('UPDATE 1'), scope: 'admin', note: 'my wedding on Wednesday', memCfg: {} });
+    assert.deepStrictEqual(r, { id: 'fact:a', superseded: true, supersededText: null });
+    assert.strictEqual(ix.calls.fact[0].opts.id, 'fact:a', 'still upserts the same id (no duplicate row)');
+  });
+
   it('judge says NEW → a new fact (no id), superseded:false, no prior value', async () => {
     const ix = makeIndexer();
     const r = await rememberWithSupersede({ indexer: ix, provider: fakeProvider('NEW'), scope: 'admin', note: 'unrelated', memCfg: {} });

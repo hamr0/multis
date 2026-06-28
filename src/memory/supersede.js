@@ -103,7 +103,13 @@ async function rememberWithSupersede({ indexer, provider, scope, note, memCfg = 
     try {
       const candidates = await indexer.factCandidates(scope, note, { n: memCfg.supersede_candidates ?? 5 });
       id = await resolveSupersedeId({ provider, candidates, note });
-      if (id) supersededText = candidates.find((c) => c.id === id)?.text ?? null; // capture BEFORE the overwrite
+      if (id) {
+        const prior = candidates.find((c) => c.id === id)?.text ?? null; // capture BEFORE the overwrite
+        // Only report a supersede when the prior value actually CHANGED. Re-saving an identical fact
+        // still upserts the same row (no duplicate) but is a no-op to the user, so it reads as a plain
+        // "Noted." rather than the misleading "updated (was: <the same text>)".
+        if (prior != null && prior.trim().toLowerCase() !== String(note).trim().toLowerCase()) supersededText = prior;
+      }
     } catch {
       id = null;
     }

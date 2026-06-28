@@ -1488,9 +1488,10 @@ async function routeRemember(msg, platform, config, getMem, note, toolDeps = {})
   const r = await dispatchCapability('remember', { note: note || '' }, msg, config, { ...toolDeps, getMem });
   await sendCapabilityResult(r, platform, msg, {
     usage: 'Usage: /remember <note>',
-    // Auto-update + tell-me: when the note superseded an existing fact, show the prior value so a
-    // wrong overwrite is visible and recoverable (re-/remember it) — no confirm dialog.
-    format: (result) => (result?.superseded
+    // Auto-update + tell-me: when the note overwrote a DIFFERENT prior value, show it so a wrong
+    // overwrite is visible and recoverable (re-/remember it) — no confirm dialog. An identical
+    // re-save (supersededText null) reads as a plain "Noted." (no misleading "was: <same>").
+    format: (result) => (result?.supersededText
       ? `Noted — updated your earlier note (was: "${result.supersededText}").`
       : 'Noted.'),
   });

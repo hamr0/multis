@@ -210,8 +210,9 @@ const TOOLS = [
       const scope = ctx.isOwner ? 'admin' : `user:${ctx.chatId}`;
       const r = await rememberWithSupersede({ indexer: ctx.indexer, provider: ctx.provider, scope, note, memCfg: ctx.config?.memory });
       // Tell the model what happened so it can relay it (auto-update + tell-me) — naming the replaced
-      // value lets the user catch and correct a wrong overwrite.
-      return r.superseded ? `Noted — updated an earlier note (replaced: "${r.supersededText}").` : 'Noted.';
+      // value lets the user catch and correct a wrong overwrite. An identical re-save (supersededText
+      // null) is a plain "Noted." (no misleading "replaced: <same>").
+      return r.supersededText ? `Noted — updated an earlier note (replaced: "${r.supersededText}").` : 'Noted.';
     }
   },
 
