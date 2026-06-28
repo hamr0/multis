@@ -1,8 +1,8 @@
 # litectx ask — multis memory API (consolidated)
 
 **Filed:** 2026-06-27 · **Modules:** M4 (litectx memory) + M5 (context-engineering)
-**Status:** ⛔ OPEN · **Blocks:** R3 blocks M4 completion (retiring `recent.json`); the rest are sequenced (see Priority)
-**Found against:** published litectx **0.22.0** (= npm latest)
+**Status:** ✅ M4 items RESOLVED — R3 + R4 + O1 (litectx 0.23.0) + W4 (litectx 0.24.0) DELIVERED + VALIDATED + CONSUMED (2026-06-27). C1/C2 remain OPEN for M5. (Note: at 0.24.0 `expiresAt` was doc-axis only — episodes 30d-prune, facts durable — so multis retired its 90/365 retention. **Configurable episode window — DELIVERED + CONSUMED (litectx 0.25.0, 2026-06-28).** litectx shipped `episodeWindowDays` (a `LiteCtx` constructor option, default 30) — an **instance-level** window (not the per-episode `expiresAt` first imagined) that drives BOTH the write-time prune AND the promotion floor (one coupled clock). multis threads `config.memory.episode_window_days` (**default 90, all chats**) into `new LiteCtx({ episodeWindowDays })`. Owner decision 2026-06-28: **one knob, 90d for everyone** (not the per-role 90/365 split, not a per-customer prune) — the window already bounds idle chats (an inactive chat's episodes age out), and `/forget` stays the manual per-chat clear, so multis adds **no** inactivity-autoprune logic. Buys long-tail continuity for sporadically-used chats; durability stays the promotion ladder. ⚠ Coupling: 90d also lengthens the promotion window (one window, no retain-90/promote-30 split).)
+**Found against:** published litectx **0.22.0** (= npm latest at filing)
 **Supersedes:** `recent-memory-by-scope.md` (folded in as **§R3**)
 
 > **Why one ask.** multis filed the memory axis one capability at a time — isolation (recall, **delivered 0.21.0**), forget (delete, **delivered 0.22.0**), recency (open). Rather than continue the drip, this is the **complete** set of memory capabilities multis foresees needing from litectx across M4 (now) and M5 (next), so litectx can design **one coherent memory API** instead of bolting on verbs. Each item states the **need** + a **preferred shape** (litectx owns the final API — Principle 8) + a **failable acceptance**. Priority is labelled; **not all are blocking**.
@@ -13,10 +13,10 @@ One process-wide `LiteCtx`; tenant-fenced on `mem_scope.owner`; a bound `scoped(
 ## Priority / sequence
 | Item | What | Priority |
 |------|------|----------|
-| **R3** | Time-ordered recency on the memory axis | ⛔ **BLOCKS M4** — needed first (retires `recent.json`) |
-| **R4** | Semantic (KNN) recall on the memory axis | 🟡 M4-class — multis is enabling embeddings; consume as delivered |
-| **W4** | Update / supersede a fact by stable key | 🟡 M4-class — stops re-stated facts piling up |
-| **O1** | Per-scope memory count | 🟢 minor — powers `/memory`, `/docs` |
+| **R3** | Time-ordered recency on the memory axis | ✅ **CONSUMED (0.23.0)** — retired `recent.json` |
+| **R4** | Semantic (KNN) recall on the memory axis | ✅ **CONSUMED (0.23.0)** — embeddings on, tenant-fence proven |
+| **W4** | Update / supersede a fact by stable key | ✅ **CONSUMED (0.24.0)** — same-subject supersession on `/remember` |
+| **O1** | Per-scope memory count | ✅ **CONSUMED (0.23.0)** — powers `/memory` |
 | **C1** | Budget-fit `assemble` on the memory axis | 🔵 **M5** — specced now for coherence; multis validates at M5 |
 | **C2** | `summaryWindow` (compress long chats) | 🔵 **M5** — same |
 
@@ -24,7 +24,7 @@ litectx may deliver in any order, but **R3 unblocks the most** (it's the last pi
 
 ---
 
-## R3 — time-ordered recency on the memory axis  ⛔ BLOCKING
+## R3 — time-ordered recency on the memory axis  ✅ CONSUMED (litectx 0.23.0)
 
 **Need.** A **time-ordered** read of a tenant's `fact`/`episode` memory — newest first, **no FTS query** — fenced like `recall`/`forget`. Two consumers:
 1. **`/memory`** ("show what I remember here") — list this chat's durable memory newest-first. No query → `recall` (needs terms) can't answer it.
@@ -52,7 +52,7 @@ ctx.scoped(tenant).recentMemory({ kind, n })    // bound form
 
 ---
 
-## R4 — semantic (KNN) recall on the memory axis  🟡
+## R4 — semantic (KNN) recall on the memory axis  ✅ CONSUMED (litectx 0.23.0)
 
 **Need.** multis is **enabling embeddings** (today it runs embeddings-off / BM25-only). Live test surfaced the lexical ceiling: stored *"you are male"*, queried *"am I a **woman**?"* → zero match (no shared token), bot said "no info." Semantic recall (`woman` ↔ `male`/`female`) closes that.
 
@@ -64,9 +64,11 @@ ctx.scoped(tenant).recentMemory({ kind, n })    // bound form
 
 ---
 
-## W4 — update / supersede a fact by stable key  🟡
+## W4 — update / supersede a fact by stable key  ✅ DELIVERED + VALIDATED + CONSUMED (litectx 0.24.0, 2026-06-27)
 
-**Need.** Memory is append-only, so **re-stated facts pile up**: live test went age 44→45, deadline Aug 20→Aug 23, "muscular by 45"→"by 46". Both versions persist and can both surface on recall → contradiction. multis wants to **overwrite** a prior value when the user supersedes it.
+**Resolution.** litectx 0.24.0 shipped the **upsert shape**: `remember(id, text, …)` is a documented, tenant-fenced upsert by `(scope, id)` — same id under the same scope replaces in place; same id under a different scope is a separate row. litectx chose the `remember`-is-the-upsert option (not a separate `update()` verb — the ask permitted either). The owner-qualified physical key fences a bare `get` by construction; a reserved separator (`\x1F`) in an id/scope is rejected on write; a one-time auto-migration re-keys 0.21–0.23 rows. multis validated against the **published** 0.24.0 artifact (POC: upsert-in-place, cross-tenant separation, public-id round-trip, scoped get — all pass; the upsert mechanic mutation-proven via the integration test) and built the same-subject judge on top (`src/memory/supersede.js`). **The "same subject, new value" detection stayed multis's job, as scoped.** Suite 554, audit 0.
+
+**Need (original).** Memory is append-only, so **re-stated facts pile up**: live test went age 44→45, deadline Aug 20→Aug 23, "muscular by 45"→"by 46". Both versions persist and can both surface on recall → contradiction. multis wants to **overwrite** a prior value when the user supersedes it.
 
 **Split (honest).** *Detecting* "same subject, new value" is LLM/multis's job — not litectx's. What multis needs from litectx is the **mechanism** to act on that decision: replace a fact's text/meta in place, tenant-fenced.
 
@@ -84,7 +86,7 @@ update(id, { text?, meta?, expiresAt? }, scope)  // explicit in-place edit, fail
 
 ---
 
-## O1 — per-scope memory count  🟢
+## O1 — per-scope memory count  ✅ CONSUMED (litectx 0.23.0)
 
 **Need.** `/memory` and `/docs` want "you have **N** facts / **M** episodes here" without pulling every row. Today only global `store.count()` exists.
 
@@ -114,10 +116,12 @@ update(id, { text?, meta?, expiresAt? }, scope)  // explicit in-place edit, fail
 
 ---
 
-## multis status while OPEN (interim, non-blocking for the ladder)
+## multis status (M4 items resolved)
 
-The durable ladder (episode→fact promotion, `/remember`, `/forget`, relevance recall) **ships and is live** — increments 1+2 complete, validated against 0.21/0.22. What waits on **R3**:
-- `recent.json` is **KEPT** as the conversation thread (the agent loop replays it);
-- `/memory` shows the **recent conversation window** (honest kept data), not a durable-fact list — facts surface on demand via `recall_memory`.
+The durable ladder (episode→fact promotion, `/remember`, `/forget`, relevance recall) **ships and is live**, and all M4 memory-axis asks are now **consumed against the published artifacts**:
+- **R3 (0.23.0):** `recent.json` + the `ChatMemoryManager` window code are **DELETED** — the agent conversation thread and `/memory` source from `recentMemory({kind:['fact','episode']})` (homegrown memory store → zero, only the raw daily log remains);
+- **O1 (0.23.0):** `/memory` shows durable facts + recent episodes with a per-kind count header;
+- **R4 (0.23.0):** semantic/KNN recall on (`config.memory.semantic`, default on), tenant-fence proven under embeddings;
+- **W4 (0.24.0):** `/remember` runs a same-subject supersession judge — a restated fact overwrites in place (tenant-fenced upsert), fail-toward-keep.
 
-**multis is blocking the M4 *completion* (and the 0.18.0 cut) on R3** — per the customer contract, blocking on the litectx release IS the validation; multis will not bound/retain `recent.json` as a permanent workaround (that's the homegrown store M4 exists to delete). On delivery + validation against the **published** artifact, multis: points `/memory` at `recentMemory({kind:['fact','episode']})`, sources the agent history from episode-recency, **deletes `recent.json` + the `ChatMemoryManager` window code**, and consumes R4/W4/O1 as their pieces land. C1/C2 are consumed at M5.
+**Per-episode TTL was NOT delivered as a knob** — litectx clarified `expiresAt` is doc-axis only (episodes prune at a fixed 30-day window, facts durable until `forget`); multis **retired its homegrown 90/365 retention** rather than carry a 30d-interim, with durability provided by the promotion ladder. Per the customer contract, blocking on each litectx release WAS the validation — no `recent.json`, TTL, or supersede workaround ever shipped. **The 0.18.0 cut no longer waits on litectx** (the only remaining gate is the owner-driven live T4). C1/C2 are consumed at M5.

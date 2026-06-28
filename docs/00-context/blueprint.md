@@ -326,7 +326,7 @@ Message / exchange → append to daily log + write the episode (the conversation
               promotionSweep(scope)  (fire-and-forget, after a response):
                      │
                      ├─ promotionCandidates(threshold=10)  # episodes recalled ≥10× within
-                     │                                      # litectx's rolling 30-day window
+                     │                                      # the episode window (episode_window_days, default 90)
                      │
                      └─ for each hot candidate: copy episode text VERBATIM → fact (by:'agent')
                             (re-sweep UPSERTS the same fact id — no duplicates)
@@ -344,13 +344,23 @@ window (agent msg history)  →  recentMemory(scope, {kind:'episode'})  # newest
 
 | What | Default | Config key | Cleanup |
 |------|---------|------------|---------|
-| Episodes | 90 days (admin 365d) | `memory.retention_days` / `admin_retention_days` | Episode `expiresAt`; litectx `purge()` reclaims expired rows |
+| Episodes | ~90 days (configurable) | `memory.episode_window_days` (default 90) | litectx self-prunes on the rolling window (litectx 0.25.0 `episodeWindowDays`); the **same** window also gates promotion-eligibility (one coupled clock). Durability is promotion-to-fact, not the timer |
 | Facts | Permanent | — | Promoted/`/remember`'d facts don't expire (drop them with `/forget`) |
 | Daily logs | 30 days | `memory.log_retention_days` | Delete old `log/YYYY-MM-DD.md` files |
 
 ### Promotion (no capture skill, no LLM)
 
-Since M4 there is **no LLM capture/summarize step** and no human-written `capture.md`. Durable memory is earned by use: every exchange is an `episode`; `promotionSweep` copies an episode **verbatim** to a `fact` once it's been recalled ≥`promote_threshold` (10) times within litectx's rolling 30-day window. `/remember` writes a `fact` directly. litectx owns ranking (BM25; multis runs embeddings-off), decay, and retention — multis only writes episodes/facts and reads them back.
+Since M4 there is **no LLM capture/summarize step** and no human-written `capture.md`. Durable memory is earned by use: every exchange is an `episode`; `promotionSweep` copies an episode **verbatim** to a `fact` once it's been recalled ≥`promote_threshold` (10) times within the episode window (`memory.episode_window_days`, default 90 — litectx 0.25.0; the window is BOTH retention and promotion-eligibility, one coupled clock) — an episode that never gets that hot simply prunes at the window edge (durability lives in the fact tier, not in the episode timer). `/remember` writes a `fact` directly, and a restated same-subject note **supersedes** the prior fact in place rather than piling up a contradiction (an LLM judge picks the fact to overwrite; tenant-fenced, fail-toward-keep — see Memory supersession below). litectx owns ranking (BM25 + optional KNN when `memory.semantic` is on, the default), decay, and retention — multis only writes episodes/facts and reads them back.
+
+### Memory supersession (W4 — restated facts update in place)
+
+litectx 0.24.0 makes `remember(id, …)` a **tenant-fenced upsert by `(scope, id)`**: re-asserting the same id under the same scope replaces the value in place; the same id under another scope is a separate row. litectx delivers the keyed write; deciding *"this new fact restates-and-updates an existing one"* is multis's job (`src/memory/supersede.js`). On every `/remember` (both the slash app-verb and the LLM `remember` tool flow through `rememberWithSupersede`):
+
+1. Recall the most-relevant existing facts for this tenant (`factCandidates`, scope-fenced, `log:false` so the check doesn't inflate the use signal).
+2. An LLM judge (`memory.supersede`, default on; `memory.supersede_candidates`, default 5) decides whether the note updates the **same attribute of the same subject** as one candidate (a moved deadline, a corrected detail) → that fact's id; or is a **distinct** fact → `NONE`.
+3. Write under the chosen id (overwrite) or a fresh id (new fact).
+
+Two invariants bound the risk: **fail toward keeping** — any uncertainty, a hallucinated/out-of-range choice, an LLM error, no provider, or `supersede:false` all degrade to a plain new-fact write (a false-merge that overwrites a still-true fact is the worst outcome, so ambiguity never destroys); and **scope-fenced blast radius** — candidates come from a scope-bound recall, so even a wrong merge can only touch this tenant's own memory, never another's. The judge's quality is characterized by a real-LLM POC (12/12, 0 false-merge on the canonical update/distinct cases incl. same-person-different-attribute and different-subject-same-attribute); its safety wrapper is unit-tested deterministically.
 
 ### Memory in LLM calls
 
@@ -792,9 +802,11 @@ All behavioral settings are configurable. Sane defaults applied when missing.
   "memory": {
     "recent_window": 20,
     "promote_threshold": 10,
-    "retention_days": 90,
-    "admin_retention_days": 365,
-    "log_retention_days": 30
+    "episode_window_days": 90,
+    "log_retention_days": 30,
+    "semantic": true,
+    "supersede": true,
+    "supersede_candidates": 5
   },
   "security": {
     "pin_hash": "...",
