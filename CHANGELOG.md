@@ -4,6 +4,8 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-07-04
+
 ### Added — long, tool-heavy conversations stay coherent and stop ballooning your token cost (M5)
 
 When the assistant works a request that chains several tool calls — searching your laptop, reading files, searching again — the running conversation used to grow with every step and get sent to the model in full each round, driving up latency and cost with no ceiling. It's now **budget-fitted**: each round the transcript sent to the model is trimmed to a token budget (`memory.context_budget`, default 24000), always keeping your question and the most recent turns and dropping the oldest middle history, and never splitting a tool call from its result. A normal chat is far under the budget so nothing changes; the fit only engages when a turn actually grows large. Set `memory.context_budget` to `0` to disable (send the full history).
