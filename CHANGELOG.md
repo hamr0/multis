@@ -4,6 +4,12 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+## [0.19.1] — 2026-07-04
+
+### Fixed — a fresh `npm install -g multis` can now run `multis init`
+
+The published package was missing the default-config template it copies on first run. `.npmignore` excluded `.multis-template/`, but `multis init` reads `config.json`, `governance.json`, and `tools.json` from that directory to seed `~/.multis/` — so a brand-new global install would fail with `ENOENT` at first launch. The template now ships in the tarball (55 files, up from 52). This was pre-existing since the first publish, not a 0.19.0 regression; existing installs were unaffected (they already had a seeded config). No code change — packaging manifest only.
+
 ## [0.19.0] — 2026-07-04
 
 ### Added — long, tool-heavy conversations stay coherent and stop ballooning your token cost (M5)

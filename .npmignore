@@ -3,7 +3,6 @@
 .aurora/
 .idea/
 .vscode/
-.multis-template/
 .beeper-storage/
 test/
 docs/
