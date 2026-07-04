@@ -137,6 +137,7 @@ describe('loadConfig — default merging', () => {
     // W4 supersession knobs (no retention_days/admin_retention_days — episodes have no per-row TTL)
     assert.strictEqual(config.memory.supersede, true);
     assert.strictEqual(config.memory.supersede_candidates, 5);
+    assert.strictEqual(config.memory.context_budget, 24000); // M5 conversation budget-fit
   });
 
   it('preserves custom memory values', () => {

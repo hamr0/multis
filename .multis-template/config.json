@@ -51,7 +51,8 @@
     "log_retention_days": 30,
     "semantic": true,
     "supersede": true,
-    "supersede_candidates": 5
+    "supersede_candidates": 5,
+    "context_budget": 24000
   },
   "documents": {
     "maxSize": 10485760,

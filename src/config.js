@@ -273,6 +273,20 @@ function loadConfig() {
     // this tenant's own memory). A judge error/uncertainty falls back to a new fact (never destroys).
     supersede: true,
     supersede_candidates: 5,
+    // M5 context-engineering — token budget for the conversation window sent to the model each agent
+    // round. litectx's `assemble` (via bare-agent's Loop hook) fits the running transcript to this many
+    // tokens, recency-anchored: it always keeps the system prompt + the user's task (auto-pinned) and the
+    // newest turns, never splits a tool-call/result pair, and drops OLDEST history first when a turn grows
+    // past budget (e.g. a tool-heavy loop accumulating large results). Generous by design — a normal chat
+    // (recent_window turns) is far under it, so assemble is a no-op until a turn actually balloons. Set 0
+    // / null to disable (send full context, pre-M5 behavior). Fail-open: an assemble error sends full
+    // context, never halts. Does NOT touch the relevance-ranked doc/memory injection (top-5, unbudgeted).
+    // FLOOR (live-verified 2026-07-04): must comfortably exceed ONE turn's tool working set — up to
+    // max_tool_rounds tool results, each ≤ MAX_OUTPUT(4000 chars ≈ 1000 tok) → ~5-6k here. Set it below
+    // that and the model loses its own tool results mid-turn, keeps re-searching, and hits the round cap
+    // (a silent "too many tool steps" halt). Default 24000 is generous on purpose: at current caps the
+    // transcript tops out ~12-15k so it's a dormant safety net, and a LOW default would be a footgun.
+    context_budget: 24000,
     ...config.memory
   };
 

@@ -13,7 +13,7 @@ const { detectInjection, logInjectionAttempt } = require('../security/injection'
 const { buildToolRegistry, getToolsForUser, loadToolsConfig } = require('../tools/registry');
 const { adaptTools } = require('../tools/adapter');
 const { getPlatform } = require('../tools/platform');
-const { Loop, Retry, CircuitBreaker, HaltError } = require('bare-agent');
+const { Loop, Retry, CircuitBreaker, HaltError, unitAssembler } = require('bare-agent');
 const { getScheduler, parseRemind, parseCron, formatJob } = require('./scheduler');
 const { createGate } = require('../governance/gate');
 const { createHumanPrompt, createCeremonyPrompt, createVerifyPin } = require('../governance/human-channel');
@@ -1285,6 +1285,25 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
   // catch like every other seam, so the Loop exits cleanly on 'halt:ceremony-parked'
   // with no onToolResult shim. onToolResult is now just bareguard's gate.record.
 
+  // M5 context-engineering — budget-fit the running transcript each round via litectx's `assemble`
+  // (bare-agent's unitAssembler adapts the units verb to the Loop's msgs-level seam). Keeps the newest
+  // turns + the auto-pinned system/task within config.memory.context_budget tokens, drops oldest history
+  // first, never splits a tool-call/result bundle. Only wired when a budget is set (0/null → full
+  // context, pre-M5 behavior). The hook is a non-destructive VIEW (result.msgs stays complete, so episode
+  // recording is unaffected) and fail-open (an assemble fault sends full context, never halts).
+  const contextBudget = config?.memory?.context_budget;
+  const assemble = contextBudget
+    ? unitAssembler(async (units) => {
+        const r = await context.assembleUnits(units, { budget: contextBudget });
+        // Silent on a normal turn (nothing dropped); logs only when budget pressure actually engages —
+        // an ops signal that a turn grew past context_budget and old history was shed to fit.
+        if (r.dropped.length) {
+          console.error(`[context] budget-fit: shed ${r.dropped.length} of ${units.length} units → ${r.tokens} tok (budget ${contextBudget})`);
+        }
+        return r;
+      })
+    : null;
+
   // "Always ask" confirms (e.g. before every exec) are governed by bareguard's
   // flags primitive inside `policy`, routed through the single humanChannel —
   // no separate Checkpoint. governance = bareguard, one path.
@@ -1293,6 +1312,7 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
     system,
     retry,
     policy,
+    assemble,
     onLlmResult,
     onToolResult,
     throwOnError: false,

@@ -30,6 +30,7 @@ let _initP = null;
 let _bounds = {};
 let _GLOBAL = null;
 let _memSeq = 0;
+let _assemble = null;  // litectx's pure `assemble(units, ctx)` verb (M5 budget-fit), captured at init
 
 /**
  * Map a multis-native scope → the litectx scope value for a `scoped()` handle.
@@ -57,8 +58,9 @@ async function init(opts = {}) {
   if (_ctx) return _ctx;
   if (_initP) return _initP;
   _initP = (async () => {
-    const { LiteCtx, GLOBAL } = await import('litectx');
+    const { LiteCtx, GLOBAL, assemble } = await import('litectx');
     _GLOBAL = GLOBAL;
+    _assemble = assemble;  // M5: pure budget-fit verb (no instance/scope needed) — exposed via assembleUnits()
     const dataDir = path.dirname(PATHS.db());        // ~/.multis/data
     const root = path.join(dataDir, 'ctx');           // litectx root (inert: multis never index()-es a repo)
     const dbPath = path.join(dataDir, 'litectx.db');  // own DB
@@ -83,6 +85,22 @@ async function init(opts = {}) {
 function ctx() {
   if (!_ctx) throw new Error('context: call init() at startup before use');
   return _ctx;
+}
+
+/**
+ * M5 context-engineering — litectx's `assemble(units, ctx)` budget-fit verb, surfaced through the one
+ * module that imports litectx. Pure (no LiteCtx instance/scope): fits neutral transcript `units` to
+ * `ctx.budget` tokens, recency-anchored, keeping `pinned`/`atomic` invariants and dropping oldest-first.
+ * bare-agent's `unitAssembler` wraps this into the Loop's msgs-level `assemble(msgs, ctx)` seam. Throws if
+ * called before init() (the dynamic import hasn't captured it yet) — but the Loop hook is fail-open, so a
+ * throw degrades to sending full context, never a halt.
+ * @param {Array<object>} units  neutral units (oldest → newest)
+ * @param {{budget?:number, task?:string}} [assembleCtx]
+ * @returns {Promise<{units:Array<object>, dropped:Array<{id:string,reason:string}>, tokens:number}>}
+ */
+function assembleUnits(units, assembleCtx) {
+  if (!_assemble) throw new Error('context: call init() before assembleUnits()');
+  return _assemble(units, assembleCtx);
 }
 
 /** Set the untrusted-input bounds applied to every ingest (from config.documents). */
@@ -283,4 +301,6 @@ module.exports = {
   // M4 native memory ladder
   rememberEpisode, rememberFact, factCandidates, recallMemory, promotionSweep, forgetMemory,
   recentMemory, countMemory,
+  // M5 context-engineering
+  assembleUnits,
 };

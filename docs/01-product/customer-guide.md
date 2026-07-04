@@ -648,6 +648,10 @@ In business mode each customer is rate-limited so a contact stuck in a loop can'
 
 `llm.max_tool_rounds` (default 5) caps how many tool calls the assistant can chain in a single reply, so it can't run away. Adjust in config.
 
+`memory.context_budget` (default 24000 tokens) caps how much **conversation** is sent to the model on each round. On a long, tool-heavy request the back-and-forth can pile up (each tool result adds text); this keeps it within budget by always keeping your question and the most recent turns and dropping the oldest middle history — so a long session stays coherent and doesn't balloon your token cost. A normal chat is far under the budget, so this does nothing until a turn actually grows large. Set it to `0` to disable (send the full history). It does not affect the documents or saved notes the assistant retrieves for a question — those are always the top few most-relevant.
+
+> **Don't set this too low.** It must comfortably exceed what a single request's tool calls produce (up to `llm.max_tool_rounds` results, each capped at ~4000 characters). If the budget is smaller than that, the assistant loses the results of its own searches mid-task, keeps retrying, and stops with "too many tool steps." A few thousand tokens is the practical minimum; the default 24000 is deliberately generous.
+
 ---
 
 ## 15. Scheduling

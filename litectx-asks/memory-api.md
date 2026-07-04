@@ -1,7 +1,7 @@
 # litectx ask — multis memory API (consolidated)
 
 **Filed:** 2026-06-27 · **Modules:** M4 (litectx memory) + M5 (context-engineering)
-**Status:** ✅ M4 items RESOLVED — R3 + R4 + O1 (litectx 0.23.0) + W4 (litectx 0.24.0) DELIVERED + VALIDATED + CONSUMED (2026-06-27). C1/C2 remain OPEN for M5. (Note: at 0.24.0 `expiresAt` was doc-axis only — episodes 30d-prune, facts durable — so multis retired its 90/365 retention. **Configurable episode window — DELIVERED + CONSUMED (litectx 0.25.0, 2026-06-28).** litectx shipped `episodeWindowDays` (a `LiteCtx` constructor option, default 30) — an **instance-level** window (not the per-episode `expiresAt` first imagined) that drives BOTH the write-time prune AND the promotion floor (one coupled clock). multis threads `config.memory.episode_window_days` (**default 90, all chats**) into `new LiteCtx({ episodeWindowDays })`. Owner decision 2026-06-28: **one knob, 90d for everyone** (not the per-role 90/365 split, not a per-customer prune) — the window already bounds idle chats (an inactive chat's episodes age out), and `/forget` stays the manual per-chat clear, so multis adds **no** inactivity-autoprune logic. Buys long-tail continuity for sporadically-used chats; durability stays the promotion ladder. ⚠ Coupling: 90d also lengthens the promotion window (one window, no retain-90/promote-30 split).)
+**Status:** ✅ M4 items RESOLVED — R3 + R4 + O1 (litectx 0.23.0) + W4 (litectx 0.24.0) DELIVERED + VALIDATED + CONSUMED (2026-06-27). **C1/C2 also DELIVERED (litectx 0.25.0 `assemble`/`summaryWindow` + bare-agent 0.19.0 adapter) + POC-VALIDATED 2026-06-28 — M5 is wiring-only, no lib blocker** (was previously tracked OPEN-for-M5; corrected after probing the installed artifacts). (Note: at 0.24.0 `expiresAt` was doc-axis only — episodes 30d-prune, facts durable — so multis retired its 90/365 retention. **Configurable episode window — DELIVERED + CONSUMED (litectx 0.25.0, 2026-06-28).** litectx shipped `episodeWindowDays` (a `LiteCtx` constructor option, default 30) — an **instance-level** window (not the per-episode `expiresAt` first imagined) that drives BOTH the write-time prune AND the promotion floor (one coupled clock). multis threads `config.memory.episode_window_days` (**default 90, all chats**) into `new LiteCtx({ episodeWindowDays })`. Owner decision 2026-06-28: **one knob, 90d for everyone** (not the per-role 90/365 split, not a per-customer prune) — the window already bounds idle chats (an inactive chat's episodes age out), and `/forget` stays the manual per-chat clear, so multis adds **no** inactivity-autoprune logic. Buys long-tail continuity for sporadically-used chats; durability stays the promotion ladder. ⚠ Coupling: 90d also lengthens the promotion window (one window, no retain-90/promote-30 split).)
 **Found against:** published litectx **0.22.0** (= npm latest at filing)
 **Supersedes:** `recent-memory-by-scope.md` (folded in as **§R3**)
 
@@ -20,7 +20,7 @@ One process-wide `LiteCtx`; tenant-fenced on `mem_scope.owner`; a bound `scoped(
 | **C1** | Budget-fit `assemble` on the memory axis | 🔵 **M5** — specced now for coherence; multis validates at M5 |
 | **C2** | `summaryWindow` (compress long chats) | 🔵 **M5** — same |
 
-litectx may deliver in any order, but **R3 unblocks the most** (it's the last piece of "multis keeps no homegrown memory store"). C1/C2 are specced now only so the memory API is designed whole — multis can't *validate* them until M5, so no rush to build ahead of that.
+litectx may deliver in any order, but **R3 unblocks the most** (it's the last piece of "multis keeps no homegrown memory store"). C1/C2 are specced now only so the memory API is designed whole — multis can't *validate* them until M5, so no rush to build ahead of that. *(UPDATE 2026-06-28: C1/C2 turned out to already be DELIVERED in litectx 0.25.0 + bare-agent 0.19.0 — both already deps — and are now POC-validated against the installed artifacts; M5 is wiring-only. See the resolved C1/C2 sections.)*
 
 ---
 
@@ -96,7 +96,7 @@ update(id, { text?, meta?, expiresAt? }, scope)  // explicit in-place edit, fail
 
 ---
 
-## C1 — budget-fit `assemble` on the memory axis  🔵 M5
+## C1 — budget-fit `assemble` on the memory axis  ✅ DELIVERED (litectx 0.25.0 + bare-agent 0.19.0) — VALIDATED 2026-06-28
 
 **Need.** M5 gives multis the budget-fitting it never had — fit recalled memory + doc chunks + conversation into a token budget, **recency-preserving**, without ad-hoc prompt stuffing.
 
@@ -104,15 +104,19 @@ update(id, { text?, meta?, expiresAt? }, scope)  // explicit in-place edit, fail
 
 **Acceptance (at M5).** A long synthetic chat for tenant A assembles within a set token budget; the **newest** episodes/facts survive trimming, the oldest drop; no B content appears; an atomic exchange is never half-included.
 
+**RESOLVED — `assemble(units, ctx)` shipped in litectx 0.25.0 (the SAME release as `episodeWindowDays`, consumed for M4) and the bare-agent adapter (`unitAssembler`/`toUnits`/`fromUnits`/`harvestKey`, `Loop({assemble})`) in 0.19.0.** It is **unit-grammar**, not memory-axis-specific — `assemble` fits any `Unit[]` (transcript turns AND injected `fact`/`episode`/`doc` units carry a `kind`), so "widen to memory" is moot: tenant-fencing stays multis's job at recall time (`scoped(tenant).recall`), and the assembler only budget-fits the already-fenced units. POC against the installed artifacts (`scratchpad/m5-poc/poc.mjs`, 17/17 failable): recency-anchored (newest survives, oldest drop — same units, only budget changed), atomic groups never split, `pinned` never dropped (neg-ctrl), original order preserved (cache-stable). **M5 is wiring-only — no litectx release blocks it.**
+
 ---
 
-## C2 — `summaryWindow` (compress long chats)  🔵 M5
+## C2 — `summaryWindow` (compress long chats)  ✅ DELIVERED (litectx 0.25.0) — VALIDATED 2026-06-28
 
 **Need.** For chats longer than the budget, a rolling **compressed** summary of older turns so continuity survives beyond the raw window — the durable counterpart to R3's recent slice.
 
 **Gap / confirm.** The planned `summaryWindow` — memory-axis aware, tenant-fenced, and **does it write its summary back as a litectx unit** (so it's itself recallable/forgettable under the same fence) rather than an opaque blob multis has to store?
 
 **Acceptance (at M5).** Past the window, a tenant-A summary captures older turns, is fenced to A, recallable, and cleared by `forget(scope:A)`.
+
+**RESOLVED — `summaryWindow(units, ctx)` shipped in litectx 0.25.0.** Shape differs from the "write-back-as-a-litectx-unit" the ask imagined, and the difference is *better* for multis: it's a **read-path** policy (keep last-N verbatim, roll older turns into ONE synthetic summary unit spliced as the freshest content, then `assemble`-fit). **litectx never calls a model** — the HOST supplies `ctx.summarize` (a provider-bound fn), so multis owns the LLM call (consistent with `simpleGenerate`). Engaged ONLY under budget pressure; folded turns reported as `dropped reason:"summarized"` (restorable by id). POC (`scratchpad/m5-poc/poc.mjs`): no-pressure → summarizer NOT called (plain assemble); under-pressure → called once, synthetic unit spliced, last-N kept verbatim; unwired (no `summarize`) → never invents a summary (neg-ctrl). The summary is **not** auto-persisted to a tenant scope — if multis wants it recallable/forgettable it `remember`s it under `scoped(tenant)` itself (a deliberate M5 decision, not a lib gap).
 
 ---
 
@@ -124,4 +128,4 @@ The durable ladder (episode→fact promotion, `/remember`, `/forget`, relevance 
 - **R4 (0.23.0):** semantic/KNN recall on (`config.memory.semantic`, default on), tenant-fence proven under embeddings;
 - **W4 (0.24.0):** `/remember` runs a same-subject supersession judge — a restated fact overwrites in place (tenant-fenced upsert), fail-toward-keep.
 
-**Per-episode TTL was NOT delivered as a knob** — litectx clarified `expiresAt` is doc-axis only (episodes prune at a fixed 30-day window, facts durable until `forget`); multis **retired its homegrown 90/365 retention** rather than carry a 30d-interim, with durability provided by the promotion ladder. Per the customer contract, blocking on each litectx release WAS the validation — no `recent.json`, TTL, or supersede workaround ever shipped. **The 0.18.0 cut no longer waits on litectx** (the only remaining gate is the owner-driven live T4). C1/C2 are consumed at M5.
+**Per-episode TTL was NOT delivered as a knob** — litectx clarified `expiresAt` is doc-axis only (episodes prune at a fixed 30-day window, facts durable until `forget`); multis **retired its homegrown 90/365 retention** rather than carry a 30d-interim, with durability provided by the promotion ladder. Per the customer contract, blocking on each litectx release WAS the validation — no `recent.json`, TTL, or supersede workaround ever shipped. **The 0.18.0 cut no longer waits on litectx** (the only remaining gate is the owner-driven live T4). **C1/C2 — DELIVERED in litectx 0.25.0 + bare-agent 0.19.0 (both already deps), POC-validated 2026-06-28 against the installed artifacts; M5 is a multis wiring job with NO lib blocker** (see the resolved C1/C2 sections above).
