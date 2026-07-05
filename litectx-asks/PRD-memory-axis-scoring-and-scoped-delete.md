@@ -1,9 +1,11 @@
 # litectx PRD — Memory-axis: surface semantic score on recall + scoped delete-by-id
 
 **Filed:** 2026-07-05 · **Consumer:** multis (M13 supersede pre-check, M14 targeted `/forget`)
-**Found against:** installed litectx **0.25.0** (npm `latest`, current multis dep)
-**Suggested target:** litectx **0.26.0** (both are additive — no breaking change)
+**Found against:** installed litectx **0.25.0** (multis dep at filing)
+**Target:** litectx **0.27.0** (0.26.x already shipped `enumerate`; both features here are additive — no breaking change) — *litectx retargeted after source-level validation, 2026-07-05.*
 **Priority:** 🟢 LOW — multis ships both consumer features TODAY on documented workarounds; this PRD lets multis delete the workarounds. **Neither blocks a multis release.**
+
+> **litectx source-validation verdict (2026-07-05):** both VALID at source level; neither is POC-shaped (correctness-only mechanisms, no new empirical claim to falsify). Feature A: cosine is genuinely computed-and-discarded (`store.js:1757` knn ranking; `index.js:641` `_rankKind` blend) → surfaced as a **raw, unblessed** value with **no threshold/quality label** (see posture note below). Feature B: mirrors W4's `memKey(owner,id)` fence exactly — the stronger structural fix. Field name agreed as **`cosine`** (not `semanticScore`, which re-overloads the BM25 `score`).
 
 > Consolidates two previously-filed asks — `recall-semantic-score.md` (M13) and `scoped-forget-by-id.md` (M14) — into one developer-ready spec. litectx owns the final API surface (Principle 8); the shapes below are the need, not a mandate. Line references (`src/index.js:NNN`) are as observed in 0.25.0 — verify against current source.
 
@@ -53,17 +55,20 @@ const hits = await view.recall(note, { kind: 'fact', n: 5, body: true });
 //   score stays exactly as-is (blended/BM25) — meaning unchanged, back-compat
 ```
 
-Any equivalent surface is acceptable: a `semanticScore` field, or a `recall(…, { withScores: true })` option — as long as a consumer reads the **query↔hit cosine without re-embedding**.
+Field name **`cosine`** (agreed — `semanticScore` would re-overload the BM25 `score`). Surface it **raw and unblessed**, present per-hit by default in embeddings mode — as long as a consumer reads the **query↔hit cosine without re-embedding**.
+
+> **Posture (litectx doctrine — "surface the column, never a quality label"):** litectx exposes the raw cosine and does **NOT** claim a threshold cleanly separates "related" from "unrelated." The measured bands **overlap** (paraphrase 0.44–0.86, unrelated 0.06–0.44 — touching at ~0.44): top-cosine separates in *aggregate* (good AUC) but has **no usable per-query threshold**. **The consumer (multis) owns the threshold and its false-skip risk.** multis accepts this: M13's cut is 0.30 — *below* the paraphrase floor — so its one-sided gate only ever skips an *unrelated* save (worst case: a wasted judge call), never a real supersession. A consumer that picked a cut ≥0.44 could wrongly skip a paraphrase; that's the consumer's call, not litectx's guarantee.
 
 ### Acceptance criteria (failable)
 
-1. Semantic recall of a **paraphrased** restatement (no shared tokens, e.g. `"I now weigh 78kg"` vs stored `"my weight is 80kg"`) returns a top hit whose surfaced `cosine` is **high** (≳0.5) — where `hit.score` today is `0.0`. *(Proves it's the semantic value, not BM25.)*
-2. Recall of an **unrelated** note returns a top-hit `cosine` that is **low** (≲0.35), so a fixed threshold separates the two classes.
-3. In **BM25-only** mode (no embedder loaded) the field is **absent/`null`** — no crash, no surprise value.
-4. The surfaced value matches an independent `cosine(embed(query), embed(hit.body))` to within float tolerance — i.e. it IS the semantic similarity, not a re-normalized blend.
+1. Semantic recall of a **paraphrased** restatement (no shared tokens, e.g. `"I now weigh 78kg"` vs stored `"my weight is 80kg"`) returns a top hit whose surfaced `cosine` is **materially positive** where `hit.score` today is `0.0`. *(Proves the surfaced value is the semantic similarity, not BM25 — the load-bearing check.)*
+2. For a **single** query, an **unrelated** note's `cosine` is **lower** than the paraphrase's — a *relative* ordering only. **No cross-query fixed-threshold claim** is asserted (the bands overlap across queries; litectx surfaces the raw value, the consumer sets any cut).
+3. In **BM25-only** mode (no embedder loaded / no qvec path) the field is **absent/`null`** — no crash, no surprise value. *(Satisfied by construction — the no-qvec path never computes a cosine.)*
+4. The surfaced value matches an independent `cosine(embed(query), embed(hit.body))` to within float tolerance — i.e. it IS the raw semantic similarity, not a re-normalized/min-max blend. *(litectx attaches the pre-min-max value, covering the `cand.length < 2` early-return uniformly.)*
 
 ### Non-goals / constraints
 - Do **not** change the meaning of `score` (back-compat — multis and others gate on it as-is).
+- Do **not** bless a separating threshold in docs — surface the raw `cosine` only; the consumer owns the cut.
 - No new required option — semantic mode should surface `cosine` by default; a `{ withScores }` opt-in is fine if perf demands it.
 
 ---
@@ -124,4 +129,4 @@ i.e. `{id}` (and ideally `{idPrefix}`) **combine with the tenant fence** instead
 | **Internal value already exists?** | Yes (KNN ranking cosine) | Partly (`forgetMemory` + owner fence exist separately) |
 | **multis absorption** | delete the re-embed loop, gate on `hit.cosine` | swap owner-blind `ctx.forget({id})` → `view.forget({id})` |
 
-Both are additive → a single **0.26.0** minor release. Ship either independently if one lands first.
+Both are additive → a single **0.27.0** minor release. Ship either independently if one lands first.
