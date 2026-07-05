@@ -273,6 +273,19 @@ function loadConfig() {
     // this tenant's own memory). A judge error/uncertainty falls back to a new fact (never destroys).
     supersede: true,
     supersede_candidates: 5,
+    // M13: cosine floor for the supersede pre-check. Before the judge runs, the closest existing fact's
+    // semantic similarity to the new note is checked; below this → definitely a NEW subject → the LLM
+    // judge is SKIPPED (it could only say NEW), saving a round-trip on the common "unrelated note" save.
+    // Only active in semantic mode (needs the embedder). Conservative by design (broad POC: lowest real
+    // restatement ~0.44, highest unrelated ~0.44 tails, bulk well-separated) — a false-skip writes a
+    // duplicate, so bias LOW: too-low only costs saved calls, too-high risks a missed update. Decisions
+    // are logged (audit action:'supersede_precheck') so the floor can be tuned on real saves.
+    supersede_threshold: 0.30,
+    // M14: cosine floor for a targeted `/forget <topic>` match. Semantic recall's KNN always returns a
+    // nearest note, so an unrelated topic would otherwise offer to delete a random note; a candidate is
+    // shown only if it's a keyword hit OR its similarity clears this. Measured gap (broad POC): spurious
+    // topics ≤0.17, genuine ≥0.38 — 0.30 sits in the middle. Only active in semantic mode.
+    forget_match_threshold: 0.30,
     // M5 context-engineering — token budget for the conversation window sent to the model each agent
     // round. litectx's `assemble` (via bare-agent's Loop hook) fits the running transcript to this many
     // tokens, recency-anchored: it always keeps the system prompt + the user's task (auto-pinned) and the

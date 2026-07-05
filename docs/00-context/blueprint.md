@@ -383,7 +383,7 @@ Messages:
 | Command | What it does |
 |---------|-------------|
 | `/memory` | List this tenant's durable facts + recent episodes (newest-first, via `recentMemory`) with a per-kind `count` |
-| `/forget` | Clear this tenant's facts + episodes (tenant-fenced) — that's the thread too; raw logs kept |
+| `/forget <topic>` | Remove matching notes (pick if several); cascades a promoted fact to its source episode; `/forget all` clears the tenant (facts + episodes = the thread too). Tenant-fenced; raw logs kept |
 | `/remember <note>` | Write a durable `fact` (`by:'human'`, top trust, instant) |
 
 ### recall_memory tool

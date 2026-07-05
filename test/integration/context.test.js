@@ -345,6 +345,52 @@ describe('context wrapper — native memory ladder (M4)', () => {
     );
   });
 
+  // --- targeted forget by id (M14): precise delete + promotion-root cascade + tenant safety ---
+
+  it('forgetMemoryById removes ONE fact by id, leaving the tenant\'s other facts', async () => {
+    const S = 'user:fbid-one';
+    await ctx2.rememberFact(S, 'my wedding is on Monday', { by: 'human', id: 'fact:wed' });
+    await ctx2.rememberFact(S, 'I drive a Toyota', { by: 'human', id: 'fact:car' });
+    const removed = await ctx2.forgetMemoryById(S, 'fact:wed');
+    assert.strictEqual(removed, 1, 'exactly the one row');
+    assert.strictEqual(await ctx2.countMemory(S, { kind: 'fact' }), 1, 'the other fact survives');
+    const left = (await ctx2.recallMemory('Toyota', { scope: S, n: 5 })).map((h) => h.content).join('\n');
+    assert.match(left, /Toyota/, 'the untargeted fact is still there');
+  });
+
+  it('forgetMemoryById CASCADES a promoted fact to its source episode — no rebound', async () => {
+    const S = 'user:fbid-cascade';
+    // an episode lands, then gets promoted exactly as promotionSweep does: fact id = `fact-<episodePath>`.
+    await ctx2.rememberEpisode(S, 'we talked about the wedding venue and the date');
+    const [ep] = await ctx2.recentMemory(S, { kind: ['episode'], n: 1 });
+    const epId = ep.name;                                   // the real minted episode id/path
+    await ctx2.rememberFact(S, 'wedding venue booked', { by: 'agent', id: `fact-${epId}` });
+    assert.strictEqual(await ctx2.countMemory(S, { kind: 'episode' }), 1);
+    assert.strictEqual(await ctx2.countMemory(S, { kind: 'fact' }), 1);
+
+    const removed = await ctx2.forgetMemoryById(S, `fact-${epId}`);
+    assert.ok(removed >= 2, 'removed the promoted fact AND its source episode');
+    assert.strictEqual(await ctx2.countMemory(S, { kind: 'fact' }), 0, 'promoted fact gone');
+    assert.strictEqual(await ctx2.countMemory(S, { kind: 'episode' }), 0, 'source episode gone → cannot re-promote (rebound closed)');
+  });
+
+  it('forgetMemoryById refuses a foreign id (not in scope) and leaves sibling tenants intact', async () => {
+    // Realistic ids are process-unique (memId = mem-<ts>-<seq>), so two tenants never share one. The
+    // scoped get() is the boundary: an id not present in the caller's scope → null → refused (0), never
+    // reaches the owner-blind base delete. (The residual shared-id blind-delete is a litectx gap — a
+    // scoped delete-by-id would close it; filed as an ask. multis is safe today via id-uniqueness.)
+    await ctx2.rememberFact('user:fbid-a', 'A note about badges', { by: 'human', id: 'fact:a-badge' });
+    await ctx2.rememberFact('user:fbid-b', 'B note about lockers', { by: 'human', id: 'fact:b-locker' });
+    // B cannot target an id outside its scope — scoped get fences it → refused, A untouched.
+    assert.strictEqual(await ctx2.forgetMemoryById('user:fbid-b', 'fact:a-badge'), 0, 'a foreign id is refused, not blind-deleted');
+    const aStill = (await ctx2.recallMemory('badges', { scope: 'user:fbid-a', n: 5 })).map((h) => h.content).join('\n');
+    assert.match(aStill, /badges/, 'tenant A untouched by B\'s attempt [security neg control]');
+    // A forgets its OWN fact by id → gone; B (distinct id) survives.
+    assert.strictEqual(await ctx2.forgetMemoryById('user:fbid-a', 'fact:a-badge'), 1, 'own id deletes');
+    const bStill = (await ctx2.recallMemory('lockers', { scope: 'user:fbid-b', n: 5 })).map((h) => h.content).join('\n');
+    assert.match(bStill, /lockers/, 'sibling tenant B survives A\'s targeted forget');
+  });
+
   // --- W4 supersession mechanic (litectx 0.24.0 (scope,id) upsert) ---
 
   it('rememberFact with an explicit id UPSERTS in place — a restated fact never piles up (W4)', async () => {

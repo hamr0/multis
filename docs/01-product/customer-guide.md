@@ -170,7 +170,7 @@ The wizard verifies connectivity by sending a test message before proceeding.
 
 ### Step 4: Set a PIN
 
-Optionally set a 4-6 digit PIN. It guards **destructive actions** before they run — a destructive shell command (`/exec rm …`), clearing a chat's memory (`/forget`), or turning a chat **off** (`/mode … off`). Benign actions (reads, `/index`, `/remember`, other mode changes) run without it. The PIN is hashed and stored locally. You can skip this and set one later with `/pin`.
+Optionally set a 4-6 digit PIN. It guards **destructive actions** before they run — a destructive shell command (`/exec rm …`), removing a note or clearing a chat's memory (`/forget <topic>` / `/forget all`), or turning a chat **off** (`/mode … off`). Benign actions (reads, `/index`, `/remember`, other mode changes) run without it. The PIN is hashed and stored locally. You can skip this and set one later with `/pin`.
 
 After completing the wizard, you'll see a summary:
 
@@ -306,7 +306,7 @@ Set this up with `multis init` option 3 (Business chatbot). A Telegram bot can't
 | `/status` | Bot version, platform, your role, LLM provider |
 | `/memory` | List this chat's durable facts + recent episodes (newest first) |
 | `/remember <note>` | Save a durable note to this chat's memory |
-| `/forget` | Clear this chat's memory and conversation window |
+| `/forget <topic>` | Remove specific matching notes (pick from a list if several); `/forget all` wipes the whole chat |
 | `/skills` | List available skills |
 | `/help` | Show available commands — grouped by intent (Ask / Remember / Schedule / Run / Manage) and filtered to your role; send `/help <command>` (e.g. `/help mode`) for one command's details |
 | *(plain text)* | Drives the full tool-using agent (`/ask`): searches your documents and, on your machine, will find/read files and run things directly rather than telling you to do it yourself |
@@ -529,12 +529,13 @@ Each chat has its own memory that persists across conversations.
 ```
 /remember Customer prefers email over phone    # Save a durable note instantly
 /memory                                        # List durable facts + recent episodes
-/forget                                        # Clear this chat's memory + conversation window
+/forget wedding                                # Remove just the notes about a topic (pick if several)
+/forget all                                    # Wipe this chat's memory + conversation window
 ```
 
 - **`/remember <note>`** saves a durable fact for this chat immediately — top trust, never expires. If your note **restates something it already knows** (a moved deadline, a corrected detail, a new weight/address), it **updates that fact in place** and tells you what it replaced (`Noted — updated your earlier note (was: …)`), so a wrong update is visible and you can correct it. Distinct facts are kept side by side.
 - **`/memory`** lists this chat's **durable facts and recent episodes**, newest-first, with a count of each. Recall also matches **meaning, not just keywords** — a reworded question still finds the right memory (semantic recall, on by default).
-- **`/forget`** wipes this chat's durable memory **and** its conversation window — a clean slate. It's tenant-scoped: it can only ever clear *this* chat, never another's, and never the shared knowledge base.
+- **`/forget <topic>`** removes just the notes matching that topic. One match → it confirms the note and asks your PIN; several → it lists them so you pick which; nothing relevant → it says so (and won't offer to delete an unrelated note). **`/forget all`** wipes this chat's durable memory **and** its conversation window — a clean slate, after a warning. Bare **`/forget`** just shows these options (it no longer erases anything by itself). Forgetting a note also removes the conversation that produced it, so it can't quietly come back. Always tenant-scoped: it can only ever clear *this* chat, never another's, and never the shared knowledge base.
 
 ### Automatic Memory
 
@@ -601,7 +602,7 @@ Restart after editing config: `multis restart`
 
 The PIN guards **destructive actions** by *what they do*, not by which command name you typed. An action is classified when it runs:
 - **Benign** — reads (`/read`), `/index`, `/remember`, `/status`, non-`off` mode changes, and benign shell (e.g. `ls`, `cat`) — run free.
-- **Destructive** — a destructive shell command (`rm <file>`, `rm -rf ./build`, `sudo`, `chmod`…) — *including* anything carrying destructive-intent words (`delete`, `drop`, `truncate`, `destroy`, `purge`, `revoke`, `force-push`) — plus clearing a chat's memory (`/forget`) or turning a chat **off** (`/mode … off`) — require the **PIN**.
+- **Destructive** — a destructive shell command (`rm <file>`, `rm -rf ./build`, `sudo`, `chmod`…) — *including* anything carrying destructive-intent words (`delete`, `drop`, `truncate`, `destroy`, `purge`, `revoke`, `force-push`) — plus removing a note or clearing a chat's memory (`/forget <topic>` / `/forget all`) or turning a chat **off** (`/mode … off`) — require the **PIN**.
 - **Catastrophic** — machine-wreckers (`rm -rf` of a root/home target, `dd` to a device, `mkfs`, fork bomb, `shutdown`) — are **hard-blocked**. They never run through the bot, with no PIN override; do those in a real terminal. (There's no legitimate reason to automate them, and it removes a footgun if the assistant is ever fed a malicious instruction.)
 
 When an action needs it, the bot asks for your PIN. After entering the correct PIN, your session is active for 24 hours (configurable).

@@ -138,3 +138,69 @@ describe('rememberWithSupersede', () => {
     assert.strictEqual(ix.calls.candidates[0].opts.n, 3);
   });
 });
+
+// M13 supersede pre-check — the cosine gate that skips the LLM judge for clearly-unrelated notes.
+// Candidates carry a `sim` field ONLY in semantic mode (the context wrapper attaches it). These lock
+// the gate's contract: below the threshold → NO LLM call (write NEW); at/above → the judge runs as
+// before; the threshold is config-tunable; and BM25-mode candidates (no `sim`) leave the judge intact.
+describe('rememberWithSupersede — M13 pre-check', () => {
+  // an LLM spy: records whether the judge was called, and answers UPDATE 1 if it ever is (so a missing
+  // skip would visibly overwrite — the test can't pass by accident).
+  const spyProvider = () => { const s = { called: false }; s.generate = async () => { s.called = true; return { text: 'UPDATE 1' }; }; return s; };
+  const makeIndexer = (candidates) => {
+    const calls = { fact: [] };
+    return { calls, factCandidates: async () => candidates, rememberFact: async (scope, note, opts) => { calls.fact.push({ scope, note, opts }); } };
+  };
+
+  it('closest fact BELOW threshold → skips the LLM entirely, writes a NEW fact, logs the skip', async () => {
+    const ix = makeIndexer([{ id: 'fact:a', text: 'my wedding is on Monday', sim: 0.12 }]);
+    const llm = spyProvider();
+    const logs = [];
+    const r = await rememberWithSupersede({ indexer: ix, provider: llm, scope: 'admin', note: 'the printer is out of ink', memCfg: {}, audit: (e) => logs.push(e) });
+    assert.strictEqual(llm.called, false, 'a note far from every fact never reaches the judge');
+    assert.deepStrictEqual(r, { id: null, superseded: false, supersededText: null }, 'written as a plain new fact');
+    assert.strictEqual(ix.calls.fact[0].opts.id, null);
+    assert.strictEqual(logs.length, 1);
+    assert.strictEqual(logs[0].decision, 'skip');
+    assert.strictEqual(logs[0].topSim, 0.12);
+  });
+
+  it('closest fact AT/ABOVE threshold → the judge runs (a real restatement is NOT skipped)', async () => {
+    // 0.49 = the paraphrased-update tail from the broad POC ("electrician" vs "plumber") — the exact
+    // case that MUST fall through, or M13 reintroduces the duplicate bug M4 fixed.
+    const ix = makeIndexer([{ id: 'fact:a', text: 'I work as a plumber', sim: 0.49 }]);
+    const llm = spyProvider();
+    const logs = [];
+    const r = await rememberWithSupersede({ indexer: ix, provider: llm, scope: 'admin', note: 'I am an electrician now', memCfg: {}, audit: (e) => logs.push(e) });
+    assert.strictEqual(llm.called, true, 'a close note reaches the judge');
+    assert.strictEqual(r.id, 'fact:a', 'the judge supersedes it');
+    assert.strictEqual(logs[0].decision, 'update');
+  });
+
+  it('uses the MAX sim across candidates — one close fact defeats the skip', async () => {
+    const ix = makeIndexer([
+      { id: 'fact:a', text: 'far thing', sim: 0.05 },
+      { id: 'fact:b', text: 'close thing', sim: 0.62 },
+    ]);
+    const llm = spyProvider();
+    await rememberWithSupersede({ indexer: ix, provider: llm, scope: 'admin', note: 'n', memCfg: {}, audit: () => {} });
+    assert.strictEqual(llm.called, true, 'the single close candidate forces the judge to run');
+  });
+
+  it('a custom supersede_threshold moves the gate', async () => {
+    const ix = makeIndexer([{ id: 'fact:a', text: 't', sim: 0.40 }]);
+    const llm = spyProvider();
+    // 0.40 < 0.55 → below a raised threshold → skip
+    await rememberWithSupersede({ indexer: ix, provider: llm, scope: 'admin', note: 'n', memCfg: { supersede_threshold: 0.55 }, audit: () => {} });
+    assert.strictEqual(llm.called, false, 'raising the threshold skips a formerly-judged note');
+  });
+
+  it('candidates WITHOUT sim (BM25-only mode) → pre-check inert, judge runs, nothing logged', async () => {
+    const ix = makeIndexer([{ id: 'fact:a', text: 'deadline Tuesday' }]); // no sim field
+    const llm = spyProvider();
+    const logs = [];
+    await rememberWithSupersede({ indexer: ix, provider: llm, scope: 'admin', note: 'deadline Friday', memCfg: {}, audit: (e) => logs.push(e) });
+    assert.strictEqual(llm.called, true, 'no sim → the pre-check cannot fire → the judge runs as before');
+    assert.strictEqual(logs.length, 0, 'no pre-check decision logged when inactive (BM25 path stays I/O-free)');
+  });
+});
