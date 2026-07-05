@@ -2,7 +2,7 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
-## [Unreleased]
+## [0.19.3] — 2026-07-05
 
 ### Added — saving a note skips an unnecessary AI call when it's clearly about something new (M13)
 
