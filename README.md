@@ -61,10 +61,21 @@ Document indexing from chats (drop a PDF in a Beeper conversation → your KB) r
 
 ## Quick start
 
+**Install globally** (recommended — no clone needed; requires Node ≥ 20):
+
 ```bash
+npm install -g multis
+multis init             # interactive setup wizard — platforms, LLM, PIN
+multis start            # run as a background daemon
+```
+
+**Or from source** (for development):
+
+```bash
+git clone https://github.com/hamr0/multis && cd multis
 npm install
 npx multis init         # interactive setup wizard — platforms, LLM, PIN
-multis start            # run as a background daemon
+npx multis start        # run as a background daemon
 ```
 
 Then message your bot `/help`. Full walkthrough — setup wizard, every command, troubleshooting — in the **[Customer Guide](docs/01-product/customer-guide.md)**.

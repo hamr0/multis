@@ -102,23 +102,22 @@ If you want zero data leaving your machine, use Ollama as your LLM provider. You
 
 ## 3. Installation
 
-```bash
-# Clone or download
-git clone https://github.com/youruser/multis.git
-cd multis
-
-# Install dependencies
-npm install
-
-# Run the setup wizard
-npx multis init
-```
-
-Or if installed globally:
+**Install globally** (recommended — no clone needed; requires Node ≥ 20):
 
 ```bash
 npm install -g multis
-multis init
+multis init             # interactive setup wizard
+multis start            # run as a background daemon
+```
+
+**Or from source** (for development):
+
+```bash
+git clone https://github.com/hamr0/multis.git
+cd multis
+npm install
+npx multis init         # interactive setup wizard
+npx multis start        # run as a background daemon
 ```
 
 ---
