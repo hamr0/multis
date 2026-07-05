@@ -378,7 +378,7 @@ We do not batch modules. One block at a time, each green on its own before the n
 | `src/memory/*` (recent.json → memory.md → FTS5 → ACT-R) | **litectx** | rip out, rebuild |
 | `src/indexer/*` (FTS5 store, chunking) | **litectx** | rip out, rebuild |
 | prompt/context assembly (`prompts.js`, no budget-fit) | **litectx CE** | build fresh |
-| `runAgentLoop` wrapper | **bare-agent Loop** | thin toward zero |
+| `runAgentLoop` wrapper | **bare-agent Loop** | ✅ done (M6) — manual loop absorbed by M2/F2/M11; remainder is load-bearing governance seams |
 | `provider-adapter.js`, `scheduler.js`, retry/CB | **bare-agent** | keep thin, restate on current API |
 | ~~`checkpoint.js`~~ | **bareguard** (`flags`) | ✅ deleted — confirm-before-exec via `flags` + single humanChannel (F2 cutover) |
 | `buildGateConfig`, action translator, owner model | **multis** (domain→gate) | keep, clean only |
@@ -484,9 +484,15 @@ Each module: **Goal · Riskiest assumption (POC) · Remove · Build clean · Own
 - **Ownership:** litectx (budget-fit/compress/harvest), bare-agent (msgs⇄units adapter). **Upstream watch:** pinning/atomic invariants multis needs.
 - **Gate / Exit:** e2e budget-bound + recency cases; ask flow unregressed.
 
-### M6 — thin the loop *(dep: M2, M5)*
+### M6 — thin the loop *(dep: M2, M5)* — ✅ **DONE — absorbed across M2 / F2 / M11 (verified 2026-07-05)**
 - **Goal:** remove multis wrapping bare-agent 0.16 now covers; `runAgentLoop` → near-direct `Loop.run`.
 - **Ownership:** bare-agent. **Gate / Exit:** agent-loop integration tests green.
+> **CLOSED 2026-07-05 (verification pass, no new code).** M6 was never a standalone build — the hand-rolled think/act machinery it targeted was deleted piecemeal by other milestones, and what remains in `runAgentLoop` is governance wiring bare-agent provides *seams* for but does not own. Evidence:
+> - **The manual loop is gone.** The original `runAgentLoop` (pre-bareagent, commit `682f2e8`) was a manual `for (round)` loop doing its own `generateWithToolsAndMessages` → `parseToolResponse` → `formatAssistantMessage`/`formatToolResult` threading → `executeTool` → max-rounds final call. **M2** (bareagent migration, `79812b0`) replaced all of it with `Loop.run()`. Grep confirms **0** hand-rolled think/act loops in `handlers.js` today.
+> - **Every M6-implied removal is done (grep-proven, 0 residual):** `maxRounds` handling → gone (caps live in the bareguard Gate; only a no-op comment remains); `Checkpoint` wiring + `bot/checkpoint.js` → gone (**F2**, 2026-06-15); `onToolResultWithHalt` shim + `_ceremonyParked` flag → gone (**M11**, `49e4378`).
+> - **Everything remaining is load-bearing or "keep thin" — nothing removable:** `new Retry(...)` + `cb.wrapProvider()` are correct API usage (Loop takes a `Retry` *instance*; there is no CB option) and the §5 ownership map always classified retry/CB as **"keep thin,"** not remove; `adaptTools` is a multis format+app-audit bridge bare-agent doesn't own; `wrapToolThroughCore` (M9 ceremony), `assemble` (M5), and the `onToolResult`/`onError` ceremony-halt handling (M10) are all load-bearing seams *added* to the loop, not redundant wrapping.
+> - **Exit gate met:** agent-loop integration tests green — 10/10 (`context-engineering`, `llm-ceremony-halt`, `beeper-ask-deadlock`); full suite 564/564.
+> - **`trim`/harvest** (bare-agent's destructive transcript-evict seam) stays **YAGNI**, already logged in the M5 register: multis rebuilds the transcript each `/ask` from episode recency (bounded by `recent_window` + `max_tool_rounds`) and M4 already harvests episodes at completion — there is no long-lived in-memory transcript to evict, and `trim` would double-write. It would only re-open under a deliberate redesign to persistent in-RAM sessions (not on the roadmap).
 
 ### M7 — writeGate + impact *(optional; dep: M4)*
 - **Goal:** cross-lib seams — litectx `writeGate` ↔ the same bareguard Gate; `impact()` before destructive owner actions.
