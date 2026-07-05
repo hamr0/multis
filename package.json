@@ -6,6 +6,15 @@
   "bin": {
     "multis": "bin/multis.js"
   },
+  "files": [
+    "bin/",
+    "src/",
+    "skills/",
+    ".multis-template/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",

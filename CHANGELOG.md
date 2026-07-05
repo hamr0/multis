@@ -4,6 +4,17 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+## [0.19.2] — 2026-07-05
+
+### Fixed — the published package no longer ships development artifacts (packaging hardening)
+
+Global install (`npm install -g multis`) is now a verified, documented first-class path, and the package is dramatically slimmer. Two things changed:
+
+- **The tarball dropped from ~7 MB to 169 kB.** The package was built from an `.npmignore` *blacklist*, which silently shipped local development cruft to every user — including a **6.2 MB litectx database file** (`.litectx/index.db-wal`), browser-automation scratch files, internal library-ask specs, and `CLAUDE.md`. Switched to an explicit **`files` allowlist** in `package.json` (ships only `bin/`, `src/`, `skills/`, `.multis-template/`, and the README/LICENSE/CHANGELOG) — so only what the app needs at runtime is published, and a future stray file can't leak. Verified end-to-end against a real global install (44 files, all runtime paths intact, `multis init` seeds config with no `ENOENT`).
+- **Docs now lead with global install.** The README and Customer Guide document `npm install -g multis && multis init && multis start` as the recommended path (previously only the from-source clone flow was shown; the guide's clone URL placeholder was also corrected).
+
+No runtime code change — packaging + docs only. Existing installs are unaffected. Full suite 564/564 green.
+
 ## [0.19.1] — 2026-07-04
 
 ### Fixed — a fresh `npm install -g multis` can now run `multis init`
