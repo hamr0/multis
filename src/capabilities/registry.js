@@ -115,9 +115,12 @@ const APP_VERBS = [
   { name: 'memory',  scope: 'memory.read', severity: SEVERITY.BENIGN, ownerOnly: false, args: null },
   { name: 'remember', scope: 'memory.write', severity: SEVERITY.BENIGN, ownerOnly: false,
     args: schema({ note: str('The note to remember') }, ['note']) },
-  // forget removes durable memory → destructive (ceremony before deletion)
+  // forget removes durable memory → destructive (ceremony before deletion). `target` is the human
+  // label (a topic, or "everything"); the optional `id` is a specific memory row to delete precisely
+  // (targeted /forget) — absent → clear the whole scope. `id` is set by the router from a scope-fenced
+  // match, never by the model, so it isn't required (the topic path validates on `target`).
   { name: 'forget',  scope: 'memory.write', severity: SEVERITY.DESTRUCTIVE, ownerOnly: false,
-    args: schema({ target: str('What memory to forget') }, ['target']) },
+    args: schema({ target: str('What memory to forget'), id: str('A specific memory id to delete (targeted forget)') }, ['target']) },
   // set_mode: the single mode capability. mode=off is data-losing (zero I/O incl. no
   // logging) → declared destructive (negative-POC §3: "turn off notifications"→off drift).
   { name: 'set_mode', aliases: ['mode', 'silent', 'business', 'personal', 'off'],

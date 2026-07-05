@@ -4,6 +4,22 @@ All notable changes to multis. Pre-stable (0.x) — versions track feature miles
 
 ## [Unreleased]
 
+### Added — saving a note skips an unnecessary AI call when it's clearly about something new (M13)
+
+When you save a note (`/remember` or by asking the assistant to remember something), multis checks whether it *updates* an existing note (a moved wedding date, a corrected weight) so it can revise the old note in place instead of piling up contradictions. That check used to make an AI call **every single time**. Now a fast local similarity check runs first: if the new note isn't close to anything you've already saved — which is the common case — it's obviously new, so the AI call is **skipped entirely** and the note is saved directly. Only when something genuinely similar exists does the AI judge run, exactly as before.
+
+The similarity check reuses the semantic-search model multis already loads (no new dependency, no download) and takes about 2 ms — versus a full AI round-trip it replaces on most saves. It's deliberately **conservative**: it only ever skips the AI when a note is *clearly* unrelated, so a real update is never missed (the worst case of the tuning erring is simply that the AI runs when it didn't strictly need to). The threshold is configurable (`memory.supersede_threshold`, default 0.30) and every decision is logged so it can be tuned to your real usage. Requires semantic recall (`memory.semantic`, on by default); with it off, behavior is unchanged. Full suite 569/569 green.
+
+### Changed — `/forget` can now remove a *specific* note, not just wipe everything (M14)
+
+`/forget` was all-or-nothing — it cleared this chat's entire memory, and it ignored anything you typed after it. Now:
+
+- **`/forget <topic>`** finds the notes matching that topic and removes just those. One match → it shows you the note and asks for your PIN. Several → it lists them numbered so you pick which one, then asks for your PIN. Nothing relevant → it tells you so (and never offers to delete an unrelated note by mistake).
+- **`/forget all`** still wipes everything — now with an explicit warning first.
+- **`/forget` on its own** no longer erases anything — it just shows you the two options. (Previously a bare `/forget` wiped the whole chat, which was easy to trigger by accident.)
+
+Removing a note also removes the conversation that produced it, so a note you forget can't quietly come back later. Deleting is still PIN-protected, and always scoped to the current chat — it can never touch another chat's memory or your knowledge base. Requires semantic recall (`memory.semantic`, on by default) for topic matching; the match threshold is configurable (`memory.forget_match_threshold`, default 0.30). Full suite 578/578 green.
+
 ## [0.19.2] — 2026-07-05
 
 ### Fixed — the published package no longer ships development artifacts (packaging hardening)

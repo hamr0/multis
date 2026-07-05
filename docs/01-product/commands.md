@@ -14,7 +14,7 @@ Commands are sent via chat with a `/` prefix on every platform (Telegram and Bee
 | `/status` | Bot info (version, role, provider) |
 | `/memory` | Show conversation memory for this chat |
 | `/remember <note>` | Save a note to memory |
-| `/forget` | Clear conversation memory (PIN protected — it's destructive) |
+| `/forget <topic>` | Remove specific matching notes (pick if several); `/forget all` clears the chat — PIN protected (destructive) |
 | `/skills` | List available skills |
 | `/help` | Show commands, grouped by intent (Ask / Remember / Schedule / Run / Manage) and filtered to your role; `/help <command>` for one command's details |
 

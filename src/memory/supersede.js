@@ -24,6 +24,15 @@
  * here would be silently dropped. (POC-confirmed against the configured provider.)
  */
 const { simpleGenerate } = require('../llm/provider-adapter');
+const { logAudit } = require('../governance/audit');
+
+// M13: skip the LLM judge when the most-similar existing fact is below this cosine — nothing that far
+// apart can be a same-subject restatement, so the judge could only answer NEW. Deliberately
+// CONSERVATIVE (well under the ~0.44 lowest real restatement measured in the broad POC, 0.14 margin):
+// a false-skip writes a duplicate (the pre-W4 pile-up), so we bias toward CALLING the judge — the cost
+// of a too-low threshold is only "fewer LLM calls saved", never a wrong overwrite. Tunable via
+// config.memory.supersede_threshold. Only active in semantic mode (candidates carry `sim`).
+const DEFAULT_SUPERSEDE_THRESHOLD = 0.30;
 
 /** Build the user-channel judge prompt. `candidates` are shown under 1-based numeric labels. */
 function buildPrompt(note, candidates) {
@@ -93,7 +102,7 @@ async function resolveSupersedeId({ provider, candidates, note }) {
  * (re-`/remember` the old value) rather than a silent destroy.
  * @returns {Promise<{id:string|null, superseded:boolean, supersededText:string|null}>}
  */
-async function rememberWithSupersede({ indexer, provider, scope, note, memCfg = {} }) {
+async function rememberWithSupersede({ indexer, provider, scope, note, memCfg = {}, audit = logAudit }) {
   let id = null, supersededText = null;
   // The judge is strictly additive — fail-toward-keep. Disabled / no provider skips it; and ANY error
   // in the candidate-fetch or judgment degrades to a plain new-fact write so a deliberate note is NEVER
@@ -102,13 +111,28 @@ async function rememberWithSupersede({ indexer, provider, scope, note, memCfg = 
   if (memCfg.supersede !== false && provider) {
     try {
       const candidates = await indexer.factCandidates(scope, note, { n: memCfg.supersede_candidates ?? 5 });
-      id = await resolveSupersedeId({ provider, candidates, note });
-      if (id) {
-        const prior = candidates.find((c) => c.id === id)?.text ?? null; // capture BEFORE the overwrite
-        // Only report a supersede when the prior value actually CHANGED. Re-saving an identical fact
-        // still upserts the same row (no duplicate) but is a no-op to the user, so it reads as a plain
-        // "Noted." rather than the misleading "updated (was: <the same text>)".
-        if (prior != null && prior.trim().toLowerCase() !== String(note).trim().toLowerCase()) supersededText = prior;
+      // M13 pre-check: candidates carry `sim` (note↔fact cosine) only in semantic mode. If the closest
+      // existing fact is below the threshold, nothing is the same subject → skip the LLM judge entirely
+      // (it could only say NEW) and write a plain new fact. When `sim` is absent (BM25-only mode, or the
+      // embedder failed), topSim stays -Infinity → the pre-check is inert and the judge runs as before.
+      const threshold = memCfg.supersede_threshold ?? DEFAULT_SUPERSEDE_THRESHOLD;
+      const topSim = candidates.reduce((m, c) => (typeof c.sim === 'number' && c.sim > m ? c.sim : m), -Infinity);
+      const precheckActive = Number.isFinite(topSim);
+      if (precheckActive && topSim < threshold) {
+        // Definitely NEW — log the skip so the threshold can be calibrated on real saves (a genuine
+        // update that ever lands here would show as a duplicate; the log is how we'd catch it).
+        audit({ action: 'supersede_precheck', decision: 'skip', scope, topSim: round3(topSim), threshold });
+      } else {
+        id = await resolveSupersedeId({ provider, candidates, note });
+        // Only log when the pre-check was ACTIVE (semantic mode) — keeps BM25-only / unit paths I/O-free.
+        if (precheckActive) audit({ action: 'supersede_precheck', decision: id ? 'update' : 'judge_new', scope, topSim: round3(topSim), threshold });
+        if (id) {
+          const prior = candidates.find((c) => c.id === id)?.text ?? null; // capture BEFORE the overwrite
+          // Only report a supersede when the prior value actually CHANGED. Re-saving an identical fact
+          // still upserts the same row (no duplicate) but is a no-op to the user, so it reads as a plain
+          // "Noted." rather than the misleading "updated (was: <the same text>)".
+          if (prior != null && prior.trim().toLowerCase() !== String(note).trim().toLowerCase()) supersededText = prior;
+        }
       }
     } catch {
       id = null;
@@ -117,5 +141,8 @@ async function rememberWithSupersede({ indexer, provider, scope, note, memCfg = 
   await indexer.rememberFact(scope, note, { by: 'human', id });
   return { id, superseded: !!id, supersededText };
 }
+
+/** Round a cosine to 3dp for the calibration log (keeps the audit line compact). */
+const round3 = (n) => Math.round(n * 1000) / 1000;
 
 module.exports = { resolveSupersedeId, rememberWithSupersede, buildPrompt, parseChoice };

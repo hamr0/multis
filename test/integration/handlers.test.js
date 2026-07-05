@@ -439,22 +439,22 @@ describe('App-verb door — governed-core ceremony (M9 increment 2)', () => {
     return { env, platform, router, pending, indexer };
   }
 
-  it('a destructive /forget prompts for the PIN, then clears memory after the correct PIN', async () => {
+  it('a destructive /forget all prompts for the PIN, then clears memory after the correct PIN', async () => {
     const { platform, router, indexer } = buildPin();
-    const forgetP = router(msg('/forget'), platform);
+    const forgetP = router(msg('/forget all'), platform);
     await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
     await router(msg('1234'), platform);
     await forgetP;
-    assert.ok(platform.sent.some((s) => /Memory cleared/i.test(s.text)), 'memory cleared after PIN');
+    assert.ok(platform.sent.some((s) => /Cleared everything/i.test(s.text)), 'memory cleared after PIN');
     // the tenant-scoped litectx forget ran exactly once, after the correct PIN.
     assert.equal(indexer.forgetCalls.length, 1, 'forgetMemory called once after the correct PIN');
   });
 
-  it('a wrong PIN on /forget does NOT clear memory and stays retry-able', async () => {
+  it('a wrong PIN on /forget all does NOT clear memory and stays retry-able', async () => {
     // Wrong PIN re-parks (retry-able, "attempts remaining"), never a terminal
     // cancel; memory is untouched until a correct PIN. (Corrected 2026-06-23.)
     const { platform, router, indexer } = buildPin();
-    const forgetP = router(msg('/forget'), platform);
+    const forgetP = router(msg('/forget all'), platform);
     await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
     await router(msg('9999'), platform); // wrong
     await forgetP;
@@ -463,6 +463,83 @@ describe('App-verb door — governed-core ceremony (M9 increment 2)', () => {
     await router(msg('cancel'), platform);
     // memory was never wiped — the litectx forget never ran on a wrong/declined PIN.
     assert.equal(indexer.forgetCalls.length, 0, 'forgetMemory NEVER called without the correct PIN');
+  });
+
+  // --- M14 targeted /forget: match-count picks the flow; every DELETE still PINs ---
+
+  it('bare /forget prints the options and destroys nothing (the old bare-nuke footgun is gone)', async () => {
+    const { platform, router, indexer } = buildPin();
+    await router(msg('/forget'), platform);
+    const t = platform.sent.map((s) => s.text).join('\n');
+    assert.match(t, /forget <topic>/i, 'shows the targeted form');
+    assert.match(t, /forget all/i, 'shows the erase-all form');
+    assert.ok(!platform.sent.some((s) => /PIN/i.test(s.text)), 'no ceremony on a bare /forget');
+    assert.equal(indexer.forgetCalls.length + indexer.forgetByIdCalls.length, 0, 'nothing deleted');
+  });
+
+  it('/forget <topic> with NO match informs and destroys nothing', async () => {
+    const { platform, router, indexer } = buildPin();
+    indexer.factCandidates = async () => [];               // nothing matches
+    await router(msg('/forget unicorn'), platform);
+    assert.match(platform.sent.at(-1).text, /Nothing matches "unicorn"/i);
+    assert.ok(!platform.sent.some((s) => /PIN/i.test(s.text)), 'no ceremony when nothing matched');
+    assert.equal(indexer.forgetByIdCalls.length, 0, 'no delete');
+  });
+
+  it('/forget <topic> filters KNN nearest-neighbour noise — a low-sim candidate is NOT a match (unicorn bug)', async () => {
+    // Semantic recall always returns a nearest note; an unrelated topic comes back with a low sim.
+    // Without the relevance filter, /forget unicorn offered to delete a random note (live-found).
+    const { platform, router, indexer } = buildPin();
+    indexer.factCandidates = async () => [{ id: 'fact:wed', text: 'my wedding is on Wednesday', score: 0, sim: 0.06 }];
+    await router(msg('/forget unicorn'), platform);
+    assert.match(platform.sent.at(-1).text, /Nothing matches "unicorn"/i, 'a low-sim nearest neighbour is not offered for deletion');
+    assert.ok(!platform.sent.some((s) => /PIN/i.test(s.text)), 'no ceremony — nothing genuinely matched');
+    assert.equal(indexer.forgetByIdCalls.length, 0, 'nothing deleted');
+  });
+
+  it('/forget <topic> keeps a keyword hit even when its cosine is low (score>0 clause)', async () => {
+    // A shared/low-IDF term ("Wednesday") or a diluted keyword can score sim<threshold but IS a real
+    // keyword hit (score>0) → must still be offered.
+    const { platform, router, indexer } = buildPin();
+    indexer.factCandidates = async () => [{ id: 'fact:x', text: 'my long note that mentions wednesday somewhere', score: 0.4, sim: 0.20 }];
+    const p = router(msg('/forget wednesday'), platform);
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt (keyword hit kept)');
+    await router(msg('1234'), platform);
+    await p;
+    assert.equal(indexer.forgetByIdCalls.length, 1, 'the keyword hit was offered and deleted');
+  });
+
+  it('/forget <topic> with ONE match → PIN → deletes exactly that note by id', async () => {
+    const { platform, router, indexer } = buildPin();
+    indexer.factCandidates = async () => [{ id: 'fact:wed', text: 'my wedding is on Wednesday' }];
+    const p = router(msg('/forget wedding'), platform);
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
+    await router(msg('1234'), platform);
+    await p;
+    assert.equal(indexer.forgetByIdCalls.length, 1, 'the precise delete ran once, after the PIN');
+    assert.equal(indexer.forgetByIdCalls[0].id, 'fact:wed', 'the matched note id was deleted');
+    assert.equal(indexer.forgetCalls.length, 0, 'the whole-scope wipe was NOT used');
+    assert.ok(platform.sent.some((s) => /Forgotten/i.test(s.text)), 'confirms what was forgotten');
+  });
+
+  it('/forget <topic> with SEVERAL matches → numbered picker → pick → PIN → deletes the CHOSEN id', async () => {
+    const { platform, router, indexer } = buildPin();
+    indexer.factCandidates = async () => [
+      { id: 'fact:a', text: 'dentist appointment Monday' },
+      { id: 'fact:b', text: 'dentist appointment Friday' },
+    ];
+    await router(msg('/forget dentist'), platform);
+    const list = platform.sent.at(-1).text;
+    assert.match(list, /1\) dentist appointment Monday/);
+    assert.match(list, /2\) dentist appointment Friday/);
+    assert.ok(!platform.sent.some((s) => /PIN/i.test(s.text)), 'the picker itself does NOT ask for a PIN (listing is read-only)');
+    // pick #2 → now the PIN prompt for that note
+    const p = router(msg('2'), platform);
+    await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt after pick');
+    await router(msg('1234'), platform);
+    await p;
+    assert.equal(indexer.forgetByIdCalls.length, 1, 'exactly one precise delete');
+    assert.equal(indexer.forgetByIdCalls[0].id, 'fact:b', 'the PICKED note (2) was deleted, not the first');
   });
 
   it('a benign /remember runs free even when a PIN is configured', async () => {
@@ -841,9 +918,9 @@ describe('Memory commands', () => {
     assert.match(indexer.factCalls[0].text, /buy milk/);
     assert.equal(indexer.factCalls[0].opts.by, 'human');
 
-    // Forget (no PIN configured → no ceremony) → tenant-scoped litectx forget
-    await router(msg('/forget'), platform);
-    assert.match(platform.lastTo('chat1').text, /Memory cleared/);
+    // Forget all (no PIN configured → no ceremony) → tenant-scoped litectx forget
+    await router(msg('/forget all'), platform);
+    assert.match(platform.lastTo('chat1').text, /Cleared everything/);
     assert.equal(indexer.forgetCalls.length, 1, 'the tenant memory is cleared');
   });
 
@@ -2209,6 +2286,7 @@ function stubIndexer(chunks = [], stats = {}) {
   const searchCalls = [];
   const factCalls = [];   // M4: records rememberFact(scope, text, opts) for spy assertions
   const forgetCalls = []; // M4: records forgetMemory(scope)
+  const forgetByIdCalls = []; // M14: records forgetMemoryById(scope, id) for targeted /forget
   return {
     search: async (query, opts = {}) => {
       searchCalls.push({ query, opts });
@@ -2225,6 +2303,8 @@ function stubIndexer(chunks = [], stats = {}) {
     rememberFact: async (scope, text, opts = {}) => { factCalls.push({ scope, text, opts }); return {}; },
     promotionSweep: async () => 0,
     forgetMemory: async (scope) => { forgetCalls.push({ scope }); return 1; },
+    forgetByIdCalls,
+    forgetMemoryById: async (scope, id) => { forgetByIdCalls.push({ scope, id }); return 1; },
     recentMemory: async () => [],
     countMemory: async () => 0,
     purge: async () => 0,

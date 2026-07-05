@@ -622,7 +622,7 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
         await routeMemory(msg, platform, config, getMem, toolDeps);
         break;
       case 'forget':
-        await routeForget(msg, platform, config, getMem, toolDeps);
+        await routeForget(msg, platform, config, getMem, args, toolDeps);
         break;
       case 'remember':
         await routeRemember(msg, platform, config, getMem, args, toolDeps);
@@ -867,9 +867,15 @@ function buildAppExec(config, getMem, indexer, provider, memCfg) {
   return {
     // set_mode commits the resolved (chatId, mode) — off ceremonies via the core.
     set_mode: (args) => { setChatMode(config, args.target, args.mode); return { target: args.target, mode: args.mode }; },
-    // forget = wipe this tenant's durable memory (litectx fact+episode, tenant-fenced) — the episodes
-    // ARE the conversation thread now, so this clears the window too. Raw daily logs are kept by design.
-    forget:   async (args, ctx) => { await indexer.forgetMemory(scopeOf(ctx)); return { chatId: ctx.chatId }; },
+    // forget: `args.id` present → delete that ONE note precisely (targeted /forget), cascading a
+    // promoted fact to its source episode so it can't rebound (see context.forgetById). Absent → wipe
+    // this tenant's whole durable memory (fact+episode, tenant-fenced) — the episodes ARE the
+    // conversation thread now, so a full forget clears the window too. Raw daily logs are kept by design.
+    forget:   async (args, ctx) => {
+      const scope = scopeOf(ctx);
+      if (args.id) { const removed = await indexer.forgetMemoryById(scope, args.id); return { chatId: ctx.chatId, id: args.id, removed }; }
+      const removed = await indexer.forgetMemory(scope); return { chatId: ctx.chatId, all: true, removed };
+    },
     // remember = a deliberate durable fact (by:'human', top trust), tenant-fenced. W4: if the note
     // RESTATES-AND-UPDATES an existing fact, the judge overwrites it in place instead of piling up a
     // contradiction (degrades to a plain new-fact write when superseding is off / no provider).
@@ -1496,12 +1502,120 @@ async function routeMemory(msg, platform, config, getMem, toolDeps = {}) {
   });
 }
 
-async function routeForget(msg, platform, config, getMem, toolDeps = {}) {
-  const args = { target: 'everything' };
+// Targeted /forget (M14): `forget <topic>` removes the matched note(s), not the whole scope. The
+// number of matches picks the flow — 1 → straight to PIN; several → a read-only numbered picker,
+// then PIN on the pick; 0 → an informational reply (no ceremony). `forget all` wipes everything with a
+// strong warning; bare `/forget` prints the options (the old bare-nuke footgun is gone). Every DELETE
+// still goes through the one governed core → PIN. The precise delete cascades a promoted fact to its
+// source episode so it can't rebound (see context.forgetById).
+async function routeForget(msg, platform, config, getMem, query, toolDeps = {}) {
   const td = { ...toolDeps, getMem };
-  // forget is destructive (clears memory) → PIN ceremony via park-and-resume.
-  const r = await dispatchCapability('forget', args, msg, config, td);
-  await handleCeremonyOrSend(r, platform, msg, config, td, { capName: 'forget', args, echo: 'clear this chat\'s memory', format: () => 'Memory cleared for this chat.' });
+  const { indexer, gov, pending } = td;
+  const q = String(query || '').trim();
+  const scope = isOwner(msg.senderId, config, msg) ? 'admin' : `user:${msg.chatId}`;
+  const noteCount = async () => indexer.countMemory(scope, { kind: 'fact' }).catch(() => null);
+
+  // bare /forget → options, NO destruction.
+  if (!q) {
+    const n = await noteCount();
+    const have = (n != null) ? ` You have ${n} note(s).` : '';
+    await platform.send(msg.chatId, `Say \`forget <topic>\` to remove specific notes (e.g. \`forget wedding\`), or \`forget all\` to erase everything in this chat.${have}`);
+    return;
+  }
+
+  // /forget all | everything → whole-scope wipe, strong warning, PIN.
+  if (/^(all|everything)$/i.test(q)) {
+    const args = { target: 'everything' };
+    const r = await dispatchCapability('forget', args, msg, config, td);
+    await handleCeremonyOrSend(r, platform, msg, config, td, {
+      capName: 'forget', args,
+      echo: '⚠️ ERASE ALL notes AND this chat\'s history — this cannot be undone',
+      format: (res) => `Cleared everything for this chat${res && res.removed ? ` (${res.removed} item(s))` : ''}.`,
+    });
+    return;
+  }
+
+  // /forget <topic> → blended keyword+semantic match on FACTS, then 0 / 1 / N flow.
+  let matches;
+  try { matches = await indexer.factCandidates(scope, q, { n: 8 }); }
+  catch { matches = []; }
+
+  // Relevance filter (semantic mode): recall's KNN ALWAYS returns a nearest neighbour, so an unrelated
+  // topic ("unicorn") comes back with a low sim — without this, /forget unicorn would offer to delete a
+  // random note. Keep a candidate only if it's a keyword hit (score>0) OR genuinely close (sim>=thresh).
+  // Inert when sim is absent (BM25-only mode / tests): recall there is already keyword-precise (no KNN
+  // noise), so nothing is filtered. Measured gap (installed litectx): spurious ≤0.17, legit ≥0.38.
+  const forgetThreshold = config?.memory?.forget_match_threshold ?? 0.30;
+  matches = matches.filter((m) => typeof m.sim !== 'number' || m.score > 0 || m.sim >= forgetThreshold);
+
+  if (!matches.length) {
+    const n = await noteCount();
+    const have = (n != null && n > 0)
+      ? ` You have ${n} note(s) — /memory to see them, or \`forget all\` to erase everything.`
+      : ' You have no saved notes.';
+    await platform.send(msg.chatId, `Nothing matches "${q}".${have}`);
+    return;
+  }
+
+  // Per-match ceremony wording, shared by the 1-match and picker paths.
+  const echoFor = (m) => `forget "${m.text}"`;
+  const formatFor = (m) => (res) => (res && res.removed) ? `Forgotten: "${m.text}".` : `That note was already gone.`;
+
+  // 1 match → straight to the ceremony (PIN prompt shows the note). Reuses the proven ceremony path,
+  // which also handles the no-PIN config (executes immediately) and DENIED.
+  if (matches.length === 1) {
+    const m = matches[0];
+    const args = { target: m.text, id: m.id };
+    const r = await dispatchCapability('forget', args, msg, config, td);
+    await handleCeremonyOrSend(r, platform, msg, config, td, { capName: 'forget', args, echo: echoFor(m), format: formatFor(m) });
+    return;
+  }
+
+  // N matches → a read-only numbered picker (no PIN yet — listing destroys nothing). The pick chains
+  // into the SAME per-note ceremony via the dispatcher's {next}, so there is exactly ONE ceremony.
+  const list = matches.map((m, i) => `${i + 1}) ${m.text}`).join('\n');
+  await platform.send(msg.chatId, `${matches.length} notes match "${q}" — reply with the number to forget (or "cancel"):\n${list}`);
+  const ttlMs = (config?.security?.pin_prompt_timeout || 300) * 1000;
+  const pickerAsk = {
+    kind: 'picker',
+    label: `forget "${q}"`,
+    isOwner: isOwner(msg.senderId, config, msg),
+    ttlMs,
+    expireMsg: 'That forget prompt expired — re-send if you still want it.',
+    stickHint: 'Reply with the number of the note to forget, or "cancel".',
+    // showPrompt omitted — the numbered list is already sent → openAsk treats it as 'prompted'.
+    accepts: (t) => { const s = t.trim(); const n = parseInt(s, 10); return /^\d+$/.test(s) && n >= 1 && n <= matches.length; },
+    handle: async (t) => {
+      const m = matches[parseInt(t.trim(), 10) - 1];
+      const args = { target: m.text, id: m.id };
+      const r = await dispatchCapability('forget', args, msg, config, td);
+      if (r.kind === RESULT.NEEDS_CEREMONY) {
+        // build the per-note ceremony ask (as handleCeremonyOrSend does) + show its PIN prompt, then
+        // hand it to the dispatcher via {next} so the PIN reply resumes it.
+        const bundle = gov ? await gov.resolve() : {};
+        const ctx = buildGovernCtx(msg, config);
+        const deps = buildSlashDeps(bundle, config, td);
+        const ask = makeCeremonyAsk({
+          capability: 'forget', args, ctx, deps, ceremonyPrompt: bundle.ceremonyPrompt,
+          echo: echoFor(m), request: null, ttlMs,
+          render: async (r2) => {
+            if (r2.kind === RESULT.OK) { await platform.send(msg.chatId, 'PIN accepted.'); await platform.send(msg.chatId, formatFor(m)(r2.result)); }
+            else await sendCapabilityResult(r2, platform, msg, {});
+          },
+        });
+        const status = await ask.showPrompt();
+        if (status !== 'prompted') {
+          if (status === 'no-channel') await platform.send(msg.chatId, 'Could not prompt for the required PIN — action cancelled.');
+          return { done: true, summary: 'forget — no PIN channel' }; // 'locked' already messaged in ceremonyPrompt
+        }
+        return { next: ask };
+      }
+      // no-PIN config (executed) or DENIED → render now, done.
+      await sendCapabilityResult(r, platform, msg, { format: formatFor(m) });
+      return { done: true, summary: 'forget (targeted)' };
+    },
+  };
+  await openAsk(pickerAsk, { pending, chatId: msg.chatId, senderId: msg.senderId });
 }
 
 async function routeRemember(msg, platform, config, getMem, note, toolDeps = {}) {
@@ -2529,7 +2643,7 @@ const HELP_COMMANDS = [
   // REMEMBER
   { name: 'remember', group: 'REMEMBER', role: 'all',   usage: '/remember <note>',                summary: 'save a note to memory' },
   { name: 'memory',   group: 'REMEMBER', role: 'all',   usage: '/memory',                         summary: 'show what I remember here' },
-  { name: 'forget',   group: 'REMEMBER', role: 'all',   usage: '/forget',                         summary: "clear this chat's memory" },
+  { name: 'forget',   group: 'REMEMBER', role: 'all',   usage: '/forget <topic> | /forget all',    summary: 'remove specific notes (or everything)' },
   { name: 'index',    group: 'REMEMBER', role: 'owner', usage: '/index <path> <public|admin>',    summary: 'add a document to the knowledge base',
     detail: 'Adds a file to the searchable KB. Scope: public (everyone) or admin (owner-only knowledge — owner only). On Telegram/Beeper you can also just send a file to index it.' },
   // SCHEDULE
