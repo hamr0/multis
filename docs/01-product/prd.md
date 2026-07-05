@@ -498,17 +498,42 @@ Each module: **Goal · Riskiest assumption (POC) · Remove · Build clean · Own
 - **Goal:** cross-lib seams — litectx `writeGate` ↔ the same bareguard Gate; `impact()` before destructive owner actions.
 - **Ownership:** lib seam. **Gate / Exit:** e2e deny-on-bad-write case.
 
-### M8 — chat-mode taxonomy + named assistant *(UX; dep: M6; not started)*
-*Agreed during the 2026-06-16 security discussion; deferred so the security branch stayed focused. Rides M6 (router work) since it changes routeAs decisions, not a lib.*
-> **Note (2026-06-17):** the obedient-bot-first dispatch rewrite (§8 register) landed the prompt/scope/command-detection/halt-UX core and **defers persona/constitution to M4/litectx**. The router pending-state-machine de-tangle landed as its own pass (§8 register, *unified PendingRegistry*) — all four phases complete (PIN + gate challenges + the five `config._pending*` pickers + scaffolding removal). destructive→PIN is the natural M6/M8 work; the named-assistant `active` mode below still stands.
-- **Goal:** make the per-chat mode vocabulary express the two product shapes cleanly, and give the assistant a name so a "respond only when called" mode is possible. Today's modes (`off`/`silent`/`business`) grew ad-hoc into a mesh; this re-scopes them per shape.
-- **Agreed taxonomy (per shape):**
-  - **Business shape:** `admin` (staff/command channel) · **`business`** (default — auto-respond to customers) · `silent` (partners/contacts that don't need interaction — watch + log only).
-  - **Personal shape:** `admin` · **`silent`** (default — *harvest*: watch + log, no response) · `active` (respond only when the assistant's name is called).
-- **Named assistant:** a configurable name (default `multis`); in `active`/personal mode the bot replies only when its name is addressed, and its messages are prefixed `[name]`. Per-deployment (business or personal) names its assistant once.
-- **Build (sketch):** generalize `getChatMode`/`VALID_MODES` to be shape-aware; add `active` routing in `beeper.js` `_handleMessage` (name-mention trigger) and the router; thread `config.assistant_name`. **⚠ Reconcile with the limited-admin removal (2026-06-21, §8 register):** the `admin` mode-*shape* above predates that decision and leaned on the now-deleted `isAdminChat` routing — the command channel is owner-note-to-self only now, so the M8 taxonomy's `admin` shape needs redesign (likely drop it; commands come from the owner channel, not a per-chat "admin" mode).
-- **Watch-out:** this touches every `routeAs` call site + the mode picker UX — do it as its own module with the M0 net, not folded into a fix.
-- **Gate / Exit:** mode-routing tests rebuilt for the new taxonomy; existing off/silent/business behavior preserved or explicitly migrated.
+### M8 — engagement-ladder chat modes + named assistant *(UX; dep: M6/M9; DESIGN LOCKED 2026-07-05, not started)*
+*Agreed 2026-06-16; deferred through the security/M9 work. Redesigned 2026-07-05 after the limited-admin removal (2026-06-21) killed the original `admin` mode-shape. Rides the router (changes `routeAs` decisions, not a lib).*
+
+- **Goal:** replace the ad-hoc `off`/`silent`/`business` mesh with **one axis** — how much the bot engages a chat — and give the assistant a name so it can (a) be summoned in personal mode and (b) openly disclose itself as a bot. Kills the global-vs-per-chat confusion by binding the *engaged* rung to the account type.
+
+- **The engagement ladder (LOCKED).** A per-chat mode is one rung on a single "how much does the bot participate" axis, most → least:
+  | Rung | Mode | Behavior | Captures? |
+  |---|---|---|---|
+  | most | `business` | **auto-respond** to everyone | ✓ |
+  | | `personal` | respond **only when the assistant's name is called** (was `active`) | ✓ |
+  | | `silent` | capture, **never respond** | ✓ |
+  | least | `off` | **excluded** — no capture, no response | ✗ |
+
+- **Account type owns the engaged rung; per-chat only steps down (LOCKED — this is the anti-confusion rule).** The `bot_mode` role fixes which engaged rung is the default, and the per-chat `/mode` picker is constrained to **`{ defaultModeForRole(bot_mode), silent, off }`** — you can never cross the streams:
+  | Account (`bot_mode`) | Transport | Default rung | Per-chat `/mode` may set |
+  |---|---|---|---|
+  | `business` | Beeper | `business` | `business` · `silent` · `off` |
+  | `personal-assistant` | Beeper | **`personal`** *(was `silent`)* | `personal` · `silent` · `off` |
+  | `personal-bot` | Telegram | `off` | — (owner-only; no contact chats to mode) |
+
+  To change the engaged style for **all** chats, change the **account type** (`business` ↔ `personal-assistant`) — the single global lever. Per-chat `/mode` only ever moves a chat *down* to `silent`/`off` or back up to the account default. **Accepted tradeoff:** a personal-assistant account cannot make one single chat fully auto-respond without becoming a business (and vice-versa) — the mixed matrix is exactly the confusion this rule removes; "auto everywhere ⇒ you're a business" is the clean mental model.
+
+- **Named assistant — `config.assistant_name` (default `multis`), two distinct jobs:**
+  - **Trigger** (in `personal` mode only): the bot responds *only* when the name appears. Match = **case-insensitive, word-boundary, any token** of the name split on whitespace (`"Roger bot"` fires on `roger` *or* `bot`; word-boundary so `robot`/`chatbot` do **not** fire). Auto (`business`) needs no trigger; `silent`/`off` never respond.
+  - **Disclosure prefix** (in `personal` **and** `business` replies): every bot reply carries `[Name] …` so the other party knows it's the bot, not the owner — an intentional, honest human/bot boundary (governance-positive; also a bot-disclosure nicety for business). **NOT an echo-guard mechanism** — echo-guard stays `client_tag` (the removed `[multis]` prefix was echo-guard; this is cosmetic disclosure, no conflict). UX note when a generic token is chosen (e.g. `bot`): it will over-trigger; pick a distinctive name for fewer false fires.
+
+- **`admin` mode DROPPED.** It leaned on the deleted `isAdminChat`/limited-admin routing. Commands come only from the owner note-to-self channel via `isOwner` — there is no per-chat "admin" mode.
+
+- **Build (sketch):** `defaultModeForRole` (assistant → `personal`); the constrained picker set `{account-mode, silent, off}` single-sourced; a name-match branch + `[Name]` prefix in `beeper.js` `_handleMessage` routing (new `routeAs` for `personal`-summoned); thread `config.assistant_name` through config + init + the mode picker. **Watch-out:** touches every `routeAs` call site + the mode picker UX — build as its own module behind the M0 net, not folded into a fix.
+
+- **Gate / Exit:** mode-routing tests rebuilt for the ladder (auto/named/silent/off); the account-constrained picker proven (business account rejects `personal`, personal rejects `business`); name-match failable (word-boundary: `bot` fires, `robot` does not); `[Name]` prefix present on replies, absent from echo-guard logic; existing `off`/`silent`/`business` behavior preserved or explicitly migrated (personal-assistant default `silent`→`personal` is the one behavior change — migrate + note).
+
+- **Future (parked, NOT M8) — decided 2026-07-05:**
+  - **Named / custom personas: NOT needed (cosmetic).** multis already selects a persona by channel (obedient assistant on the owner note-to-self path; `buildBusinessPrompt()` for contacts) — that *is* "one voice for chats, another for admin." A custom name is just a label on the existing split; owner-defined `config.personas` remains a small additive option **only if a real want appears** — YAGNI. Multi-agent as separate runtimes has no point here (one agent + many tools/scheduled jobs does the work).
+  - **Multi-tenant ≠ multi-account.** multis is *already* multi-tenant: one node, one Beeper, N contacts, each fenced as `user:<chatId>`. "Tenant" = a contact, not an account.
+  - **True two-world isolation = two nodes, two Beeper accounts** (one account = one node — the echo-guard is per-process `client_tag`; two nodes on one account would echo-storm). The only meaningful shape is **direct Beeper + headless-Docker Beeper** on one machine (see the beeper-headless-in-Docker POC), each with its own data dir (needs a `MULTIS_DIR`-style knob — currently `~/.multis` is fixed, `getMultisDir/setMultisDir` exists for tests only). *TG + Docker is redundant — the owner already has the Telegram personal-bot.* Two Beepers on one machine via Beeper **Desktop** is blocked (single instance, port `23373`); the Docker-headless path is the workaround. Parked; revisit on a real need.
 
 ### M9 — command dispatch: intent-first + one governed core *(dep: M6; supersedes the open `PIN_PROTECTED` item; M8 now deps on M9)* — per §F — ✅ **DONE + MERGED to `main` (2026-06-22, 0.17.1)**
 *Design locked 2026-06-19 (brainstorm session); motivated by the §10 LIVE‡ gate run surfacing the tangle (§8 register, 2026-06-19). Built across increments 1–3, the limited-admin tier removed, the full LIVE‡ gate (C1 + SEC1–SEC12 + P1/P3) passed, a pre-merge `/security` pass closed 2 pre-existing RCEs + 4 hardenings, merged via PR #3.*
