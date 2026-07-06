@@ -203,6 +203,19 @@ async function runInit() {
   if (!config.platforms) config.platforms = {};
   summary.botMode = config.bot_mode;
 
+  // M8: the assistant's name — the personal-mode trigger word AND the [Name] disclosure prefix on
+  // replies to contacts. Only meaningful for the contact-facing roles (personal-assistant / business);
+  // personal-bot is owner-only on Telegram, so it just keeps the default silently.
+  if (config.bot_mode !== 'personal-bot') {
+    const currentName = config.assistant_name || 'multis';
+    const nameInput = (await ask(`\nWhat should I be called? (contacts see "[Name] …" and I answer to it) [${currentName}]: `)).trim();
+    config.assistant_name = nameInput || currentName;
+    console.log(c.ok(`Name: ${config.assistant_name}`));
+  } else if (!config.assistant_name) {
+    config.assistant_name = 'multis';
+  }
+  summary.assistantName = config.assistant_name;
+
   // -----------------------------------------------------------------------
   // Step 2: Platform connections
   // -----------------------------------------------------------------------
@@ -650,6 +663,7 @@ async function runInit() {
 
   const rows = [];
   rows.push(['Mode', roleLabel(config.bot_mode)]);
+  if (config.bot_mode !== 'personal-bot') rows.push(['Name', config.assistant_name || 'multis']);
 
   // Telegram
   if (summary.telegram) {
