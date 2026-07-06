@@ -70,18 +70,30 @@ function getToolsForUser(tools, isOwner, toolsConfig) {
   });
 }
 
-// Host-reaching tools that MUST stay owner-only regardless of tools.json. These
-// can read/exfiltrate host state or drive the machine, and a customer is never a
-// privileged principal (see security model). exec/read_file/grep_files/find_files
-// are additionally hard-denied for non-owners at the bareguard gate (ownerCheck),
-// so they don't need the floor here — but these five have no gate-level check, so
-// the registry is their only boundary.
+// Host-reaching tools that MUST stay owner-only regardless of tools.json. These can
+// read/exfiltrate host state or drive the machine, and a customer is never a privileged
+// principal (see security model). This is a HARD floor: even a stale or hostile
+// ~/.multis/tools.json can't grant them to a non-owner (getToolsForUser checks this set
+// BEFORE the tools.json/DEFAULT_OWNER_ONLY lookup).
+//
+// grep_files/find_files/clipboard/screenshot/wifi/brightness were added after the M2 audit:
+// grep/find rested on ONLY the bareguard gate ownerCheck, and clipboard/screenshot/wifi/
+// brightness on ONLY DEFAULT_OWNER_ONLY (which tools.json can override) — single-layered on
+// host-reaching tools. Floored here so a non-owner's tool list never even CONTAINS them.
+// (exec/read_file are deliberately NOT here: they're gate-denied for non-owners, and their
+// registry-level owner_only stays tools.json-overridable by design — the gate is the boundary.)
 const FORCE_OWNER_ONLY = new Set([
   'send_file',
   'system_info',
   'open_url',
   'notify',
   'media_control',
+  'grep_files',
+  'find_files',
+  'clipboard',
+  'screenshot',
+  'wifi',
+  'brightness',
 ]);
 
 // Default owner_only settings (used when tools.json doesn't specify)

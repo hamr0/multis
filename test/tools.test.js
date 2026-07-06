@@ -279,6 +279,23 @@ describe('getToolsForUser', () => {
       assert.ok(!userTools.find(t => t.name === name), `non-owner must not see ${name}`);
     }
   });
+
+  it('M2: grep/find + clipboard/screenshot/wifi/brightness are hard-floored (no single-layer host tool)', () => {
+    // These were single-layered before the M2 audit: grep/find rested only on the bareguard
+    // gate ownerCheck, and clipboard/screenshot/wifi/brightness only on DEFAULT_OWNER_ONLY —
+    // which a stale/hostile tools.json could flip. They must now be un-re-exposable via config.
+    const allTools = buildToolRegistry({}, 'linux');
+    const floored = ['grep_files', 'find_files', 'clipboard', 'screenshot', 'wifi', 'brightness'];
+    const config = { tools: Object.fromEntries(floored.map((n) => [n, { enabled: true, owner_only: false }])) };
+    const userTools = getToolsForUser(allTools, false, config);
+    for (const name of floored) {
+      // Only assert for tools that exist on this platform's registry — the point is that IF
+      // present, a non-owner never gets them even with owner_only:false in tools.json.
+      if (allTools.find((t) => t.name === name)) {
+        assert.ok(!userTools.find((t) => t.name === name), `non-owner must not see ${name} even with tools.json override`);
+      }
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
