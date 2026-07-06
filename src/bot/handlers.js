@@ -1,6 +1,6 @@
 const path = require('path');
 const { logAudit } = require('../governance/audit');
-const { addAllowedUser, isOwner, saveConfig, backupConfig, updateChatMeta, getMultisDir, PATHS, defaultModeForRole, roleLabel, normalizeRole } = require('../config');
+const { addAllowedUser, isOwner, saveConfig, backupConfig, updateChatMeta, getMultisDir, PATHS, defaultModeForRole, allowedModesForRole, roleLabel } = require('../config');
 const { listSkills } = require('../skills/executor');
 const context = require('../context');
 const { createProvider } = require('../llm/provider-adapter');
@@ -481,11 +481,12 @@ function createMessageRouter(config, deps = {}) {
       return;
     }
 
-    // Natural language / business routing (set by platform adapter)
-    if (msg.routeAs === 'natural' || msg.routeAs === 'business') {
-      // Business: anyone can get a response (customers via Beeper). Natural:
-      // paired users (the owner) only.
-      if (msg.routeAs !== 'business' && !isPaired(msg, config) && !isOwner(msg.senderId, config, msg)) return;
+    // Natural language / business / personal routing (set by platform adapter)
+    if (msg.routeAs === 'natural' || msg.routeAs === 'business' || msg.routeAs === 'personal') {
+      // Business/personal: a contact can get a response (via Beeper). Natural: paired users (the owner)
+      // only. Personal replies are fenced to user:<chatId> in routeAsk (isOwner is false in a contact
+      // room) and carry no business persona — the base assistant prompt (M8 §524, owner-decided).
+      if (msg.routeAs === 'natural' && !isPaired(msg, config) && !isOwner(msg.senderId, config, msg)) return;
 
       // Silently ignore empty / media-only messages in business chats
       if (msg.routeAs === 'business') {
@@ -516,9 +517,13 @@ function createMessageRouter(config, deps = {}) {
           }
           return;
         }
+      }
 
-        // Per-customer rate limit. On the cap we archive the message, hand off
-        // to a human, and stop the LLM — degrade, don't refuse (#1).
+      // Per-contact rate limit — bounds EVERY non-owner auto-respond path (business
+      // AND M8 personal), not just business, so a contact can't drive unbounded LLM
+      // calls by spamming the bot's name in a personal-mode chat. On the cap we archive
+      // the message, hand off to a human, and stop the LLM — degrade, don't refuse (#1).
+      if (msg.routeAs === 'business' || msg.routeAs === 'personal') {
         if (rateLimiter) {
           const verdict = rateLimiter.consume(msg.senderId);
           if (!verdict.allowed) {
@@ -533,7 +538,7 @@ function createMessageRouter(config, deps = {}) {
               await platform.send(msg.chatId, note);
               const who = config.chats?.[msg.chatId]?.name || msg.chatId;
               await notifyAdmins(platformRegistry, config,
-                `[Rate limit] ${who} hit the ${verdict.scope} limit — bot paused for this customer; please follow up.`);
+                `[Rate limit] ${who} hit the ${verdict.scope} limit — bot paused for this contact; please follow up.`);
               logAudit({ action: 'rate_limit', user_id: msg.senderId, chatId: msg.chatId, scope: verdict.scope });
             }
             return;
@@ -629,6 +634,9 @@ async function executeCommand(command, args, msg, platform, config, indexer, pro
         break;
       case 'mode':
         await routeMode(msg, platform, config, args, agentRegistry, { ...toolDeps, getMem });
+        break;
+      case 'name':
+        await routeName(msg, platform, config, args);
         break;
       case 'agent':
         await routeAgent(msg, platform, config, args, agentRegistry);
@@ -1427,7 +1435,7 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     // formatted as notes for buildMemorySystemPrompt (which takes a string; empty = none).
     const memHits = mem ? await indexer.recallMemory(cleanQuestion, { scope: memScopeFor(admin, msg.chatId), n: 5 }) : [];
     const memoryMd = memHits.map((h) => `- ${h.content}`).join('\n');
-    const system = buildMemorySystemPrompt(memoryMd, chunks, agentPersona);
+    const system = buildMemorySystemPrompt(memoryMd, chunks, agentPersona, config.assistant_name);
 
     // Build messages array: recent history is past COMPLETED turns only (the live
     // request is no longer eagerly appended — M10 §5 rule 1).
@@ -1464,10 +1472,20 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     // (M10 §5), so recent.json holds NOTHING about this turn while it's pending.
     if (!answer) return;
 
-    // Prefix with agent name only when multiple agents exist
-    const prefixed = agentRegistry && agentRegistry.size > 1
-      ? `[${resolved.name}] ${answer}`
-      : answer;
+    // Reply prefix. M8 §525: CONTACT-facing replies (business + personal) carry a [Name] bot-disclosure
+    // so the other party knows it's the bot, not the owner — an honest human/bot boundary. Owner/natural
+    // replies are not disclosed (the owner knows their own assistant). Cosmetic only: echo-guard stays
+    // client_tag (source:'api'), never the text — so this prefix can't be mistaken for the removed
+    // [multis] echo marker. Owner-facing multi-agent keeps the which-agent-answered tag.
+    const contactFacing = msg.routeAs === 'business' || msg.routeAs === 'personal';
+    let prefixed;
+    if (contactFacing) {
+      prefixed = `[${config.assistant_name || 'multis'}] ${answer}`;
+    } else if (agentRegistry && agentRegistry.size > 1) {
+      prefixed = `[${resolved.name}] ${answer}`;
+    } else {
+      prefixed = answer;
+    }
 
     await platform.send(msg.chatId, prefixed);
 
@@ -1631,7 +1649,34 @@ async function routeRemember(msg, platform, config, getMem, note, toolDeps = {})
   });
 }
 
-const VALID_MODES = ['off', 'business', 'silent'];
+// Every mode word the parser recognizes. A `/mode <word>` outside this set is a usage error. The
+// per-chat SET is further constrained by the account's ladder (allowedModesForRole), enforced in
+// commitMode — but the no-target `/mode business` still opens the persona menu (the become-a-business
+// path) on any account, so the command-level gate only rejects genuinely-unknown words.
+const KNOWN_MODES = ['business', 'personal', 'silent', 'off'];
+
+// M8 §514: the modes a per-chat /mode may set are constrained to the account's rung ladder
+// (allowedModesForRole = { engaged-default, silent, off }). A business account can't set a chat to
+// `personal` and a personal account can't set one to `business` — to change the engaged style for ALL
+// chats you change the account type, not one chat. Single-sourced usage text so help + both gates agree.
+function modeDescriptions(config) {
+  const name = config.assistant_name || 'multis';
+  return {
+    business: 'business — auto-respond to everyone',
+    personal: `personal  — respond only when "${name}" is named`,
+    silent: 'silent   — capture only, never respond',
+    off: 'off      — excluded (no capture, no response)',
+  };
+}
+function modeUsageMessage(config) {
+  const allowed = allowedModesForRole(config.bot_mode);
+  const desc = modeDescriptions(config);
+  const lines = allowed.map((m) => `  ${desc[m]}`).join('\n');
+  return `Usage: /mode <${allowed.join('|')}> [chat name]\n\n`
+    + `Modes for your account (${roleLabel(config.bot_mode)}):\n${lines}\n\n`
+    + `Per-chat /mode only steps a chat down to silent/off or back to the default. `
+    + `To change how the bot engages ALL chats, change your account type.`;
+}
 
 /**
  * Commit a resolved (chatId, mode) through the one governed core. set_mode is
@@ -1646,6 +1691,16 @@ const VALID_MODES = ['off', 'business', 'silent'];
  * @returns {Promise<boolean>} true if the mode was committed.
  */
 async function commitMode({ chatId, mode, agent, displayName }, msg, platform, config, toolDeps = {}) {
+  // M8 §514 anti-confusion rule, enforced at the one funnel every per-chat set passes through: a chat
+  // may only be set to a mode on the account's ladder { engaged-default, silent, off }. So a business
+  // account can't set one chat to `personal`, and a personal account can't set one chat to `business`
+  // — to change the engaged style you change the account type (the no-target /mode business menu).
+  if (!allowedModesForRole(config.bot_mode).includes(mode)) {
+    await platform.send(msg.chatId,
+      `A ${roleLabel(config.bot_mode)} account can't set a chat to "${mode}".\n\n${modeUsageMessage(config)}`);
+    return false;
+  }
+
   const args = { target: chatId, mode };
   // The success tail runs identically whether set_mode cleared immediately
   // (silent/business → benign) or after the PIN ceremony (off → destructive,
@@ -1716,6 +1771,35 @@ function makeModeAsk({ mode, matches, agent, msg, platform, config, toolDeps }) 
   };
 }
 
+/**
+ * `/name [new name]` — view or set the assistant's name (M8 §523). Owner-only, benign (no PIN). The
+ * name is the personal-mode trigger word AND the [Name] disclosure prefix on contact-facing replies, so
+ * one setting drives both. Bare `/name` reports the current name + what it controls.
+ */
+async function routeName(msg, platform, config, args) {
+  if (!isOwner(msg.senderId, config, msg)) {
+    await platform.send(msg.chatId, 'Owner only command.');
+    return;
+  }
+  const current = config.assistant_name || 'multis';
+  const name = (args || '').trim().replace(/\s+/g, ' ');
+  if (!name) {
+    await platform.send(msg.chatId,
+      `Assistant name: ${current}\n\n`
+      + `Set it with /name <new name>. In personal mode I reply only when this name is called, `
+      + `and my replies to contacts are prefixed [${current}] so they know it's a bot.`);
+    return;
+  }
+  if (name.length > 40) {
+    await platform.send(msg.chatId, 'Name too long — keep it under 40 characters.');
+    return;
+  }
+  config.assistant_name = name;
+  saveConfig(config);
+  logAudit({ action: 'set_name', user_id: msg.senderId, name });
+  await platform.send(msg.chatId, `Assistant name set to "${name}" (was "${current}").`);
+}
+
 async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = {}) {
   const { platformRegistry, pending } = toolDeps;
   // Owner-only command.
@@ -1727,87 +1811,16 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
   const parts = (args || '').trim().split(/\s+/);
   const mode = parts[0] ? parts[0].toLowerCase() : '';
 
-  // Telegram: /mode works as admin — can set per-chat Beeper modes via platform registry
+  // Telegram is the personal-bot transport (owner-only, PRD §3g): it is bound 1:1
+  // to the personal-bot role and NEVER reaches into Beeper. It has no contact chats
+  // to manage, so /mode only reports the account role and points role changes at the
+  // init wizard — the single place a role changes (re-init reconciles per-chat modes
+  // on the switch). Contact-mode control lives solely in Beeper note-to-self.
   if (msg.platform === 'telegram') {
-    const beeperPlatform = platformRegistry?.get('beeper');
-    const hasBeeperChats = beeperPlatform && config.platforms?.beeper?.enabled;
-
-    if (!mode) {
-      let statusMsg = `Bot mode: ${roleLabel(config.bot_mode)}`;
-      if (hasBeeperChats) {
-        const allChats = await listBeeperChats(beeperPlatform, config);
-        if (allChats && allChats.length > 0) {
-          statusMsg += `\n\n${formatChatOverview(allChats, config)}`;
-        }
-      }
-      statusMsg += `\n\n${MODE_FOOTER}`;
-      await platform.send(msg.chatId, statusMsg);
-      return;
-    }
-
-    if (!VALID_MODES.includes(mode)) {
-      await platform.send(msg.chatId,
-        'Usage: /mode <business|silent|off> [chat name]\n\n' +
-        'Modes:\n' +
-        '  business — auto-respond\n' +
-        '  silent   — archive only\n' +
-        '  off      — completely ignored\n\n' +
-        'Without target: sets global bot mode.\n' +
-        'With target: sets mode for a specific Beeper chat.'
-      );
-      return;
-    }
-
-    // With target → set per-chat Beeper mode
-    const target = parts.slice(1).join(' ');
-    if (target && hasBeeperChats) {
-      const match = await findBeeperChat(beeperPlatform, target, config);
-      if (!match) {
-        await platform.send(msg.chatId, `No chat found matching "${target}".`);
-        return;
-      }
-      if (match.length > 1) {
-        const labels = disambiguateTitles(match, config);
-        const list = match.map((c, i) => `  ${i + 1}) ${labels.get(c.id)}`).join('\n');
-        await platform.send(msg.chatId, `Multiple matches:\n${list}\n\nReply with a number:`);
-        await openAsk(makeModeAsk({ mode, matches: match, agent: null, msg, platform, config, toolDeps }),
-          { pending, chatId: msg.chatId, senderId: msg.senderId });
-        return;
-      }
-      const chat = match[0];
-      // Block silent/off for personal/note-to-self chats
-      if ((mode === 'silent' || mode === 'off') && beeperPlatform?._personalChats?.has(chat.id)) {
-        await platform.send(msg.chatId, 'Personal/note-to-self chats cannot be set to silent or off.');
-        return;
-      }
-      await commitMode({ chatId: chat.id, mode, displayName: chat.title || chat.id }, msg, platform, config, toolDeps);
-      return;
-    }
-
-    // No target + business → show business menu
-    if (mode === 'business') {
-      await showBusinessMenu(msg, platform, config, { toolDeps });
-      return;
-    }
-
-    // Global "off" is not supported. To halt the bot, stop the daemon
-    // (`multis stop`) — a global off would keep the process running but playing
-    // dead, with no way to re-enable from chat (off ignores incoming messages).
-    // Per-chat off (/mode off <chat>) mutes a single conversation and IS supported.
-    if (mode === 'off') {
-      await platform.send(msg.chatId,
-        'Global "off" isn\'t supported — to stop the bot, run `multis stop`.\n' +
-        'To mute one chat: /mode off <chat name>.');
-      return;
-    }
-
-    // No target → change the global role. bot_mode is a ROLE (§3g), so store the
-    // canonical role, not the raw chat-mode word (only 'silent' reaches here —
-    // 'business' shows the menu, 'off' is blocked above). silent → personal-assistant.
-    config.bot_mode = normalizeRole(mode);
-    saveConfig(config);
-    await platform.send(msg.chatId, `Bot mode set to: ${roleLabel(config.bot_mode)}`);
-    logAudit({ action: 'mode', user_id: msg.senderId, mode: config.bot_mode, scope: 'global' });
+    await platform.send(msg.chatId,
+      `Bot mode: ${roleLabel(config.bot_mode)}\n\n` +
+      'Telegram is a personal bot — no contact chats to manage here.\n' +
+      'To change your account type, run `multis init`.');
     return;
   }
 
@@ -1819,27 +1832,15 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
         await platform.send(msg.chatId, 'No chats found.');
         return;
       }
-      await platform.send(msg.chatId, `${formatChatOverview(allChats, config)}\n\n${MODE_FOOTER}`);
+      await platform.send(msg.chatId, `${formatChatOverview(allChats, config)}\n\n${modeFooter(config)}`);
     } else {
-      await platform.send(msg.chatId,
-        'Usage: /mode <business|silent|off> [target]\n\n' +
-        'Sets mode for a Beeper chat.'
-      );
+      await platform.send(msg.chatId, modeUsageMessage(config));
     }
     return;
   }
 
-  if (!VALID_MODES.includes(mode)) {
-    await platform.send(msg.chatId,
-      'Usage: /mode <business|silent|off> [target]\n\n' +
-      'Modes:\n' +
-      '  business — auto-respond, customer-safe\n' +
-      '  silent   — archive only, no bot output\n' +
-      '  off      — completely ignored (no archive, no response)\n\n' +
-      'From self-chat: /mode silent (interactive picker)\n' +
-      'From self-chat: /mode silent John (search by name)\n' +
-      'In any chat: /mode business (sets current chat)'
-    );
+  if (!KNOWN_MODES.includes(mode)) {
+    await platform.send(msg.chatId, modeUsageMessage(config));
     return;
   }
 
@@ -1880,9 +1881,33 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
     return;
   }
 
+  // Beeper: no-target `/mode off` is NOT a global off — that would leave the daemon
+  // running but playing dead with no way back from chat. Refuse and point at the real
+  // levers (multis stop for the whole bot, /mode off <chat> for one conversation).
+  // Mirrors the safety that lived in the removed Telegram branch (footgun, per §mode).
+  if (mode === 'off') {
+    await platform.send(msg.chatId,
+      'Global "off" isn\'t supported — to stop the bot, run `multis stop`.\n' +
+      'To mute one chat: /mode off <chat name>.');
+    return;
+  }
+
   // Beeper: no target + business → show business menu
   if (mode === 'business' && msg.isSelf) {
     await showBusinessMenu(msg, platform, config, { toolDeps });
+    return;
+  }
+
+  // Beeper: no target — if in self-chat, show interactive picker. But a per-chat
+  // /mode may only set a mode on the account's ladder (§514): the engaged mode of the
+  // OTHER account type (e.g. `personal` on a business account) is a ROLE change, not a
+  // per-chat tweak. Reject it and point at re-init (the one place a role changes —
+  // re-init reconciles per-chat modes) instead of the old dead-end picker that offered
+  // a mode commitMode would then refuse. silent/off + the current engaged mode fall through.
+  if (msg.isSelf && !allowedModesForRole(config.bot_mode).includes(mode)) {
+    await platform.send(msg.chatId,
+      `A ${roleLabel(config.bot_mode)} account can't engage chats in "${mode}" mode.\n` +
+      'To change your account type, run `multis init`.');
     return;
   }
 
@@ -1920,11 +1945,12 @@ function setChatMode(config, chatId, mode) {
 
 function getChatMode(config, chatId) {
   const stored = config.chats?.[chatId]?.mode;
-  // Ignore stale 'personal' values (was renamed to profile, not a valid mode)
-  if (stored && stored !== 'personal') return stored;
+  // M8: `personal` is a real ladder rung now, so a stored per-chat mode (including `personal`) is
+  // honored. Mirrors beeper.js `_getChatMode` — the two must agree or routing and the /mode overview drift.
+  if (stored) return stored;
   if (config.platforms?.beeper?.default_mode) return config.platforms.beeper.default_mode;
   // Default mode for a non-owner chat is derived from the owner's role (§3g):
-  // business→business, personal-assistant(+legacy 'personal')→silent, personal-bot→off.
+  // business→business, personal-assistant(+legacy 'personal')→personal, personal-bot→off.
   return defaultModeForRole(config.bot_mode);
 }
 
@@ -1993,15 +2019,18 @@ function disambiguateTitles(chats, config) {
 // /mode to look; here's how to act). The overview is NOT a numbered picker: a
 // number reply there isn't captured (it falls through to the agent), so it must
 // not LOOK selectable. To act you use one of these forms.
-const MODE_FOOTER =
-  'Change a chat:\n' +
-  ' /mode silent <name>   — set one by name\n' +
-  ' /mode silent          — pick from a list\n' +
-  'modes: business · silent · off';
+// Role-aware so the listed modes match what THIS account can actually set (M8 §514) — a personal
+// account shows personal/silent/off, a business account business/silent/off. Both call sites have config.
+function modeFooter(config) {
+  return 'Change a chat:\n' +
+    ' /mode <mode> <name>   — set one by name\n' +
+    ' /mode <mode>          — pick from a list\n' +
+    `modes: ${allowedModesForRole(config.bot_mode).join(' · ')}`;
+}
 
 /**
  * Read-only `/mode` overview body. Leads with the chats the bot is actually
- * engaging (business/silent) and collapses the off ones to a count — a 40-row
+ * engaging (business/personal/silent) and collapses the off ones to a count — a 40-row
  * dump of mostly-off chats is noise, not status. De-numbered on purpose (the
  * overview is not a picker; browse/act via `/mode <mode>` or `… <name>`).
  */
@@ -2158,7 +2187,7 @@ function createSchedulerTick({ platformRegistry, config, provider, indexer, getM
       const memHits = indexer ? await indexer.recallMemory(job.action, { scope: 'admin', n: 5 }) : [];
       const memoryMd = memHits.map((h) => `- ${h.content}`).join('\n');
       const chunks = indexer ? await indexer.search(job.action, { scope: 'admin', n: 5 }) : [];
-      const system = buildMemorySystemPrompt(memoryMd, chunks);
+      const system = buildMemorySystemPrompt(memoryMd, chunks, null, config.assistant_name);
 
       const answer = await runAgentLoop(provider, [{ role: 'user', content: job.action }], userTools, {
         system,
@@ -2656,8 +2685,10 @@ const HELP_COMMANDS = [
   { name: 'read',     group: 'RUN',      role: 'owner', usage: '/read <path>',                    summary: 'read a file or directory (may need PIN)' },
   { name: 'plan',     group: 'RUN',      role: 'owner', usage: '/plan <goal>',                    summary: 'break a goal into steps & run them' },
   // MANAGE
-  { name: 'mode',     group: 'MANAGE',   role: 'owner', usage: '/mode [business|silent|off] [chat]', summary: 'how I respond in a chat',
-    detail: 'Bare `/mode` → a read-only overview of which chats are engaged, plus how to change one (it is not a picker — to act you give a mode). `/mode <mode>` → pick a chat from a list. `/mode <mode> <name>` → set that Beeper chat directly (picker on multiple matches). `/mode business` opens the business-persona menu. silent = archive only; off = ignore.' },
+  { name: 'mode',     group: 'MANAGE',   role: 'owner', usage: '/mode [mode] [chat]', summary: 'how I respond in a chat',
+    detail: 'The modes you can set depend on your account type (business account: business/silent/off; personal-assistant: personal/silent/off) — a chat only steps down to silent/off or back to the account default. Bare `/mode` → a read-only overview of which chats are engaged. `/mode <mode>` → pick a chat from a list. `/mode <mode> <name>` → set that Beeper chat directly. `/mode business` opens the business-persona menu. personal = reply only when named; silent = capture only; off = ignore.' },
+  { name: 'name',     group: 'MANAGE',   role: 'owner', usage: '/name [new name]',                   summary: "view or set the assistant's name",
+    detail: 'The name is the personal-mode trigger (I reply when it is called) and the [Name] prefix on my replies to contacts. Bare `/name` shows the current name.' },
   { name: 'agent',    group: 'MANAGE',   role: 'owner', usage: '/agent [name]',                   summary: "show or set this chat's agent" },
   { name: 'agents',   group: 'MANAGE',   role: 'owner', usage: '/agents',                         summary: 'list all agents' },
   { name: 'pin',      group: 'MANAGE',   role: 'owner', usage: '/pin',                            summary: 'set or change your PIN' },

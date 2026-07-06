@@ -4,6 +4,7 @@
   "owner_id": null,
   "allowed_users": [],
   "bot_mode": "personal",
+  "assistant_name": "multis",
   "platforms": {
     "telegram": {
       "enabled": true,

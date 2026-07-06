@@ -83,6 +83,14 @@ describe('loadConfig — default merging', () => {
     assert.strictEqual(config.documents.parseTimeoutMs, 30000);
   });
 
+  it('defaults assistant_name to "multis" for configs that predate it (M8)', () => {
+    delete require.cache[require.resolve('../src/config')];
+    const { loadConfig } = require('../src/config');
+    // The minimal on-disk config.json has no assistant_name — loadConfig must inject the default so
+    // the personal-mode trigger + [Name] disclosure prefix always have a name to work with.
+    assert.strictEqual(loadConfig().assistant_name, 'multis');
+  });
+
   it('preserves a custom max_tool_rounds over the default', () => {
     const multisDir = path.join(tmpDir, '.multis');
     const config = JSON.parse(fs.readFileSync(path.join(multisDir, 'config.json'), 'utf-8'));
@@ -198,20 +206,24 @@ describe('loadConfig — default merging', () => {
 describe('role ↔ mode (§3g)', () => {
   const { defaultModeForRole, roleLabel, normalizeRole } = require('../src/config');
 
-  it('maps the three roles to their non-owner default mode', () => {
+  it('maps the three roles to their non-owner default mode (M8: personal-assistant → personal)', () => {
     assert.equal(defaultModeForRole('business'), 'business');
-    assert.equal(defaultModeForRole('personal-assistant'), 'silent');
+    // M8 engagement ladder: the personal-assistant engaged rung is `personal` (respond only when
+    // named), replacing the old `silent`. This is M8's one deliberate behavior change.
+    assert.equal(defaultModeForRole('personal-assistant'), 'personal');
     assert.equal(defaultModeForRole('personal-bot'), 'off');
   });
 
-  it('treats legacy "personal" as personal-assistant (silent) — back-compat', () => {
-    assert.equal(defaultModeForRole('personal'), 'silent');
+  it('treats legacy "personal" as personal-assistant (now `personal` mode) — back-compat', () => {
+    assert.equal(defaultModeForRole('personal'), 'personal');
     assert.equal(normalizeRole('personal'), 'personal-assistant');
   });
 
-  it('defaults an unset/unknown role to personal-assistant (silent), never auto-respond', () => {
-    assert.equal(defaultModeForRole(undefined), 'silent');
-    assert.equal(defaultModeForRole('garbage'), 'silent');
+  it('defaults an unset/unknown role to personal-assistant (personal), never auto-respond', () => {
+    // `personal` responds ONLY when the assistant is named — still never auto-responds, so the
+    // fail-safe "unknown role never blasts everyone" invariant holds.
+    assert.equal(defaultModeForRole(undefined), 'personal');
+    assert.equal(defaultModeForRole('garbage'), 'personal');
   });
 
   it('gives a human label per role', () => {
@@ -219,6 +231,73 @@ describe('role ↔ mode (§3g)', () => {
     assert.equal(roleLabel('personal-assistant'), 'Personal assistant');
     assert.equal(roleLabel('personal-bot'), 'Personal bot');
     assert.equal(roleLabel('personal'), 'Personal assistant'); // legacy
+  });
+});
+
+// M8 module 2 — the account type owns the engaged rung; per-chat /mode may only step DOWN to
+// silent/off or back up to the account default. The picker set is constrained to
+// { defaultModeForRole(bot_mode), silent, off } (deduped), single-sourced here so the module-5
+// picker and its tests can't drift. This is the anti-confusion rule (PRD §514).
+describe('allowedModesForRole (§514 — constrained per-chat picker set)', () => {
+  const { allowedModesForRole } = require('../src/config');
+
+  it('business may set business · silent · off (engaged rung first)', () => {
+    assert.deepEqual(allowedModesForRole('business'), ['business', 'silent', 'off']);
+  });
+
+  it('personal-assistant may set personal · silent · off — never business (no crossing streams)', () => {
+    assert.deepEqual(allowedModesForRole('personal-assistant'), ['personal', 'silent', 'off']);
+    assert.ok(!allowedModesForRole('personal-assistant').includes('business'));
+  });
+
+  it('legacy "personal" resolves like personal-assistant', () => {
+    assert.deepEqual(allowedModesForRole('personal'), ['personal', 'silent', 'off']);
+  });
+
+  it('personal-bot dedups (default off) — off · silent', () => {
+    assert.deepEqual(allowedModesForRole('personal-bot'), ['off', 'silent']);
+  });
+});
+
+// The clean role switch (M8): re-init remaps stored per-chat modes that are invalid
+// for the NEW role to that role's default, so no stale cross-role mode bleeds through.
+// silent/off are valid everywhere and must survive; only the old engaged mode remaps.
+describe('reconcileChatModes (clean role switch)', () => {
+  const { reconcileChatModes } = require('../src/config');
+
+  it('business → personal-assistant: business chats become personal, silent/off survive', () => {
+    const config = { chats: {
+      a: { mode: 'business' }, b: { mode: 'silent' }, c: { mode: 'off' }, d: { title: 'no-mode' },
+    } };
+    const n = reconcileChatModes(config, 'personal-assistant');
+    assert.equal(config.chats.a.mode, 'personal', 'engaged remaps to the new engaged mode');
+    assert.equal(config.chats.b.mode, 'silent', 'muted-silent survives');
+    assert.equal(config.chats.c.mode, 'off', 'muted-off survives');
+    assert.equal(config.chats.d.mode, undefined, 'metadata-only chats untouched');
+    assert.equal(n, 1, 'only the one invalid mode was remapped');
+  });
+
+  it('personal-assistant → business: round-trips personal back to business', () => {
+    const config = { chats: { a: { mode: 'personal' }, b: { mode: 'off' } } };
+    reconcileChatModes(config, 'business');
+    assert.equal(config.chats.a.mode, 'business');
+    assert.equal(config.chats.b.mode, 'off');
+  });
+
+  it('→ personal-bot: contact-engaged modes fall to off (contacts ignored), never un-mutes off/silent', () => {
+    const config = { chats: {
+      a: { mode: 'business' }, b: { mode: 'personal' }, c: { mode: 'off' }, d: { mode: 'silent' },
+    } };
+    reconcileChatModes(config, 'personal-bot');
+    assert.equal(config.chats.a.mode, 'off');
+    assert.equal(config.chats.b.mode, 'off');
+    assert.equal(config.chats.c.mode, 'off', 'an already-off chat is not un-muted');
+    assert.equal(config.chats.d.mode, 'silent', 'silent survives (valid on personal-bot)');
+  });
+
+  it('no chats / bare config: safe no-op returning 0', () => {
+    assert.equal(reconcileChatModes({}, 'business'), 0);
+    assert.equal(reconcileChatModes({ chats: {} }, 'business'), 0);
   });
 });
 

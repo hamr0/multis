@@ -2,6 +2,20 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [0.20.0] — 2026-07-06
+
+### Added — a named assistant you can summon, and a clearer "how much do I participate" ladder (M8)
+
+**One engagement ladder instead of a mode mesh.** How much the bot participates in a chat is now a single axis, most → least: **business** (auto-respond to everyone) · **personal** (respond only when you call the assistant by name) · **silent** (capture only, never respond) · **off** (excluded entirely). Your **account type owns the engaged rung** — a personal-assistant account's chats default to *personal*, a business account's to *business* — and a per-chat `/mode` can only step a chat *down* to silent/off or back up to the account default. It can't cross streams: a personal account can't make one chat auto-respond, and a business account can't make one chat name-triggered. To change how the bot engages *all* chats, you change the account type. (This removes the old global-vs-per-chat confusion. The one behavior change: personal-assistant chats now default to *personal* rather than *silent* — they'll reply when named instead of staying fully quiet.)
+
+**A name for the assistant** (`/name`, default `multis`). In *personal* mode the bot replies only when this name appears in a message (whole-word, case-insensitive — "multis" fires, "multisystem" doesn't). And every reply the bot sends to a **contact** (personal *or* business) is prefixed `[Name] …` so the other party always knows they're talking to a bot, not you — an honest, deliberate disclosure. Set it with `/name <new name>`; init now asks for it too. (Pick a distinctive name — a generic word like "bot" will over-trigger.) The name is also the assistant's **identity**: ask "what's your name?" and it answers with the name you set, in every role — held firm even against earlier messages in the conversation that used a different name.
+
+Summoning is **contact-side**: a contact names the assistant in the chat and it replies (scoped to that contact + your public knowledge base — never your private data). To have the assistant act across your contacts on your behalf ("send Melanie my address"), you drive it from your note-to-self channel, where it has your full context.
+
+**Changing account type is clean.** Re-running `multis init` to switch account type now remaps each chat's mode to the new type's ladder — an engaged chat stays engaged (business↔personal), a muted one stays muted (silent/off untouched) — so no stale cross-type mode bleeds through. On Telegram, `/mode` no longer reaches into Beeper chats: it's the personal-bot transport, so it just reports the account type and points role changes at `multis init`.
+
+**Bounded.** The new personal auto-respond path is rate-limited per contact by the same limiter that guards business — a contact can't drive unbounded model calls by spamming the bot's name. Full suite 613/613.
+
 ## [0.19.4] — 2026-07-06
 
 ### Changed — absorbed litectx 0.27.0, removing two internal workarounds (no behavior change)

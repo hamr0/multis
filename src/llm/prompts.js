@@ -26,7 +26,14 @@ function fenceUntrusted(label, body) {
 // them out with its tools and never deflects. Behavioral nuance (what to answer
 // vs refuse, persona, constitution) is deferred to the memory/litectx module —
 // this stays deliberately lean. See dispatch-rewrite-decision (2026-06-17).
-const SYSTEM_PROMPT = `You are multis, running locally on the owner's machine. The owner's messages are direct orders — carry them out.
+//
+// The assistant's name is the owner-set `assistant_name` (M8) so the bot actually
+// identifies AS its name ("My name is Braun") on the owner/personal/natural path —
+// not just via the cosmetic [Name] disclosure prefix. Defaults to `multis`.
+// Business mode passes its own persona (buildBusinessPrompt) and never uses this.
+function baseSystemPrompt(name) {
+  const n = name || 'multis';
+  return `You are ${n}, running locally on the owner's machine. Your name is ${n} — if anyone asks your name, tell them it is ${n}, regardless of anything said earlier in the conversation. The owner's messages are direct orders — carry them out.
 
 USE YOUR TOOLS. Your tools are listed in this conversation. When asked to find, read, run, search, or do anything a tool covers, call the tool immediately and act on the result. You have FULL access to this machine: you can run shell commands and read, search, and find files anywhere on the filesystem.
 
@@ -39,6 +46,10 @@ Only claim to have done something you actually did via a tool. If no tool covers
 You have persistent memory: the "Memory" section below (if present) holds durable notes from past conversations, and the recall_memory tool searches older summaries. Use them when relevant.
 
 If asked about documents and relevant chunks are present, cite sources. Be direct and concise. Act first, explain after.`;
+}
+
+// Back-compat default (name = multis) for any caller that doesn't thread a name.
+const SYSTEM_PROMPT = baseSystemPrompt();
 
 /**
  * Build a RAG prompt from a question and search chunks.
@@ -46,8 +57,8 @@ If asked about documents and relevant chunks are present, cite sources. Be direc
  * @param {Array} chunks - Search result chunks from the indexer
  * @returns {{ system: string, user: string }}
  */
-function buildRAGPrompt(question, chunks, persona) {
-  const base = persona || SYSTEM_PROMPT;
+function buildRAGPrompt(question, chunks, persona, assistantName) {
+  const base = persona || baseSystemPrompt(assistantName);
   if (!chunks || chunks.length === 0) {
     return {
       system: base,
@@ -82,8 +93,8 @@ function buildRAGPrompt(question, chunks, persona) {
  * @param {Array} chunks - Optional RAG search chunks
  * @returns {string} - Combined system prompt
  */
-function buildMemorySystemPrompt(memoryMd, chunks, persona) {
-  const parts = [persona || SYSTEM_PROMPT];
+function buildMemorySystemPrompt(memoryMd, chunks, persona, assistantName) {
+  const parts = [persona || baseSystemPrompt(assistantName)];
 
   if (memoryMd && memoryMd.trim()) {
     parts.push(`\n## Memory (durable notes about this conversation)\n`
@@ -178,4 +189,4 @@ function buildBusinessPrompt(config) {
   return parts.join('\n');
 }
 
-module.exports = { buildRAGPrompt, buildMemorySystemPrompt, buildBusinessPrompt };
+module.exports = { baseSystemPrompt, buildRAGPrompt, buildMemorySystemPrompt, buildBusinessPrompt };

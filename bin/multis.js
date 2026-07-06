@@ -6,7 +6,7 @@ const path = require('path');
 const readline = require('readline');
 const crypto = require('crypto');
 
-const { PATHS, getMultisDir, saveConfig, roleLabel, normalizeRole, ROLE_BY_CHOICE, applyRoleTransport } = require('../src/config');
+const { PATHS, getMultisDir, saveConfig, roleLabel, normalizeRole, ROLE_BY_CHOICE, applyRoleTransport, reconcileChatModes } = require('../src/config');
 const MULTIS_DIR = getMultisDir();
 const PID_PATH = PATHS.pid();
 const CONFIG_PATH = PATHS.config();
@@ -193,15 +193,35 @@ async function runInit() {
     console.log(c.ok(`Keeping: ${roleLabel(config.bot_mode)}`));
   } else {
     const role = ROLE_BY_CHOICE[roleChoice] || 'personal-bot';
+    const oldRole = normalizeRole(config.bot_mode);
     // role ⟺ transport. applyRoleTransport sets bot_mode and disables the
     // non-selected platform; Step 2 then connects (and enables) the implied
     // channel — so switching role cleanly flips transport.
     ({ useTelegram, useBeeper } = applyRoleTransport(config, role));
     console.log(c.ok(`${roleLabel(role)} — ${useBeeper ? 'Beeper' : 'Telegram'}`));
+    // Clean switch: remap any per-chat mode invalid for the new role to its
+    // default so no stale cross-role mode bleeds through (silent/off survive).
+    if (oldRole !== role) {
+      const remapped = reconcileChatModes(config, role);
+      if (remapped > 0) console.log(c.dim(`  ${remapped} chat${remapped === 1 ? '' : 's'} remapped to the ${roleLabel(role)} default`));
+    }
   }
 
   if (!config.platforms) config.platforms = {};
   summary.botMode = config.bot_mode;
+
+  // M8: the assistant's name. It's the bot's IDENTITY in the system prompt — it answers
+  // "what's your name?" as this in EVERY role — and on the contact-facing roles it's also
+  // the personal-mode trigger word and the [Name] disclosure prefix on replies to contacts.
+  // So prompt for it in every role (personal-bot included), with role-appropriate copy.
+  {
+    const currentName = config.assistant_name || 'multis';
+    const contactHint = config.bot_mode === 'personal-bot' ? '' : ' — contacts also see it as "[Name] …" and I answer to it';
+    const nameInput = (await ask(`\nWhat should I be called? (I answer to this name${contactHint}) [${currentName}]: `)).trim();
+    config.assistant_name = nameInput || currentName;
+    console.log(c.ok(`Name: ${config.assistant_name}`));
+  }
+  summary.assistantName = config.assistant_name;
 
   // -----------------------------------------------------------------------
   // Step 2: Platform connections
@@ -223,6 +243,14 @@ async function runInit() {
       const tgInput = (await ask('  [Enter to keep, or paste new token]: ')).trim();
       if (!tgInput) {
         skipTelegram = true;
+        // Keeping a verified token still has to ENABLE the transport. applyRoleTransport
+        // only disables the non-selected transport; enabling the bound one is this connect
+        // step's job. Without this, switching INTO personal-bot from a Beeper role (where
+        // telegram.enabled was set false) leaves BOTH transports off → "No platforms
+        // configured" and the daemon won't start.
+        if (!config.platforms.telegram) config.platforms.telegram = {};
+        config.platforms.telegram.enabled = true;
+        if (existingTgToken && !config.platforms.telegram.bot_token) config.platforms.telegram.bot_token = existingTgToken;
         const ownerDisplay = existingOwner ? `ID ${existingOwner}` : null;
         summary.telegram = { bot: `@${existingTgBot}`, owner: ownerDisplay };
         console.log(c.ok('Keeping Telegram config'));
@@ -650,6 +678,7 @@ async function runInit() {
 
   const rows = [];
   rows.push(['Mode', roleLabel(config.bot_mode)]);
+  if (config.bot_mode !== 'personal-bot') rows.push(['Name', config.assistant_name || 'multis']);
 
   // Telegram
   if (summary.telegram) {

@@ -8,6 +8,7 @@ const DEFAULT_POLL_INTERVAL = 3000;
 const MAX_PAGES_PER_TICK = 10; // has_more drain cap so one tick can't starve the loop
 const MAX_ASSET_BYTES = 25 * 1024 * 1024; // hard ceiling on a downloaded attachment (DoS guard)
 const { PATHS, defaultModeForRole } = require('../config');
+const { nameIsCalled } = require('../bot/name-match'); // M8: personal-mode name trigger
 
 /**
  * Beeper platform adapter — consumes beeperbox's MCP watch/send verbs.
@@ -192,6 +193,12 @@ class BeeperPlatform extends Platform {
       // Incoming message in a business-mode chat → auto-respond
       routeAs = 'business';
       shouldProcess = true;
+    } else if (!isSelf && mode === 'personal') {
+      // M8 personal mode: respond ONLY when the assistant is named, else capture silently. Trigger is
+      // contact-side only (isSelf is handled above) — the owner drives cross-contact actions from
+      // note-to-self, where owner scope is reachable (a reply here is fenced to user:<chatId>).
+      routeAs = nameIsCalled(text, this.config.assistant_name) ? 'personal' : 'silent';
+      shouldProcess = true;
     }
     // silent mode: archive to memory, no response
     if (!shouldProcess && mode === 'silent') {
@@ -332,8 +339,10 @@ class BeeperPlatform extends Platform {
 
   _getChatMode(chatId) {
     const stored = this.config.chats?.[chatId]?.mode;
-    // Ignore stale 'personal' values (was renamed to profile, not a valid mode)
-    if (stored && stored !== 'personal') return stored;
+    // M8: `personal` is now a real ladder rung (respond-only-when-named), so a stored per-chat mode
+    // — including `personal` — is honored. (Note-to-self still falls through to `personal` below, but
+    // the owner isSelf branches in _handleMessage handle that channel before any mode-based routing.)
+    if (stored) return stored;
     if (this.config.platforms?.beeper?.default_mode) return this.config.platforms.beeper.default_mode;
     // Personal chats (note-to-self) are admin command channels — never restrict
     if (this._personalChats.has(chatId)) return 'personal';

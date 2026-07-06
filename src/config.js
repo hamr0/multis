@@ -228,6 +228,10 @@ function loadConfig() {
     config.business.escalation.admin_chat = config.business.admin_chat;
   }
 
+  // M8: the assistant's name — the personal-mode trigger word AND the [Name] disclosure prefix on
+  // contact-facing replies (§523). Default 'multis' so configs predating M8 always have a name.
+  if (!config.assistant_name) config.assistant_name = 'multis';
+
   // Ensure config.chats block exists (single source of truth for chat metadata)
   if (!config.chats) config.chats = {};
 
@@ -431,13 +435,14 @@ function isOwner(userId, config, msg) {
 // ---------------------------------------------------------------------------
 // Role ↔ mode (PRD §3g). `bot_mode` is the owner's choice of how the bot treats
 // NON-owner chats by default — the owner is always served regardless. Three
-// roles map to a default mode; the legacy 2-value `personal` is an alias for
-// `personal-assistant` (its old behavior was already "silent"), so existing
-// configs keep working with no migration.
+// roles map to a default mode (M8 engagement ladder: business→business,
+// personal-assistant→personal, personal-bot→off); the legacy 2-value `personal`
+// is an alias for `personal-assistant`, so existing configs keep working with no
+// migration (they inherit the new `personal` default rung).
 // ---------------------------------------------------------------------------
 const ROLES = {
   'business':           { label: 'Business chatbot',   mode: 'business' }, // auto-respond to contacts
-  'personal-assistant': { label: 'Personal assistant', mode: 'silent' },   // log contacts, never reply; owner served fully
+  'personal-assistant': { label: 'Personal assistant', mode: 'personal' }, // M8: respond only when named; owner served fully
   'personal-bot':       { label: 'Personal bot',       mode: 'off' },      // ignore contacts; owner-only
 };
 
@@ -451,6 +456,40 @@ function normalizeRole(botMode) {
 /** Default mode applied to a non-owner chat for the given role. */
 function defaultModeForRole(botMode) {
   return ROLES[normalizeRole(botMode)].mode;
+}
+
+/**
+ * M8 (§514) — the constrained per-chat `/mode` picker set for a role: the account's engaged rung
+ * (first), then the step-downs `silent` and `off`. Deduped so `personal-bot` (default `off`) yields
+ * `['off','silent']`. This is the anti-confusion rule — a chat can only step DOWN or back up to the
+ * account default, never cross to another account's engaged style (a personal account can't set one
+ * chat `business`, and vice-versa). Single-sourced here so the picker + its tests can't drift.
+ */
+function allowedModesForRole(botMode) {
+  return [...new Set([defaultModeForRole(botMode), 'silent', 'off'])];
+}
+
+/**
+ * M8 clean role switch: when the account changes role, remap any stored per-chat
+ * mode that isn't valid for the NEW role to that role's default (engaged) mode.
+ * `silent` and `off` are valid in every role (allowedModesForRole), so they're
+ * never touched — only the OLD role's engaged mode (`business`/`personal`) is
+ * invalid in the new role and gets re-expressed as the new engaged mode. This
+ * preserves engagement intent across a switch (engaged↔engaged, muted stays
+ * muted) and prevents stale cross-role modes bleeding through. Returns the count
+ * of chats remapped (for the init log). Mutates config.chats in place.
+ */
+function reconcileChatModes(config, newRole) {
+  const allowed = allowedModesForRole(newRole);
+  const fallback = defaultModeForRole(newRole);
+  let remapped = 0;
+  for (const chat of Object.values(config.chats || {})) {
+    if (chat && chat.mode && !allowed.includes(chat.mode)) {
+      chat.mode = fallback;
+      remapped++;
+    }
+  }
+  return remapped;
 }
 
 /** Human label for a role (init/status/doctor display). */
@@ -500,6 +539,8 @@ module.exports = {
   isOwner,
   normalizeRole,
   defaultModeForRole,
+  allowedModesForRole,
+  reconcileChatModes,
   roleLabel,
   ROLE_BY_CHOICE,
   transportForRole,
