@@ -236,6 +236,14 @@ async function runInit() {
       const tgInput = (await ask('  [Enter to keep, or paste new token]: ')).trim();
       if (!tgInput) {
         skipTelegram = true;
+        // Keeping a verified token still has to ENABLE the transport. applyRoleTransport
+        // only disables the non-selected transport; enabling the bound one is this connect
+        // step's job. Without this, switching INTO personal-bot from a Beeper role (where
+        // telegram.enabled was set false) leaves BOTH transports off → "No platforms
+        // configured" and the daemon won't start.
+        if (!config.platforms.telegram) config.platforms.telegram = {};
+        config.platforms.telegram.enabled = true;
+        if (existingTgToken && !config.platforms.telegram.bot_token) config.platforms.telegram.bot_token = existingTgToken;
         const ownerDisplay = existingOwner ? `ID ${existingOwner}` : null;
         summary.telegram = { bot: `@${existingTgBot}`, owner: ownerDisplay };
         console.log(c.ok('Keeping Telegram config'));
