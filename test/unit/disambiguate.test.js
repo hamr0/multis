@@ -102,6 +102,17 @@ describe('formatChatOverview', () => {
     assert.doesNotMatch(out, /\d+\)/);            // no "1)" numbering — the false affordance is gone
   });
 
+  it('honors a stored `personal` mode (M8) — the overview shows personal, not the role default', () => {
+    // Discriminating case: a business account (default 'business') with a chat explicitly set to
+    // `personal`. Before M8's getChatMode fix, a stored 'personal' was ignored and the chat showed
+    // the role default ('business'); now the stored rung wins — so the two getChatMode twins agree.
+    const chats = [{ id: '!a', title: 'Nadia' }];
+    const config = { bot_mode: 'business', chats: { '!a': { mode: 'personal' } } };
+    const out = formatChatOverview(chats, config);
+    assert.match(out, /Nadia — personal/);
+    assert.doesNotMatch(out, /Nadia — business/);
+  });
+
   it('reports all-off cleanly (no engaged section)', () => {
     const chats = [{ id: '!a', title: 'X' }, { id: '!b', title: 'Y' }];
     const out = formatChatOverview(chats, cfg({ '!a': 'off', '!b': 'off' }));

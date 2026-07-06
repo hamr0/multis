@@ -89,20 +89,22 @@ Message arrives
 
 A **profile** is a global setting chosen during `multis init`. It determines the default mode for all chats.
 
-| Profile | Set at | Default mode for chats | Use case |
+| Profile (`bot_mode`) | Set at | Default mode for chats | Use case |
 |---------|--------|----------------------|----------|
-| **personal** | `multis init` | silent | Private assistant — track conversations passively, respond only when asked |
+| **personal-assistant** | `multis init` | personal | Private assistant on Beeper — capture conversations; respond only when the assistant is named (M8) |
+| **personal-bot** | `multis init` | off (contacts ignored) | Telegram, owner-only — no contact chats |
 | **business** | `multis init` | business | Customer support — bot auto-responds to all incoming messages |
 
 Profile is stored as `bot_mode` in config.json. It does not change per-chat — it only sets the default.
 
 ### Modes (per-chat)
 
-Three modes, per-chat, switchable anytime via `/mode`. The profile determines the default; modes override it per-chat.
+The engagement ladder (M8), per-chat, switchable anytime via `/mode`. The profile determines the default; a per-chat `/mode` can only step a chat DOWN to silent/off or back to the account default (it can't cross to another account's engaged rung).
 
 | Mode | Self messages | Incoming messages | Admin commands | Use case |
 |------|--------------|-------------------|----------------|----------|
 | **business** | Commands + natural ask | Auto-respond via LLM | No | Customer support, business contacts. Use `/agent` to assign different agents per chat |
+| **personal** | Commands + natural ask | Respond only when the assistant is **named**; else captured | No | Private assistant — jumps in when summoned by name (`/name`) |
 | **silent** | Ignored | Archived to memory | No | Passive capture — track conversations without bot output |
 | **off** | Ignored | Ignored | No | Completely ignored — no archive, no response |
 
@@ -111,6 +113,7 @@ Three modes, per-chat, switchable anytime via `/mode`. The profile determines th
 | Mode | Who's in it | Logs | Memory/DB | Bot responds | Slash commands |
 |------|-------------|------|-----------|--------------|----------------|
 | business | Customer chats | Yes | Yes | Yes | No (contact can't) |
+| personal | Contact chats | Yes | Yes | Only when named | No (contact can't) |
 | silent | Customer chats | Yes | Yes | No | No (contact can't) |
 | off | Customer chats | No | No | No | No (contact can't) |
 | Note-to-self | Admin (you) | Yes | Yes | Yes | Yes |

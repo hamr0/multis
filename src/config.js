@@ -435,9 +435,10 @@ function isOwner(userId, config, msg) {
 // ---------------------------------------------------------------------------
 // Role ↔ mode (PRD §3g). `bot_mode` is the owner's choice of how the bot treats
 // NON-owner chats by default — the owner is always served regardless. Three
-// roles map to a default mode; the legacy 2-value `personal` is an alias for
-// `personal-assistant` (its old behavior was already "silent"), so existing
-// configs keep working with no migration.
+// roles map to a default mode (M8 engagement ladder: business→business,
+// personal-assistant→personal, personal-bot→off); the legacy 2-value `personal`
+// is an alias for `personal-assistant`, so existing configs keep working with no
+// migration (they inherit the new `personal` default rung).
 // ---------------------------------------------------------------------------
 const ROLES = {
   'business':           { label: 'Business chatbot',   mode: 'business' }, // auto-respond to contacts

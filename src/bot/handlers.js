@@ -1820,7 +1820,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
           statusMsg += `\n\n${formatChatOverview(allChats, config)}`;
         }
       }
-      statusMsg += `\n\n${MODE_FOOTER}`;
+      statusMsg += `\n\n${modeFooter(config)}`;
       await platform.send(msg.chatId, statusMsg);
       return;
     }
@@ -1874,8 +1874,8 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
     }
 
     // No target → change the global role. bot_mode is a ROLE (§3g), so store the
-    // canonical role, not the raw chat-mode word (only 'silent' reaches here —
-    // 'business' shows the menu, 'off' is blocked above). silent → personal-assistant.
+    // canonical role, not the raw chat-mode word ('business' shows the menu, 'off'
+    // is blocked above; 'silent' and 'personal' fall through here, both → personal-assistant).
     config.bot_mode = normalizeRole(mode);
     saveConfig(config);
     await platform.send(msg.chatId, `Bot mode set to: ${roleLabel(config.bot_mode)}`);
@@ -1891,7 +1891,7 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
         await platform.send(msg.chatId, 'No chats found.');
         return;
       }
-      await platform.send(msg.chatId, `${formatChatOverview(allChats, config)}\n\n${MODE_FOOTER}`);
+      await platform.send(msg.chatId, `${formatChatOverview(allChats, config)}\n\n${modeFooter(config)}`);
     } else {
       await platform.send(msg.chatId, modeUsageMessage(config));
     }
@@ -1980,11 +1980,12 @@ function setChatMode(config, chatId, mode) {
 
 function getChatMode(config, chatId) {
   const stored = config.chats?.[chatId]?.mode;
-  // Ignore stale 'personal' values (was renamed to profile, not a valid mode)
-  if (stored && stored !== 'personal') return stored;
+  // M8: `personal` is a real ladder rung now, so a stored per-chat mode (including `personal`) is
+  // honored. Mirrors beeper.js `_getChatMode` — the two must agree or routing and the /mode overview drift.
+  if (stored) return stored;
   if (config.platforms?.beeper?.default_mode) return config.platforms.beeper.default_mode;
   // Default mode for a non-owner chat is derived from the owner's role (§3g):
-  // business→business, personal-assistant(+legacy 'personal')→silent, personal-bot→off.
+  // business→business, personal-assistant(+legacy 'personal')→personal, personal-bot→off.
   return defaultModeForRole(config.bot_mode);
 }
 
@@ -2053,15 +2054,18 @@ function disambiguateTitles(chats, config) {
 // /mode to look; here's how to act). The overview is NOT a numbered picker: a
 // number reply there isn't captured (it falls through to the agent), so it must
 // not LOOK selectable. To act you use one of these forms.
-const MODE_FOOTER =
-  'Change a chat:\n' +
-  ' /mode silent <name>   — set one by name\n' +
-  ' /mode silent          — pick from a list\n' +
-  'modes: business · silent · off';
+// Role-aware so the listed modes match what THIS account can actually set (M8 §514) — a personal
+// account shows personal/silent/off, a business account business/silent/off. Both call sites have config.
+function modeFooter(config) {
+  return 'Change a chat:\n' +
+    ' /mode <mode> <name>   — set one by name\n' +
+    ' /mode <mode>          — pick from a list\n' +
+    `modes: ${allowedModesForRole(config.bot_mode).join(' · ')}`;
+}
 
 /**
  * Read-only `/mode` overview body. Leads with the chats the bot is actually
- * engaging (business/silent) and collapses the off ones to a count — a 40-row
+ * engaging (business/personal/silent) and collapses the off ones to a count — a 40-row
  * dump of mostly-off chats is noise, not status. De-numbered on purpose (the
  * overview is not a picker; browse/act via `/mode <mode>` or `… <name>`).
  */
