@@ -32,7 +32,8 @@ else is a customer and is never a privileged principal.
 | `/read <path>` | Owner | Read a file or directory (benign — owner-floor, no PIN) |
 | `/index <path> <kb\|admin>` | Owner | Index a document with scope (benign — owner-floor, no PIN) |
 | `/pin` | Owner | Change or set PIN |
-| `/mode <personal\|business\|silent\|off> [agent]` | Owner | Set chat mode, optionally assign agent. Turning a chat **off** requires the PIN; other modes run free. `/mode` (no target) lists your recent chats live from Beeper (~24) with their current modes; `/mode business` (no target) opens the business persona menu |
+| `/mode <mode> [chat name]` | Owner | Set a chat's engagement rung. The modes you can set depend on your **account type** — a personal-assistant account uses `personal`/`silent`/`off`, a business account `business`/`silent`/`off`; a per-chat `/mode` only steps down to silent/off or back to the account default (it can't cross streams). Turning a chat **off** requires the PIN; other modes run free. `/mode` (no target) lists your recent chats live from Beeper (~24) with their current modes; `/mode business` (no target) opens the business persona menu. On Telegram (personal-bot) `/mode` only reports the account type — to change it, run `multis init`. |
+| `/name [new name]` | Owner | View or set the assistant's name (default `multis`). It's the personal-mode trigger word (in `personal` mode the bot replies only when this name is called) and the `[Name]` disclosure prefix on replies to contacts; it's also how the bot identifies itself when asked. Bare `/name` shows the current name. |
 | `/agent [name]` | Owner | Show current agent (no args) or assign agent to this chat |
 | `/agents` | Owner | List all configured agents |
 | `/start <code>` | — | Pair with the bot using pairing code |
@@ -41,11 +42,14 @@ else is a customer and is never a privileged principal.
 
 ### Chat Modes
 
+One axis — how much the bot participates in a chat — most → least. Your account type owns the *engaged* rung (personal-assistant → `personal`, business → `business`); a per-chat `/mode` only steps down to `silent`/`off` or back to that default.
+
 | Mode | Behavior |
 |------|----------|
-| `personal` | Owner mode, all commands enabled |
-| `business` | Auto-respond to customers, escalation rules apply |
-| `silent` | Archive messages to memory, no bot output |
+| `business` | Auto-respond to everyone; escalation rules apply |
+| `personal` | Respond only when the assistant is called by name (see `/name`); otherwise capture silently |
+| `silent` | Capture messages to memory, no bot output |
+| `off` | Excluded entirely — no capture, no response (setting a chat off requires the PIN) |
 
 ## CLI Commands
 
