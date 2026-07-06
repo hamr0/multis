@@ -24,11 +24,11 @@ A personal and business AI agent that lives in your chat apps. Runs locally on y
 | Platform | Role | Details |
 |----------|------|---------|
 | **Beeper Note-to-self** | Primary admin | Owner commands, `/mode`, `/ask`, monitoring. Always available when Beeper Desktop is running. |
-| **Telegram bot** | Secondary admin | Same admin capabilities. Available even when Beeper Desktop is off. |
+| **Telegram bot** | Personal-bot transport | Owner-only, bound 1:1 to the personal-bot role (§3g). No contact chats; never controls Beeper. |
 | **Beeper chats** | Gateway to all contacts | WhatsApp, Telegram, LinkedIn, etc. come through Beeper bridges. Per-chat modes (business/silent/off). Business-mode contacts get auto-responses without pairing. |
 | **Self-hosted Matrix** | Future alternative to Beeper | VPS + domain, $5-10/month. Planned (POC7). |
 
-**Admin channels**: The owner interacts with multis from two places — Beeper Note-to-self (primary) and Telegram bot (secondary). Both have full admin access: commands, `/mode` control over Beeper chats, `/ask`, etc. Telegram bot is not customer-facing — other Telegram contacts reach multis through Beeper's Telegram bridge, alongside WhatsApp, LinkedIn, etc.
+**Command channel (bound to role, §3g)**: the owner's command channel is bound 1:1 to the account role, not offered as an orthogonal pair. For a **personal-assistant / business** account it is **Beeper Note-to-self** — the only channel that sees the owner's real contacts, so it owns `/mode`, `/ask`, and all contact-mode control. For a **personal-bot** account it is **Telegram** (owner-only, no contacts). Telegram never controls Beeper chats — contact-mode control lives solely in Beeper Note-to-self; role changes go through `multis init`. Telegram bot is not customer-facing — other Telegram contacts reach multis through Beeper's Telegram bridge, alongside WhatsApp, LinkedIn, etc.
 
 ### Platform abstraction
 
@@ -43,7 +43,7 @@ Platform (base.js)
 
 All platforms emit normalized `Message` objects → single router handles everything.
 
-**Platform registry**: `createMessageRouter()` returns a handler with `registerPlatform(name, instance)`. Each platform registers itself at startup (`handler.registerPlatform('beeper', beeper)`). This allows cross-platform operations — e.g. Telegram's `/mode` can list/search Beeper chats via the registry.
+**Platform registry**: `createMessageRouter()` returns a handler with `registerPlatform(name, instance)`. Each platform registers itself at startup (`handler.registerPlatform('beeper', beeper)`). The registry backs owner-ceremony routing (a PIN prompt reaches the owner on the right channel) and business escalation (routing a customer escalation to the owner's admin channel). It is NOT a cross-platform admin bridge — Telegram's `/mode` does not reach Beeper (§3g).
 
 ### Message routing flow
 
@@ -130,10 +130,8 @@ Self-chats (note-to-self, WhatsApp self) are auto-detected as **off** (command c
 - `/mode <mode>` in self-chat → interactive picker (top 20 recent chats)
 - `/mode <mode> <name>` in self-chat → search by name across all chats (top 100). 1 match → sets immediately, multiple → numbered picker
 
-**From Telegram** (admin channel — controls Beeper chats via platform registry):
-- `/mode` → shows global bot mode + all Beeper chat modes
-- `/mode <mode>` → sets global bot_mode (default for new Beeper chats)
-- `/mode <mode> <name>` → sets a specific Beeper chat's mode by name
+**From Telegram** (personal-bot transport — never controls Beeper, §3g):
+- `/mode` (any form) → reports the account role and points role changes at `multis init`. Telegram has no contact chats to manage; contact-mode control lives solely in Beeper Note-to-self. Changing the account type (and thus the engaged style for all chats) is a re-init, which reconciles per-chat modes on the switch.
 
 ### Chat tracking
 

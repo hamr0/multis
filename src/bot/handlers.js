@@ -1,6 +1,6 @@
 const path = require('path');
 const { logAudit } = require('../governance/audit');
-const { addAllowedUser, isOwner, saveConfig, backupConfig, updateChatMeta, getMultisDir, PATHS, defaultModeForRole, allowedModesForRole, roleLabel, normalizeRole } = require('../config');
+const { addAllowedUser, isOwner, saveConfig, backupConfig, updateChatMeta, getMultisDir, PATHS, defaultModeForRole, allowedModesForRole, roleLabel } = require('../config');
 const { listSkills } = require('../skills/executor');
 const context = require('../context');
 const { createProvider } = require('../llm/provider-adapter');
@@ -1431,7 +1431,7 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     // formatted as notes for buildMemorySystemPrompt (which takes a string; empty = none).
     const memHits = mem ? await indexer.recallMemory(cleanQuestion, { scope: memScopeFor(admin, msg.chatId), n: 5 }) : [];
     const memoryMd = memHits.map((h) => `- ${h.content}`).join('\n');
-    const system = buildMemorySystemPrompt(memoryMd, chunks, agentPersona);
+    const system = buildMemorySystemPrompt(memoryMd, chunks, agentPersona, config.assistant_name);
 
     // Build messages array: recent history is past COMPLETED turns only (the live
     // request is no longer eagerly appended — M10 §5 rule 1).
@@ -1807,79 +1807,16 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
   const parts = (args || '').trim().split(/\s+/);
   const mode = parts[0] ? parts[0].toLowerCase() : '';
 
-  // Telegram: /mode works as admin — can set per-chat Beeper modes via platform registry
+  // Telegram is the personal-bot transport (owner-only, PRD §3g): it is bound 1:1
+  // to the personal-bot role and NEVER reaches into Beeper. It has no contact chats
+  // to manage, so /mode only reports the account role and points role changes at the
+  // init wizard — the single place a role changes (re-init reconciles per-chat modes
+  // on the switch). Contact-mode control lives solely in Beeper note-to-self.
   if (msg.platform === 'telegram') {
-    const beeperPlatform = platformRegistry?.get('beeper');
-    const hasBeeperChats = beeperPlatform && config.platforms?.beeper?.enabled;
-
-    if (!mode) {
-      let statusMsg = `Bot mode: ${roleLabel(config.bot_mode)}`;
-      if (hasBeeperChats) {
-        const allChats = await listBeeperChats(beeperPlatform, config);
-        if (allChats && allChats.length > 0) {
-          statusMsg += `\n\n${formatChatOverview(allChats, config)}`;
-        }
-      }
-      statusMsg += `\n\n${modeFooter(config)}`;
-      await platform.send(msg.chatId, statusMsg);
-      return;
-    }
-
-    if (!KNOWN_MODES.includes(mode)) {
-      await platform.send(msg.chatId, modeUsageMessage(config));
-      return;
-    }
-
-    // With target → set per-chat Beeper mode
-    const target = parts.slice(1).join(' ');
-    if (target && hasBeeperChats) {
-      const match = await findBeeperChat(beeperPlatform, target, config);
-      if (!match) {
-        await platform.send(msg.chatId, `No chat found matching "${target}".`);
-        return;
-      }
-      if (match.length > 1) {
-        const labels = disambiguateTitles(match, config);
-        const list = match.map((c, i) => `  ${i + 1}) ${labels.get(c.id)}`).join('\n');
-        await platform.send(msg.chatId, `Multiple matches:\n${list}\n\nReply with a number:`);
-        await openAsk(makeModeAsk({ mode, matches: match, agent: null, msg, platform, config, toolDeps }),
-          { pending, chatId: msg.chatId, senderId: msg.senderId });
-        return;
-      }
-      const chat = match[0];
-      // Block silent/off for personal/note-to-self chats
-      if ((mode === 'silent' || mode === 'off') && beeperPlatform?._personalChats?.has(chat.id)) {
-        await platform.send(msg.chatId, 'Personal/note-to-self chats cannot be set to silent or off.');
-        return;
-      }
-      await commitMode({ chatId: chat.id, mode, displayName: chat.title || chat.id }, msg, platform, config, toolDeps);
-      return;
-    }
-
-    // No target + business → show business menu
-    if (mode === 'business') {
-      await showBusinessMenu(msg, platform, config, { toolDeps });
-      return;
-    }
-
-    // Global "off" is not supported. To halt the bot, stop the daemon
-    // (`multis stop`) — a global off would keep the process running but playing
-    // dead, with no way to re-enable from chat (off ignores incoming messages).
-    // Per-chat off (/mode off <chat>) mutes a single conversation and IS supported.
-    if (mode === 'off') {
-      await platform.send(msg.chatId,
-        'Global "off" isn\'t supported — to stop the bot, run `multis stop`.\n' +
-        'To mute one chat: /mode off <chat name>.');
-      return;
-    }
-
-    // No target → change the global role. bot_mode is a ROLE (§3g), so store the
-    // canonical role, not the raw chat-mode word ('business' shows the menu, 'off'
-    // is blocked above; 'silent' and 'personal' fall through here, both → personal-assistant).
-    config.bot_mode = normalizeRole(mode);
-    saveConfig(config);
-    await platform.send(msg.chatId, `Bot mode set to: ${roleLabel(config.bot_mode)}`);
-    logAudit({ action: 'mode', user_id: msg.senderId, mode: config.bot_mode, scope: 'global' });
+    await platform.send(msg.chatId,
+      `Bot mode: ${roleLabel(config.bot_mode)}\n\n` +
+      'Telegram is a personal bot — no contact chats to manage here.\n' +
+      'To change your account type, run `multis init`.');
     return;
   }
 
@@ -1940,9 +1877,33 @@ async function routeMode(msg, platform, config, args, agentRegistry, toolDeps = 
     return;
   }
 
+  // Beeper: no-target `/mode off` is NOT a global off — that would leave the daemon
+  // running but playing dead with no way back from chat. Refuse and point at the real
+  // levers (multis stop for the whole bot, /mode off <chat> for one conversation).
+  // Mirrors the safety that lived in the removed Telegram branch (footgun, per §mode).
+  if (mode === 'off') {
+    await platform.send(msg.chatId,
+      'Global "off" isn\'t supported — to stop the bot, run `multis stop`.\n' +
+      'To mute one chat: /mode off <chat name>.');
+    return;
+  }
+
   // Beeper: no target + business → show business menu
   if (mode === 'business' && msg.isSelf) {
     await showBusinessMenu(msg, platform, config, { toolDeps });
+    return;
+  }
+
+  // Beeper: no target — if in self-chat, show interactive picker. But a per-chat
+  // /mode may only set a mode on the account's ladder (§514): the engaged mode of the
+  // OTHER account type (e.g. `personal` on a business account) is a ROLE change, not a
+  // per-chat tweak. Reject it and point at re-init (the one place a role changes —
+  // re-init reconciles per-chat modes) instead of the old dead-end picker that offered
+  // a mode commitMode would then refuse. silent/off + the current engaged mode fall through.
+  if (msg.isSelf && !allowedModesForRole(config.bot_mode).includes(mode)) {
+    await platform.send(msg.chatId,
+      `A ${roleLabel(config.bot_mode)} account can't engage chats in "${mode}" mode.\n` +
+      'To change your account type, run `multis init`.');
     return;
   }
 
@@ -2222,7 +2183,7 @@ function createSchedulerTick({ platformRegistry, config, provider, indexer, getM
       const memHits = indexer ? await indexer.recallMemory(job.action, { scope: 'admin', n: 5 }) : [];
       const memoryMd = memHits.map((h) => `- ${h.content}`).join('\n');
       const chunks = indexer ? await indexer.search(job.action, { scope: 'admin', n: 5 }) : [];
-      const system = buildMemorySystemPrompt(memoryMd, chunks);
+      const system = buildMemorySystemPrompt(memoryMd, chunks, null, config.assistant_name);
 
       const answer = await runAgentLoop(provider, [{ role: 'user', content: job.action }], userTools, {
         system,

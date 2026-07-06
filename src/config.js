@@ -469,6 +469,29 @@ function allowedModesForRole(botMode) {
   return [...new Set([defaultModeForRole(botMode), 'silent', 'off'])];
 }
 
+/**
+ * M8 clean role switch: when the account changes role, remap any stored per-chat
+ * mode that isn't valid for the NEW role to that role's default (engaged) mode.
+ * `silent` and `off` are valid in every role (allowedModesForRole), so they're
+ * never touched — only the OLD role's engaged mode (`business`/`personal`) is
+ * invalid in the new role and gets re-expressed as the new engaged mode. This
+ * preserves engagement intent across a switch (engaged↔engaged, muted stays
+ * muted) and prevents stale cross-role modes bleeding through. Returns the count
+ * of chats remapped (for the init log). Mutates config.chats in place.
+ */
+function reconcileChatModes(config, newRole) {
+  const allowed = allowedModesForRole(newRole);
+  const fallback = defaultModeForRole(newRole);
+  let remapped = 0;
+  for (const chat of Object.values(config.chats || {})) {
+    if (chat && chat.mode && !allowed.includes(chat.mode)) {
+      chat.mode = fallback;
+      remapped++;
+    }
+  }
+  return remapped;
+}
+
 /** Human label for a role (init/status/doctor display). */
 function roleLabel(botMode) {
   return ROLES[normalizeRole(botMode)].label;
@@ -517,6 +540,7 @@ module.exports = {
   normalizeRole,
   defaultModeForRole,
   allowedModesForRole,
+  reconcileChatModes,
   roleLabel,
   ROLE_BY_CHOICE,
   transportForRole,

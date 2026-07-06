@@ -6,7 +6,7 @@ const path = require('path');
 const readline = require('readline');
 const crypto = require('crypto');
 
-const { PATHS, getMultisDir, saveConfig, roleLabel, normalizeRole, ROLE_BY_CHOICE, applyRoleTransport } = require('../src/config');
+const { PATHS, getMultisDir, saveConfig, roleLabel, normalizeRole, ROLE_BY_CHOICE, applyRoleTransport, reconcileChatModes } = require('../src/config');
 const MULTIS_DIR = getMultisDir();
 const PID_PATH = PATHS.pid();
 const CONFIG_PATH = PATHS.config();
@@ -193,26 +193,33 @@ async function runInit() {
     console.log(c.ok(`Keeping: ${roleLabel(config.bot_mode)}`));
   } else {
     const role = ROLE_BY_CHOICE[roleChoice] || 'personal-bot';
+    const oldRole = normalizeRole(config.bot_mode);
     // role ⟺ transport. applyRoleTransport sets bot_mode and disables the
     // non-selected platform; Step 2 then connects (and enables) the implied
     // channel — so switching role cleanly flips transport.
     ({ useTelegram, useBeeper } = applyRoleTransport(config, role));
     console.log(c.ok(`${roleLabel(role)} — ${useBeeper ? 'Beeper' : 'Telegram'}`));
+    // Clean switch: remap any per-chat mode invalid for the new role to its
+    // default so no stale cross-role mode bleeds through (silent/off survive).
+    if (oldRole !== role) {
+      const remapped = reconcileChatModes(config, role);
+      if (remapped > 0) console.log(c.dim(`  ${remapped} chat${remapped === 1 ? '' : 's'} remapped to the ${roleLabel(role)} default`));
+    }
   }
 
   if (!config.platforms) config.platforms = {};
   summary.botMode = config.bot_mode;
 
-  // M8: the assistant's name — the personal-mode trigger word AND the [Name] disclosure prefix on
-  // replies to contacts. Only meaningful for the contact-facing roles (personal-assistant / business);
-  // personal-bot is owner-only on Telegram, so it just keeps the default silently.
-  if (config.bot_mode !== 'personal-bot') {
+  // M8: the assistant's name. It's the bot's IDENTITY in the system prompt — it answers
+  // "what's your name?" as this in EVERY role — and on the contact-facing roles it's also
+  // the personal-mode trigger word and the [Name] disclosure prefix on replies to contacts.
+  // So prompt for it in every role (personal-bot included), with role-appropriate copy.
+  {
     const currentName = config.assistant_name || 'multis';
-    const nameInput = (await ask(`\nWhat should I be called? (contacts see "[Name] …" and I answer to it) [${currentName}]: `)).trim();
+    const contactHint = config.bot_mode === 'personal-bot' ? '' : ' — contacts also see it as "[Name] …" and I answer to it';
+    const nameInput = (await ask(`\nWhat should I be called? (I answer to this name${contactHint}) [${currentName}]: `)).trim();
     config.assistant_name = nameInput || currentName;
     console.log(c.ok(`Name: ${config.assistant_name}`));
-  } else if (!config.assistant_name) {
-    config.assistant_name = 'multis';
   }
   summary.assistantName = config.assistant_name;
 

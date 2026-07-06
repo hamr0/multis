@@ -243,6 +243,29 @@ describe('Telegram owner-only (personal-bot)', () => {
     assert.strictEqual(indexer.searchCalls[0].opts.scope, 'admin');
   });
 
+  it('Telegram /mode never reaches Beeper — no chat mutation, points at init (§3g cut)', async () => {
+    // A Beeper platform IS registered with the target chat live: the OLD code would
+    // have resolved "Amora" via the registry and mutated its mode. The cut means
+    // Telegram is a personal bot that never touches Beeper.
+    const env = createTestEnv({
+      allowed_users: ['user1'], owner_id: 'user1',
+      platforms: { beeper: { enabled: true } },
+      chats: { biz1: { name: 'Amora', platform: 'beeper', mode: 'silent' } },
+    });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
+    router.registerPlatform('telegram', platform);
+    router.registerPlatform('beeper', {
+      send: async () => {}, _personalChats: new Set(),
+      listInbox: async () => [{ id: 'biz1', title: 'Amora' }],
+    });
+
+    await router(msg('/mode business Amora', { senderId: 'user1', chatId: 'tg1' }), platform);
+
+    assert.strictEqual(env.config.chats.biz1.mode, 'silent', 'Telegram /mode must NOT mutate a Beeper chat');
+    assert.match(platform.lastTo('tg1').text, /personal bot|multis init/i);
+  });
+
   // The reject is audited so probing is visible — but deduped per sender so the
   // observability hook can't itself become a log-flood DoS vector.
   const rejectLines = () => {
@@ -614,14 +637,17 @@ describe('App-verb door — governed-core ceremony (M9 increment 2)', () => {
       governanceFile: { commands: { allowlist: ['.*'], denylist: [] }, paths: { allowed: ['.*'], denied: [] } },
       memoryBaseDir: env.memoryBaseDir,
     });
-    router.registerPlatform('telegram', platform);
-    router.registerPlatform('beeper', { send: async () => {}, _personalChats: new Set() });
+    // The owner drives /mode from Beeper note-to-self, so beeper IS the command
+    // channel — register the recording mock (not a no-op stub) so the ceremony PIN
+    // prompt, which routes to ctx.platform (beeper), is observable.
+    platform._personalChats = new Set();
+    router.registerPlatform('beeper', platform);
     return { env, platform, router };
   }
 
   it('selecting OFF in the mode picker requires the PIN before the chat is set off', async () => {
     const { env, platform, router } = buildModePicker();
-    await router(msg('/mode off customer'), platform); // 2 matches → picker opens
+    await router(msg('/mode off customer', { platform: 'beeper', isSelf: true }), platform); // 2 matches → picker opens
     await waitFor(() => platform.sent.some((s) => /Multiple matches/i.test(s.text)), 'picker shown');
     const selP = router(msg('1'), platform); // pick #1 = Customer X
     await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt');
@@ -637,7 +663,7 @@ describe('App-verb door — governed-core ceremony (M9 increment 2)', () => {
 
   it('selecting SILENT in the mode picker sets it straight through (no PIN)', async () => {
     const { env, platform, router } = buildModePicker();
-    await router(msg('/mode silent customer'), platform);
+    await router(msg('/mode silent customer', { platform: 'beeper', isSelf: true }), platform);
     await waitFor(() => platform.sent.some((s) => /Multiple matches/i.test(s.text)), 'picker shown');
     await router(msg('1'), platform);
     assert.ok(!platform.sent.some((s) => /PIN/i.test(s.text)), 'no ceremony for a benign mode');
@@ -665,21 +691,21 @@ describe('M8 mode ladder + /name', () => {
 
   it('a business account CANNOT set a chat to personal (cross-stream rejected)', async () => {
     const { env, platform, router } = ownerBeeper({ bot_mode: 'business' });
-    await router(msg('/mode personal Xavier', { senderId: 'user1', chatId: 'chat1' }), platform);
+    await router(msg('/mode personal Xavier', { platform: 'beeper', isSelf: true, senderId: 'user1', chatId: 'chat1' }), platform);
     assert.match(platform.lastTo('chat1').text, /can't set a chat to "personal"/i);
     assert.notStrictEqual(env.config.chats?.['cx']?.mode, 'personal', 'mode was not set');
   });
 
   it('a personal-assistant account CANNOT set a chat to business (cross-stream rejected)', async () => {
     const { env, platform, router } = ownerBeeper({ bot_mode: 'personal-assistant' });
-    await router(msg('/mode business Xavier', { senderId: 'user1', chatId: 'chat1' }), platform);
+    await router(msg('/mode business Xavier', { platform: 'beeper', isSelf: true, senderId: 'user1', chatId: 'chat1' }), platform);
     assert.match(platform.lastTo('chat1').text, /can't set a chat to "business"/i);
     assert.notStrictEqual(env.config.chats?.['cx']?.mode, 'business', 'mode was not set');
   });
 
   it('a personal-assistant account CAN set a chat to personal (its engaged rung)', async () => {
     const { env, platform, router } = ownerBeeper({ bot_mode: 'personal-assistant' });
-    await router(msg('/mode personal Xavier', { senderId: 'user1', chatId: 'chat1' }), platform);
+    await router(msg('/mode personal Xavier', { platform: 'beeper', isSelf: true, senderId: 'user1', chatId: 'chat1' }), platform);
     assert.strictEqual(env.config.chats?.['cx']?.mode, 'personal', 'engaged rung set');
   });
 
@@ -755,18 +781,22 @@ describe('Business persona menu + wizard', () => {
   let env;
   afterEach(() => { if (env) env.cleanup(); env = null; });
 
+  // Owner drives the business menu from Beeper note-to-self (§3g: the business
+  // account's command channel; Telegram never manages Beeper). bmsg → a self
+  // message so /mode business reaches showBusinessMenu on the Beeper branch.
+  const bmsg = (t, o = {}) => msg(t, { platform: 'beeper', isSelf: true, ...o });
   function ownerRouter(extra = {}) {
     env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1', ...extra });
     const platform = mockPlatform();
     const pending = new PendingRegistry();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer(), pending });
-    router.registerPlatform('telegram', platform);
+    router.registerPlatform('beeper', platform);
     return { platform, router, pending };
   }
 
   it('/mode business shows the 1-5 menu', async () => {
     const { platform, router } = ownerRouter();
-    await router(msg('/mode business'), platform);
+    await router(bmsg('/mode business'), platform);
     const text = platform.lastTo('chat1').text;
     assert.match(text, /Business Mode/);
     assert.match(text, /1\) Setup persona/);
@@ -775,7 +805,7 @@ describe('Business persona menu + wizard', () => {
 
   it('menu → 1 → full wizard → confirm saves the persona', async () => {
     const { platform, router } = ownerRouter();
-    await router(msg('/mode business'), platform);
+    await router(bmsg('/mode business'), platform);
     await router(msg('1'), platform); // Setup persona
     assert.match(platform.lastTo('chat1').text, /Step 1\/5 — Name/);
     await router(msg('Acme Support'), platform); // name
@@ -798,7 +828,7 @@ describe('Business persona menu + wizard', () => {
 
   it('wizard cancel aborts without saving', async () => {
     const { platform, router } = ownerRouter();
-    await router(msg('/mode business'), platform);
+    await router(bmsg('/mode business'), platform);
     await router(msg('1'), platform);
     await router(msg('cancel'), platform);
     assert.match(platform.lastTo('chat1').text, /cancel/i);
@@ -807,7 +837,7 @@ describe('Business persona menu + wizard', () => {
 
   it('menu → 3 clears the persona', async () => {
     const { platform, router } = ownerRouter({ business: { name: 'Old', greeting: 'hey' } });
-    await router(msg('/mode business'), platform);
+    await router(bmsg('/mode business'), platform);
     await router(msg('3'), platform);
     assert.match(platform.lastTo('chat1').text, /cleared/i);
     assert.strictEqual(env.config.business?.name, null);
@@ -815,7 +845,7 @@ describe('Business persona menu + wizard', () => {
 
   it('menu out-of-range reply re-prompts', async () => {
     const { platform, router } = ownerRouter();
-    await router(msg('/mode business'), platform);
+    await router(bmsg('/mode business'), platform);
     await router(msg('9'), platform);
     assert.match(platform.lastTo('chat1').text, /Pick 1-5/);
   });
@@ -1797,12 +1827,14 @@ describe('Beeper file indexing', () => {
 // ---------------------------------------------------------------------------
 
 describe('/mode business menu', () => {
+  // Owner drives the menu from Beeper note-to-self (§3g command channel).
+  const bmsg = (t, o = {}) => msg(t, { platform: 'beeper', isSelf: true, ...o });
   it('/mode business shows menu (no target)', async () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/mode business'), platform);
+    await router(bmsg('/mode business'), platform);
     const text = platform.lastTo('chat1').text;
     assert.match(text, /Business Mode/);
     assert.match(text, /1\) Setup persona/);
@@ -1817,7 +1849,7 @@ describe('/mode business menu', () => {
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/mode business'), platform);
+    await router(bmsg('/mode business'), platform);
     await router(msg('2'), platform);
     const text = platform.lastTo('chat1').text;
     assert.match(text, /TestBiz/);
@@ -1831,7 +1863,7 @@ describe('/mode business menu', () => {
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/mode business'), platform);
+    await router(bmsg('/mode business'), platform);
     await router(msg('2'), platform);
     assert.match(platform.lastTo('chat1').text, /No business persona/);
   });
@@ -1844,7 +1876,7 @@ describe('/mode business menu', () => {
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/mode business'), platform);
+    await router(bmsg('/mode business'), platform);
     await router(msg('3'), platform);
     assert.match(platform.lastTo('chat1').text, /cleared/i);
     assert.strictEqual(env.config.business.name, null);
@@ -1855,7 +1887,7 @@ describe('/mode business menu', () => {
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/mode business'), platform);
+    await router(bmsg('/mode business'), platform);
     await router(msg('4'), platform);
     assert.match(platform.lastTo('chat1').text, /Bot mode set to: business/);
     assert.strictEqual(env.config.bot_mode, 'business');
@@ -1870,7 +1902,7 @@ describe('/mode business menu', () => {
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/mode off'), platform);
+    await router(bmsg('/mode off'), platform);
 
     assert.notStrictEqual(env.config.bot_mode, 'off', 'global bot_mode was NOT set to off');
     assert.strictEqual(env.config.bot_mode, 'personal', 'global bot_mode is unchanged');
@@ -1883,7 +1915,7 @@ describe('/mode business menu', () => {
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
     // Open menu, pick option 1
-    await router(msg('/mode business'), platform);
+    await router(bmsg('/mode business'), platform);
     await router(msg('1'), platform);
     assert.match(platform.lastTo('chat1').text, /Step 1\/5 — Name/);
 
@@ -1922,7 +1954,7 @@ describe('/mode business menu', () => {
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/mode business'), platform);
+    await router(bmsg('/mode business'), platform);
     await router(msg('1'), platform);
     await router(msg('cancel'), platform);
     assert.match(platform.lastTo('chat1').text, /cancelled/i);
@@ -1946,7 +1978,7 @@ describe('/mode business menu', () => {
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/mode business'), platform);
+    await router(bmsg('/mode business'), platform);
     await router(msg('1'), platform);
     assert.match(platform.lastTo('chat1').text, /Current: OldBiz/);
 
@@ -1988,7 +2020,7 @@ describe('/mode business menu', () => {
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/mode business'), platform);
+    await router(bmsg('/mode business'), platform);
     await router(msg('1'), platform);
     await router(msg('MyBiz'), platform);      // name
     await router(msg('skip'), platform);        // greeting
@@ -2236,13 +2268,15 @@ describe('Admin presence pause', () => {
 // ---------------------------------------------------------------------------
 
 describe('Wizard fixes', () => {
+  // Owner drives the business wizard from Beeper note-to-self (§3g command channel).
+  const bmsg = (t, o = {}) => msg(t, { platform: 'beeper', isSelf: true, ...o });
   it('/command during wizard cancels and re-routes', async () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
     // Start wizard via menu
-    await router(msg('/mode business'), platform);
+    await router(bmsg('/mode business'), platform);
     await router(msg('1'), platform);
     assert.match(platform.lastTo('chat1').text, /Step 1\/5/);
 
@@ -2260,7 +2294,7 @@ describe('Wizard fixes', () => {
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/mode business'), platform);
+    await router(bmsg('/mode business'), platform);
     await router(msg('1'), platform);
     // Send a single character (too short)
     await router(msg('X'), platform);
@@ -2272,7 +2306,7 @@ describe('Wizard fixes', () => {
     const platform = mockPlatform();
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
 
-    await router(msg('/mode business'), platform);
+    await router(bmsg('/mode business'), platform);
     await router(msg('1'), platform);          // menu → wizard
     await router(msg('My Biz'), platform);     // name
     await router(msg('skip'), platform);        // greeting
@@ -2319,10 +2353,17 @@ describe('/mode chat directory is beeperbox-live, not config-bloating', () => {
     { id: 'wa3', title: 'Carol', network: 'whatsapp' },
     { id: 'tg1', title: 'Dave', network: 'telegram' },
   ];
-  const beeperWith = (chats) => ({
-    send: async () => {}, listInbox: async () => chats,
-    _botChatId: null, _personalChats: new Set(),
-  });
+  // Recording Beeper mock with a live inbox — the owner drives /mode from Beeper
+  // note-to-self (§3g), so the command channel IS beeper (Telegram never lists
+  // Beeper chats). listInbox is what list_inbox hands back.
+  const beeperWith = (chats) => {
+    const sent = [];
+    return {
+      send: async (chatId, text) => sent.push({ chatId, text }), sent,
+      lastTo: (chatId) => sent.filter(m => m.chatId === chatId).pop(),
+      listInbox: async () => chats, _botChatId: null, _personalChats: new Set(),
+    };
+  };
 
   function ownerRouter(extraChats = {}) {
     env = createTestEnv({
@@ -2330,15 +2371,16 @@ describe('/mode chat directory is beeperbox-live, not config-bloating', () => {
       platforms: { beeper: { enabled: true } },
       chats: { ...extraChats },
     });
-    const tg = mockPlatform();
+    const beeper = beeperWith(WINDOW);
     const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer() });
-    router.registerPlatform('beeper', beeperWith(WINDOW));
-    return { router, tg };
+    router.registerPlatform('beeper', beeper);
+    return { router, beeper };
   }
+  const selfMode = (t) => msg(t, { platform: 'beeper', isSelf: true, senderId: 'user1', chatId: 'oc' });
 
   it('3h: /mode <name> persists ONLY the matched chat, not the whole inbox window', async () => {
-    const { router, tg } = ownerRouter();
-    await router(msg('/mode silent Carol', { senderId: 'user1', chatId: 'oc' }), tg);
+    const { router, beeper } = ownerRouter();
+    await router(selfMode('/mode silent Carol'), beeper);
     assert.deepStrictEqual(Object.keys(env.config.chats || {}), ['wa3'],
       'only the matched chat lands in config.chats — not all 4 window chats');
     assert.strictEqual(env.config.chats.wa3.mode, 'silent', 'its mode was set');
@@ -2346,25 +2388,25 @@ describe('/mode chat directory is beeperbox-live, not config-bloating', () => {
   });
 
   it('3h: /mode <no-match> persists nothing (no-upsert-on-failed-match)', async () => {
-    const { router, tg } = ownerRouter();
-    await router(msg('/mode silent Zelda', { senderId: 'user1', chatId: 'oc' }), tg);
-    assert.match(tg.lastTo('oc').text, /No chat found/);
+    const { router, beeper } = ownerRouter();
+    await router(selfMode('/mode silent Zelda'), beeper);
+    assert.match(beeper.lastTo('oc').text, /No chat found/);
     assert.deepStrictEqual(env.config.chats, {}, 'a miss leaves config.chats untouched');
   });
 
   it('3f: the no-arg /mode menu lists the LIVE inbox (not just configured chats)', async () => {
-    const { router, tg } = ownerRouter();
-    await router(msg('/mode', { senderId: 'user1', chatId: 'oc' }), tg);
-    const text = tg.lastTo('oc').text;
+    const { router, beeper } = ownerRouter();
+    await router(selfMode('/mode'), beeper);
+    const text = beeper.lastTo('oc').text;
     for (const c of WINDOW) {
       assert.match(text, new RegExp(c.title), `${c.title} shown from the live inbox`);
     }
   });
 
   it('3f: the menu merges a configured chat that fell out of the live window', async () => {
-    const { router, tg } = ownerRouter({ old1: { name: 'OldFriend', platform: 'beeper', mode: 'business' } });
-    await router(msg('/mode', { senderId: 'user1', chatId: 'oc' }), tg);
-    const text = tg.lastTo('oc').text;
+    const { router, beeper } = ownerRouter({ old1: { name: 'OldFriend', platform: 'beeper', mode: 'business' } });
+    await router(selfMode('/mode'), beeper);
+    const text = beeper.lastTo('oc').text;
     assert.match(text, /OldFriend/, 'a configured chat not in the live window still shows');
     assert.match(text, /Alice/, 'live chats appear too');
     assert.match(text, /OldFriend.*business/, 'its configured mode is shown');

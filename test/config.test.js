@@ -259,6 +259,48 @@ describe('allowedModesForRole (§514 — constrained per-chat picker set)', () =
   });
 });
 
+// The clean role switch (M8): re-init remaps stored per-chat modes that are invalid
+// for the NEW role to that role's default, so no stale cross-role mode bleeds through.
+// silent/off are valid everywhere and must survive; only the old engaged mode remaps.
+describe('reconcileChatModes (clean role switch)', () => {
+  const { reconcileChatModes } = require('../src/config');
+
+  it('business → personal-assistant: business chats become personal, silent/off survive', () => {
+    const config = { chats: {
+      a: { mode: 'business' }, b: { mode: 'silent' }, c: { mode: 'off' }, d: { title: 'no-mode' },
+    } };
+    const n = reconcileChatModes(config, 'personal-assistant');
+    assert.equal(config.chats.a.mode, 'personal', 'engaged remaps to the new engaged mode');
+    assert.equal(config.chats.b.mode, 'silent', 'muted-silent survives');
+    assert.equal(config.chats.c.mode, 'off', 'muted-off survives');
+    assert.equal(config.chats.d.mode, undefined, 'metadata-only chats untouched');
+    assert.equal(n, 1, 'only the one invalid mode was remapped');
+  });
+
+  it('personal-assistant → business: round-trips personal back to business', () => {
+    const config = { chats: { a: { mode: 'personal' }, b: { mode: 'off' } } };
+    reconcileChatModes(config, 'business');
+    assert.equal(config.chats.a.mode, 'business');
+    assert.equal(config.chats.b.mode, 'off');
+  });
+
+  it('→ personal-bot: contact-engaged modes fall to off (contacts ignored), never un-mutes off/silent', () => {
+    const config = { chats: {
+      a: { mode: 'business' }, b: { mode: 'personal' }, c: { mode: 'off' }, d: { mode: 'silent' },
+    } };
+    reconcileChatModes(config, 'personal-bot');
+    assert.equal(config.chats.a.mode, 'off');
+    assert.equal(config.chats.b.mode, 'off');
+    assert.equal(config.chats.c.mode, 'off', 'an already-off chat is not un-muted');
+    assert.equal(config.chats.d.mode, 'silent', 'silent survives (valid on personal-bot)');
+  });
+
+  it('no chats / bare config: safe no-op returning 0', () => {
+    assert.equal(reconcileChatModes({}, 'business'), 0);
+    assert.equal(reconcileChatModes({ chats: {} }, 'business'), 0);
+  });
+});
+
 // The init wizard binds role ⟺ transport 1:1 (PRD §3g): personal-bot = Telegram,
 // personal-assistant / business = Beeper. These functions ARE the wizard's Step-1
 // logic (bin/multis.js routes through applyRoleTransport), so a regression in the
