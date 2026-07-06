@@ -142,6 +142,22 @@ describe('RAG pipeline', () => {
     assert.strictEqual(call.opts.scope, 'user:chat2');
   });
 
+  it('M8 personal-mode reply responds (not dropped) and is fenced to user:chatId', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    const platform = mockPlatform();
+    const llm = mockLLM('summoned answer');
+    const indexer = stubIndexer();
+    const router = createMessageRouter(env.config, { llm, indexer });
+
+    // A contact named the assistant in a personal-mode chat → beeper.js set routeAs:'personal'.
+    // The contact is NOT paired and NOT the owner; the router must still respond (the pairing gate is
+    // natural-only), and the RAG scope must be the contact's fence — never the owner's admin scope.
+    await router(msg('hey multis what is on file', { platform: 'beeper', routeAs: 'personal', senderId: 'contactX', chatId: 'chatX', isSelf: false }), platform);
+
+    assert.strictEqual(indexer.searchCalls.length, 1, 'personal message must reach the agent (not be dropped)');
+    assert.strictEqual(indexer.searchCalls[0].opts.scope, 'user:chatX', 'fenced to the contact, not admin');
+  });
+
   it('admin search is scoped to public + admin (not customer scopes)', async () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();

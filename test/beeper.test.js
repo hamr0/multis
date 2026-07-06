@@ -160,10 +160,18 @@ describe('BeeperPlatform', () => {
   // -------------------------------------------------------------------------
 
   describe('_getChatMode', () => {
-    it('returns silent by default when bot_mode is personal', () => {
+    it('returns personal by default for a contact chat (M8 ladder: personal-assistant → personal)', () => {
       const { BeeperPlatform } = loadBeeper();
       const bp = new BeeperPlatform(makeConfig());
-      assert.strictEqual(bp._getChatMode('chat1'), 'silent');
+      assert.strictEqual(bp._getChatMode('chat1'), 'personal');
+    });
+
+    it('honors a stored per-chat mode, including personal (M8: no longer treated as stale)', () => {
+      const { BeeperPlatform } = loadBeeper();
+      const bp = new BeeperPlatform(makeConfig());
+      bp.config.chats = { chat1: { mode: 'personal' }, chat2: { mode: 'off' } };
+      assert.strictEqual(bp._getChatMode('chat1'), 'personal');
+      assert.strictEqual(bp._getChatMode('chat2'), 'off');
     });
 
     it('returns personal for self-chats (admin command channel)', () => {
@@ -426,16 +434,43 @@ describe('BeeperPlatform', () => {
       assert.strictEqual(received[0].isSelf, false);
     });
 
-    it('archives non-self messages as silent in default mode', async () => {
+    it('personal mode (default): an UNNAMED contact message captures as silent', async () => {
       const bp = makeBp(loadBeeper, {
         pollQueue: oneTick([bbMsg({ id: '10', text: 'hello', is_self: false })]),
         chats: { c1: { title: 'Acquaintance', is_note_to_self: false } },
       });
+      bp.config.assistant_name = 'multis';
       const received = [];
       bp.onMessage(async (msg) => received.push(msg));
       await bp._poll();
       assert.strictEqual(received.length, 1);
-      assert.strictEqual(received[0].routeAs, 'silent');
+      assert.strictEqual(received[0].routeAs, 'silent'); // captured, no response
+    });
+
+    it('personal mode (default): a NAMED contact message routes as personal (respond)', async () => {
+      const bp = makeBp(loadBeeper, {
+        pollQueue: oneTick([bbMsg({ id: '11', text: 'hey multis, are you there?', is_self: false })]),
+        chats: { c1: { title: 'Acquaintance', is_note_to_self: false } },
+      });
+      bp.config.assistant_name = 'multis';
+      const received = [];
+      bp.onMessage(async (msg) => received.push(msg));
+      await bp._poll();
+      assert.strictEqual(received.length, 1);
+      assert.strictEqual(received[0].routeAs, 'personal');
+    });
+
+    it('personal mode: word-boundary holds — "chatbot" does NOT summon "bot"', async () => {
+      const bp = makeBp(loadBeeper, {
+        pollQueue: oneTick([bbMsg({ id: '12', text: 'i opened the chatbot today', is_self: false })]),
+        chats: { c1: { title: 'Acquaintance', is_note_to_self: false } },
+      });
+      bp.config.assistant_name = 'bot';
+      const received = [];
+      bp.onMessage(async (msg) => received.push(msg));
+      await bp._poll();
+      assert.strictEqual(received.length, 1);
+      assert.strictEqual(received[0].routeAs, 'silent'); // embedded "bot" must not fire → capture only
     });
 
     it('skips source:"api" (our own sends) — echo-guard', async () => {

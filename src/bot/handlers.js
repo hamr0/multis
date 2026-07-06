@@ -481,11 +481,12 @@ function createMessageRouter(config, deps = {}) {
       return;
     }
 
-    // Natural language / business routing (set by platform adapter)
-    if (msg.routeAs === 'natural' || msg.routeAs === 'business') {
-      // Business: anyone can get a response (customers via Beeper). Natural:
-      // paired users (the owner) only.
-      if (msg.routeAs !== 'business' && !isPaired(msg, config) && !isOwner(msg.senderId, config, msg)) return;
+    // Natural language / business / personal routing (set by platform adapter)
+    if (msg.routeAs === 'natural' || msg.routeAs === 'business' || msg.routeAs === 'personal') {
+      // Business/personal: a contact can get a response (via Beeper). Natural: paired users (the owner)
+      // only. Personal replies are fenced to user:<chatId> in routeAsk (isOwner is false in a contact
+      // room) and carry no business persona — the base assistant prompt (M8 §524, owner-decided).
+      if (msg.routeAs === 'natural' && !isPaired(msg, config) && !isOwner(msg.senderId, config, msg)) return;
 
       // Silently ignore empty / media-only messages in business chats
       if (msg.routeAs === 'business') {

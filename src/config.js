@@ -228,6 +228,10 @@ function loadConfig() {
     config.business.escalation.admin_chat = config.business.admin_chat;
   }
 
+  // M8: the assistant's name — the personal-mode trigger word AND the [Name] disclosure prefix on
+  // contact-facing replies (§523). Default 'multis' so configs predating M8 always have a name.
+  if (!config.assistant_name) config.assistant_name = 'multis';
+
   // Ensure config.chats block exists (single source of truth for chat metadata)
   if (!config.chats) config.chats = {};
 
@@ -437,7 +441,7 @@ function isOwner(userId, config, msg) {
 // ---------------------------------------------------------------------------
 const ROLES = {
   'business':           { label: 'Business chatbot',   mode: 'business' }, // auto-respond to contacts
-  'personal-assistant': { label: 'Personal assistant', mode: 'silent' },   // log contacts, never reply; owner served fully
+  'personal-assistant': { label: 'Personal assistant', mode: 'personal' }, // M8: respond only when named; owner served fully
   'personal-bot':       { label: 'Personal bot',       mode: 'off' },      // ignore contacts; owner-only
 };
 
@@ -451,6 +455,17 @@ function normalizeRole(botMode) {
 /** Default mode applied to a non-owner chat for the given role. */
 function defaultModeForRole(botMode) {
   return ROLES[normalizeRole(botMode)].mode;
+}
+
+/**
+ * M8 (§514) — the constrained per-chat `/mode` picker set for a role: the account's engaged rung
+ * (first), then the step-downs `silent` and `off`. Deduped so `personal-bot` (default `off`) yields
+ * `['off','silent']`. This is the anti-confusion rule — a chat can only step DOWN or back up to the
+ * account default, never cross to another account's engaged style (a personal account can't set one
+ * chat `business`, and vice-versa). Single-sourced here so the picker + its tests can't drift.
+ */
+function allowedModesForRole(botMode) {
+  return [...new Set([defaultModeForRole(botMode), 'silent', 'off'])];
 }
 
 /** Human label for a role (init/status/doctor display). */
@@ -500,6 +515,7 @@ module.exports = {
   isOwner,
   normalizeRole,
   defaultModeForRole,
+  allowedModesForRole,
   roleLabel,
   ROLE_BY_CHOICE,
   transportForRole,

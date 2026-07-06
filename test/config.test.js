@@ -83,6 +83,14 @@ describe('loadConfig — default merging', () => {
     assert.strictEqual(config.documents.parseTimeoutMs, 30000);
   });
 
+  it('defaults assistant_name to "multis" for configs that predate it (M8)', () => {
+    delete require.cache[require.resolve('../src/config')];
+    const { loadConfig } = require('../src/config');
+    // The minimal on-disk config.json has no assistant_name — loadConfig must inject the default so
+    // the personal-mode trigger + [Name] disclosure prefix always have a name to work with.
+    assert.strictEqual(loadConfig().assistant_name, 'multis');
+  });
+
   it('preserves a custom max_tool_rounds over the default', () => {
     const multisDir = path.join(tmpDir, '.multis');
     const config = JSON.parse(fs.readFileSync(path.join(multisDir, 'config.json'), 'utf-8'));
@@ -198,20 +206,24 @@ describe('loadConfig — default merging', () => {
 describe('role ↔ mode (§3g)', () => {
   const { defaultModeForRole, roleLabel, normalizeRole } = require('../src/config');
 
-  it('maps the three roles to their non-owner default mode', () => {
+  it('maps the three roles to their non-owner default mode (M8: personal-assistant → personal)', () => {
     assert.equal(defaultModeForRole('business'), 'business');
-    assert.equal(defaultModeForRole('personal-assistant'), 'silent');
+    // M8 engagement ladder: the personal-assistant engaged rung is `personal` (respond only when
+    // named), replacing the old `silent`. This is M8's one deliberate behavior change.
+    assert.equal(defaultModeForRole('personal-assistant'), 'personal');
     assert.equal(defaultModeForRole('personal-bot'), 'off');
   });
 
-  it('treats legacy "personal" as personal-assistant (silent) — back-compat', () => {
-    assert.equal(defaultModeForRole('personal'), 'silent');
+  it('treats legacy "personal" as personal-assistant (now `personal` mode) — back-compat', () => {
+    assert.equal(defaultModeForRole('personal'), 'personal');
     assert.equal(normalizeRole('personal'), 'personal-assistant');
   });
 
-  it('defaults an unset/unknown role to personal-assistant (silent), never auto-respond', () => {
-    assert.equal(defaultModeForRole(undefined), 'silent');
-    assert.equal(defaultModeForRole('garbage'), 'silent');
+  it('defaults an unset/unknown role to personal-assistant (personal), never auto-respond', () => {
+    // `personal` responds ONLY when the assistant is named — still never auto-responds, so the
+    // fail-safe "unknown role never blasts everyone" invariant holds.
+    assert.equal(defaultModeForRole(undefined), 'personal');
+    assert.equal(defaultModeForRole('garbage'), 'personal');
   });
 
   it('gives a human label per role', () => {
@@ -219,6 +231,31 @@ describe('role ↔ mode (§3g)', () => {
     assert.equal(roleLabel('personal-assistant'), 'Personal assistant');
     assert.equal(roleLabel('personal-bot'), 'Personal bot');
     assert.equal(roleLabel('personal'), 'Personal assistant'); // legacy
+  });
+});
+
+// M8 module 2 — the account type owns the engaged rung; per-chat /mode may only step DOWN to
+// silent/off or back up to the account default. The picker set is constrained to
+// { defaultModeForRole(bot_mode), silent, off } (deduped), single-sourced here so the module-5
+// picker and its tests can't drift. This is the anti-confusion rule (PRD §514).
+describe('allowedModesForRole (§514 — constrained per-chat picker set)', () => {
+  const { allowedModesForRole } = require('../src/config');
+
+  it('business may set business · silent · off (engaged rung first)', () => {
+    assert.deepEqual(allowedModesForRole('business'), ['business', 'silent', 'off']);
+  });
+
+  it('personal-assistant may set personal · silent · off — never business (no crossing streams)', () => {
+    assert.deepEqual(allowedModesForRole('personal-assistant'), ['personal', 'silent', 'off']);
+    assert.ok(!allowedModesForRole('personal-assistant').includes('business'));
+  });
+
+  it('legacy "personal" resolves like personal-assistant', () => {
+    assert.deepEqual(allowedModesForRole('personal'), ['personal', 'silent', 'off']);
+  });
+
+  it('personal-bot dedups (default off) — off · silent', () => {
+    assert.deepEqual(allowedModesForRole('personal-bot'), ['off', 'silent']);
   });
 });
 
