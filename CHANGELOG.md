@@ -2,6 +2,17 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [0.19.4] — 2026-07-06
+
+### Changed — absorbed litectx 0.27.0, removing two internal workarounds (no behavior change)
+
+litectx 0.27.0 shipped the two library primitives multis had filed as asks while running on workarounds. Both are now consumed (dep bumped `^0.25.0` → `^0.27.0`):
+
+- **Saving a note is a touch leaner (M13).** The fast local similarity check in front of `/remember`'s update-vs-new judge used to re-compute the semantic vectors itself, because the underlying library didn't expose the similarity score it had already calculated. It now reads that score directly — same behavior and same conservative threshold, just without the redundant work. No user-visible change beyond a marginally quicker save.
+- **Forgetting a specific note is fenced by the library, not by a convention (M14).** Deleting one note by topic is now scoped to your chat by a structural guarantee inside litectx (a note from another chat simply can't be matched), replacing an earlier belt-and-braces approach that leaned on an app-level invariant. Same protection, fewer moving parts.
+
+Both were validated failably against the *installed* 0.27.0 (including the negative cases — the similarity score is absent in keyword-only mode; a cross-chat delete removes nothing), plus a mutation-proven end-to-end drive of the real save path. Full suite 578/578 green.
+
 ## [0.19.3] — 2026-07-05
 
 ### Added — saving a note skips an unnecessary AI call when it's clearly about something new (M13)
