@@ -31,8 +31,6 @@ let _bounds = {};
 let _GLOBAL = null;
 let _memSeq = 0;
 let _assemble = null;  // litectx's pure `assemble(units, ctx)` verb (M5 budget-fit), captured at init
-let _cosine = null;    // litectx's `cosine(a,b)` verb (M13 supersede pre-check), captured at init
-let _embeddings = false; // whether this process loaded the embedder (config.memory.semantic) — gates M13
 
 /**
  * Map a multis-native scope → the litectx scope value for a `scoped()` handle.
@@ -60,11 +58,9 @@ async function init(opts = {}) {
   if (_ctx) return _ctx;
   if (_initP) return _initP;
   _initP = (async () => {
-    const { LiteCtx, GLOBAL, assemble, cosine } = await import('litectx');
+    const { LiteCtx, GLOBAL, assemble } = await import('litectx');
     _GLOBAL = GLOBAL;
     _assemble = assemble;  // M5: pure budget-fit verb (no instance/scope needed) — exposed via assembleUnits()
-    _cosine = cosine;      // M13: same-vector cosine, paired with the instance embedder for the supersede pre-check
-    _embeddings = !!opts.embeddings; // M13 pre-check only runs when the embedder is loaded (semantic mode)
     const dataDir = path.dirname(PATHS.db());        // ~/.multis/data
     const root = path.join(dataDir, 'ctx');           // litectx root (inert: multis never index()-es a repo)
     const dbPath = path.join(dataDir, 'litectx.db');  // own DB
@@ -126,10 +122,6 @@ let _lastOccurred = 0;
  */
 const nextOccurredAt = () => { _lastOccurred = Math.max(Date.now(), _lastOccurred + 1); return _lastOccurred; };
 const toU8 = (b) => (b instanceof Uint8Array ? b : new Uint8Array(b));
-// M13: embed one string with the process embedder (the SAME instance litectx loaded for semantic
-// recall — no second model). `embed` may return a vector or a `[vector]`; normalize to a flat vector
-// so litectx's `cosine` gets what it expects. Caller guards on _embeddings, so ctx().embedder exists.
-const _embed = async (s) => { const r = await ctx().embedder.embed(String(s)); return Array.isArray(r[0]) ? r[0] : r; };
 const mapDocHit = (h) => ({ name: h.path, content: h.body || '', chunkId: h.path, format: h.format, score: h.score });
 // Native memory hits carry `occurredAt` (epoch ms, episodes) + `provenance` via attachMemMeta.
 // `createdAt` is surfaced as an ISO date for the recall_memory display (occurredAt for episodes;
@@ -213,19 +205,17 @@ function forScope(scope) {
       // `score` = the recall's BM25/blended relevance (a keyword hit → >0; a shared/low-IDF term or a
       // pure-KNN nearest-neighbour → 0). Surfaced alongside `sim` so a caller can tell a genuine match
       // from KNN's always-present nearest neighbour (targeted /forget filters on score>0 || sim>=thresh).
-      const cands = hits.map((h) => ({ id: h.path, text: h.body || '', score: h.score ?? 0 }));
-      // M13 supersede pre-check: attach the semantic similarity (note ↔ candidate) so the caller can
-      // skip the LLM judge when nothing is genuinely close (a low-cosine note can only be NEW). Only
-      // when the embedder is loaded (semantic mode) — else `sim` is absent and the caller falls through
-      // to the judge, byte-identical to the pre-M13 BM25-only path. An embed failure leaves `sim` absent
-      // (same fall-through), so the pre-check is strictly additive and never blocks a /remember write.
-      if (_embeddings && cands.length) {
-        try {
-          const q = await _embed(text);
-          for (const c of cands) c.sim = _cosine(q, await _embed(c.text));
-        } catch { /* embed error → leave sim absent → caller uses the LLM judge (fail-toward-keep) */ }
-      }
-      return cands;
+      // M13 supersede pre-check: `cosine` (litectx 0.27.0, embeddings mode only) is the raw note↔candidate
+      // semantic similarity litectx already computed for KNN ranking, surfaced verbatim — so the caller can
+      // skip the LLM judge when nothing is genuinely close (a low-cosine note can only be NEW) WITHOUT
+      // re-embedding. In BM25-only mode `cosine` is absent → `sim` stays undefined and the caller falls
+      // through to the judge, byte-identical to the pre-M13 path. Strictly additive; never blocks a write.
+      return hits.map((h) => ({
+        id: h.path,
+        text: h.body || '',
+        score: h.score ?? 0,
+        ...(typeof h.cosine === 'number' ? { sim: h.cosine } : {}),
+      }));
     },
     /**
      * Recall durable facts + scratchpad episodes for this tenant, FACTS FIRST (durable over scratch).
@@ -266,25 +256,20 @@ function forScope(scope) {
     },
     /**
      * Precise forget — delete ONE memory row by id (targeted `/forget <topic>`), tenant-safe.
-     * The base `ctx.forget({id})` is owner-BLIND (deletes by id regardless of scope — the scoped view
-     * rejects `{id}` on purpose), so we FIRST verify the id is in THIS scope via the scoped `get()`
-     * (returns null cross-tenant — POC-proven) → a caller can never even TARGET an id outside its scope.
-     * The residual (a blind delete matching the SAME id in another scope) can't occur here: every memory
-     * id is minted globally-unique (`memId` = mem-<ts>-<seq>; promoted facts `fact-<uniqueEpisodeId>`;
-     * W4 reuses an existing unique id), so no two scopes share one. A scoped delete-by-id would remove
-     * the reliance on that invariant — a litectx gap, filed as an ask. CASCADE: a promoted fact carries
-     * id `fact-<episodePath>` (see promotionSweep);
-     * deleting only the fact lets the still-hot source episode RE-PROMOTE it on the next sweep (the
-     * rebound bug), so we also delete that source episode — parsed straight from the id. Human
-     * `/remember` facts (`mem-…` ids) have no source episode → the fact alone.
+     * litectx 0.27.0 `scoped(scope).forget({id})` is TENANT-FENCED: it matches the owner-qualified physical
+     * key, so a foreign tenant's id matches nothing and returns 0 — the fence, not id-matching, decides.
+     * That retires the old "scoped-`get()` to verify, then owner-blind `ctx.forget({id})`" bridge (which was
+     * safe only under the lib-external globally-unique-id invariant). CASCADE: a promoted fact carries id
+     * `fact-<episodePath>` (see promotionSweep); deleting only the fact lets the still-hot source episode
+     * RE-PROMOTE it on the next sweep (the rebound bug), so we also delete that source episode — same tenant,
+     * same fence (0 if already gone). Human `/remember` facts (`mem-…` ids) have no source episode → fact alone.
      * @returns {number} rows removed (0 if the id isn't this tenant's).
      */
     forgetById(id) {
-      if (!id || !view.get(id)) return 0; // not this tenant's row (or already gone) → refuse the blind delete
-      let removed = ctx().forget({ id });
-      if (String(id).startsWith('fact-')) {
-        const episodePath = String(id).slice('fact-'.length);
-        if (view.get(episodePath)) removed += ctx().forget({ id: episodePath }); // kill the promotion root
+      if (!id) return 0;
+      let removed = view.forget({ id }); // tenant-fenced: 0 for a foreign/missing row (no pre-verify needed)
+      if (removed && String(id).startsWith('fact-')) {
+        removed += view.forget({ id: String(id).slice('fact-'.length) }); // kill the promotion root (same tenant)
       }
       return removed;
     },
