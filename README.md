@@ -133,16 +133,6 @@ These are siblings multis can grow toward — same design DNA, drop-in when the 
 
 If you'd rather not route through Beeper at all, you can start from scratch: run your own **Synapse + mautrix bridges** and point multis at them. It's the maximum-sovereignty path — no third party in the chat path — at the cost of more setup. See **[multi-platform docs](docs/02-features/multi-platform.md)**.
 
-## Status
-
-multis is **work in progress**, but the core is built and tested: the three roles, Telegram + Beeper (via beeperbox) connectivity, PDF/DOCX/Markdown indexing and conversation memory on **litectx**, the tool-using agent loop on **bare-agent**, every privileged action gated by **bareguard** (allow / deny / ask-you-first, audit log, spend cap), PIN-protected owner actions, and the single-owner security model — a customer in a business chat is answered but never reaches a host tool.
-
-Being one of the first real products built on the bare ecosystem, multis also *validates* those libraries against a real workload — findings go upstream, the libraries grow, multis stays a thin policy layer that never papers over a gap.
-
-Per-release notes live in the **[CHANGELOG](CHANGELOG.md)**; the full roadmap and per-module status in the **[PRD](docs/01-product/prd.md)**.
-
-Stack: Node.js (vanilla, minimal deps) · Telegraf · bare-agent · bareguard · litectx (FTS5 + PDF/DOCX via pdfjs-dist/mammoth) · beeperbox. Architecture and source map: **[system-state.md](docs/00-context/system-state.md)** · all docs: **[docs hub](docs/README.md)**.
-
 ## License
 
 Apache License, Version 2.0 — see [LICENSE](LICENSE).
