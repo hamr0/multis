@@ -129,15 +129,6 @@ These are siblings multis can grow toward — same design DNA, drop-in when the 
 
 > **Under the hood** — message router, skills, LLM layer, and the bareguard Gate, with documents + memory stored and recalled through **litectx** (a thin policy wrapper in `src/context`). The full architecture diagram and source map live in **[system-state.md](docs/00-context/system-state.md)**.
 
-## Why not openclaw
-
-multis borrows the good ideas — daemon architecture, the pairing flow, the `skill.md` pattern — and drops the weight:
-
-- **One config, every chat.** openclaw wires up a separate integration per network (WhatsApp Baileys, a Discord bot, Signal…). multis points at beeperbox once and reaches them all.
-- **Memory with priorities, not a transcript.** Recent context stays hot, old conversations fade — an activation-decay model (via litectx's ranked recall), not an ever-growing log.
-- **Documents it actually understands.** PDF and DOCX are parsed and chunked (via litectx) so an answer can cite the document it came from.
-- **A flat router, not a gateway.** No plugin system, no gateway layer — a new command is a handler in one file.
-
 ## No Beeper? Self-host Matrix
 
 If you'd rather not route through Beeper at all, you can start from scratch: run your own **Synapse + mautrix bridges** and point multis at them. It's the maximum-sovereignty path — no third party in the chat path — at the cost of more setup. See **[multi-platform docs](docs/02-features/multi-platform.md)**.
