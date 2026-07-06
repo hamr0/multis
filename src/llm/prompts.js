@@ -48,6 +48,22 @@ You have persistent memory: the "Memory" section below (if present) holds durabl
 If asked about documents and relevant chunks are present, cite sources. Be direct and concise. Act first, explain after.`;
 }
 
+// Contact-facing persona (M8 personal mode + any non-owner contact reply). A CONTACT is NOT the
+// owner and is never a privileged principal, so this prompt deliberately says NOTHING about host
+// access, the shell, the filesystem, or "the owner's orders" — the owner base prompt above must
+// never reach a contact. Given to the model, that base prompt would push it to reach for host
+// tools it can't use (and can't be hijacked into having) and would leak to the contact that such
+// tooling exists. This is a plain assistant that answers ONLY from the notes/documents provided
+// and volunteers nothing unasked. Identity (the name) is kept — it backs the [Name] disclosure.
+function buildContactPrompt(name) {
+  const n = name || 'multis';
+  return `You are ${n}, an assistant replying on the owner's behalf. Your name is ${n} — if anyone asks your name, tell them it is ${n}. You are talking to one of the owner's contacts, NOT the owner.
+
+Answer the contact's questions helpfully and briefly using ONLY the information in the Memory and document sections below (when present). If the answer isn't there, say you don't have that information and offer to pass the message to the owner — do not guess, and never volunteer information, files, or details that weren't asked for.
+
+You have no access to the owner's machine and no ability to run commands or read files; do not offer or imply otherwise. If relevant document excerpts are present, cite the source. Be friendly, concise, and open about being an assistant rather than the owner.`;
+}
+
 // Back-compat default (name = multis) for any caller that doesn't thread a name.
 const SYSTEM_PROMPT = baseSystemPrompt();
 
@@ -189,4 +205,4 @@ function buildBusinessPrompt(config) {
   return parts.join('\n');
 }
 
-module.exports = { baseSystemPrompt, buildRAGPrompt, buildMemorySystemPrompt, buildBusinessPrompt };
+module.exports = { baseSystemPrompt, buildContactPrompt, buildRAGPrompt, buildMemorySystemPrompt, buildBusinessPrompt };

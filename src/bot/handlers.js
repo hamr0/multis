@@ -4,7 +4,7 @@ const { addAllowedUser, isOwner, saveConfig, backupConfig, updateChatMeta, getMu
 const { listSkills } = require('../skills/executor');
 const context = require('../context');
 const { createProvider } = require('../llm/provider-adapter');
-const { buildRAGPrompt, buildMemorySystemPrompt, buildBusinessPrompt } = require('../llm/prompts');
+const { buildRAGPrompt, buildMemorySystemPrompt, buildBusinessPrompt, buildContactPrompt } = require('../llm/prompts');
 const { getMemoryManager } = require('../memory/manager');
 const { rememberWithSupersede } = require('../memory/supersede');
 const { PinManager, hashPin } = require('../security/pin');
@@ -1418,11 +1418,17 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
       : { agent: { provider }, name: 'default', text: question };
     const agentProvider = resolved.agent.provider || resolved.agent.llm || provider;
 
-    // Only business mode injects a customer-facing persona (no host tools there).
-    // Everything else (owner, natural) → base prompt, persona ignored.
+    // Persona selection. A CONTACT (non-owner, business OR personal) must NEVER receive the owner
+    // base prompt — it advertises full host access and treats messages as the owner's orders, which
+    // on a contact path leaks that such tooling exists and pushes the model toward tools it can't use
+    // (M1 audit). Business with a configured persona → buildBusinessPrompt; any other contact-facing
+    // reply (personal mode, or business with no persona set) → the lean buildContactPrompt (answer
+    // from scoped notes/docs only, volunteer nothing, no host framing). Owner/natural → base prompt.
     let agentPersona = null;
     if (msg.routeAs === 'business' && !admin && config.business?.name) {
       agentPersona = buildBusinessPrompt(config);
+    } else if (!admin && (msg.routeAs === 'personal' || msg.routeAs === 'business')) {
+      agentPersona = buildContactPrompt(config.assistant_name);
     }
     const cleanQuestion = resolved.text;
 

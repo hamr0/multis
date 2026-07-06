@@ -158,6 +158,33 @@ describe('RAG pipeline', () => {
     assert.strictEqual(indexer.searchCalls[0].opts.scope, 'user:chatX', 'fenced to the contact, not admin');
   });
 
+  it('M1: a personal-mode contact gets the lean contact persona, NOT the owner "full machine access" prompt', async () => {
+    // The owner base prompt advertises full host access and treats messages as the owner's orders.
+    // A non-owner CONTACT on the personal path must never receive it (leaks that host tooling exists
+    // + pushes the model at tools it can't use). It must get buildContactPrompt instead.
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    env.config.assistant_name = 'Roger';
+    const indexer = stubIndexer();
+
+    const contactLLM = mockLLM('here you go');
+    let platform = mockPlatform();
+    let router = createMessageRouter(env.config, { llm: contactLLM, indexer });
+    await router(msg('hey Roger', { platform: 'beeper', routeAs: 'personal', senderId: 'c2', chatId: 'pers', isSelf: false }), platform);
+
+    const contactCall = JSON.stringify(contactLLM.calls);
+    assert.ok(!/FULL access to this machine/i.test(contactCall), 'contact must NOT get the owner full-access prompt');
+    assert.ok(!/direct orders/i.test(contactCall), "contact must NOT be told messages are the owner's orders");
+    assert.ok(/NOT the owner|no access to the owner's machine/i.test(contactCall), 'contact gets the lean contact persona');
+
+    // Owner/natural on the SAME build still gets the base prompt — this also proves the capture is
+    // real (the marker CAN appear), so the negative assertions above aren't vacuously passing.
+    const ownerLLM = mockLLM('owner answer');
+    platform = mockPlatform();
+    router = createMessageRouter(env.config, { llm: ownerLLM, indexer });
+    await router(msg('what is up', { routeAs: 'natural' }), platform);
+    assert.ok(/FULL access to this machine/i.test(JSON.stringify(ownerLLM.calls)), 'owner/natural still gets the base prompt');
+  });
+
   it('M8 §525: contact-facing replies carry the [Name] disclosure prefix; owner replies do not', async () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     env.config.assistant_name = 'Roger';
