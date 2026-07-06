@@ -1465,10 +1465,20 @@ async function routeAsk(msg, platform, config, indexer, provider, question, getM
     // (M10 §5), so recent.json holds NOTHING about this turn while it's pending.
     if (!answer) return;
 
-    // Prefix with agent name only when multiple agents exist
-    const prefixed = agentRegistry && agentRegistry.size > 1
-      ? `[${resolved.name}] ${answer}`
-      : answer;
+    // Reply prefix. M8 §525: CONTACT-facing replies (business + personal) carry a [Name] bot-disclosure
+    // so the other party knows it's the bot, not the owner — an honest human/bot boundary. Owner/natural
+    // replies are not disclosed (the owner knows their own assistant). Cosmetic only: echo-guard stays
+    // client_tag (source:'api'), never the text — so this prefix can't be mistaken for the removed
+    // [multis] echo marker. Owner-facing multi-agent keeps the which-agent-answered tag.
+    const contactFacing = msg.routeAs === 'business' || msg.routeAs === 'personal';
+    let prefixed;
+    if (contactFacing) {
+      prefixed = `[${config.assistant_name || 'multis'}] ${answer}`;
+    } else if (agentRegistry && agentRegistry.size > 1) {
+      prefixed = `[${resolved.name}] ${answer}`;
+    } else {
+      prefixed = answer;
+    }
 
     await platform.send(msg.chatId, prefixed);
 

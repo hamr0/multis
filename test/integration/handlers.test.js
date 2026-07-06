@@ -158,6 +158,30 @@ describe('RAG pipeline', () => {
     assert.strictEqual(indexer.searchCalls[0].opts.scope, 'user:chatX', 'fenced to the contact, not admin');
   });
 
+  it('M8 §525: contact-facing replies carry the [Name] disclosure prefix; owner replies do not', async () => {
+    const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
+    env.config.assistant_name = 'Roger';
+    const indexer = stubIndexer();
+
+    // business reply → disclosed
+    let platform = mockPlatform();
+    let router = createMessageRouter(env.config, { llm: mockLLM('at your service'), indexer });
+    await router(msg('hello', { platform: 'beeper', routeAs: 'business', senderId: 'c1', chatId: 'biz', isSelf: false }), platform);
+    assert.strictEqual(platform.lastTo('biz').text, '[Roger] at your service');
+
+    // personal reply → disclosed
+    platform = mockPlatform();
+    router = createMessageRouter(env.config, { llm: mockLLM('here you go'), indexer });
+    await router(msg('hey Roger', { platform: 'beeper', routeAs: 'personal', senderId: 'c2', chatId: 'pers', isSelf: false }), platform);
+    assert.strictEqual(platform.lastTo('pers').text, '[Roger] here you go');
+
+    // owner/natural reply → NOT disclosed (owner knows their own bot)
+    platform = mockPlatform();
+    router = createMessageRouter(env.config, { llm: mockLLM('owner answer'), indexer });
+    await router(msg('what is up', { routeAs: 'natural' }), platform);
+    assert.strictEqual(platform.lastTo('chat1').text, 'owner answer');
+  });
+
   it('admin search is scoped to public + admin (not customer scopes)', async () => {
     const env = createTestEnv({ allowed_users: ['user1'], owner_id: 'user1' });
     const platform = mockPlatform();
