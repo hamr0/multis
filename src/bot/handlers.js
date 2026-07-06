@@ -517,9 +517,13 @@ function createMessageRouter(config, deps = {}) {
           }
           return;
         }
+      }
 
-        // Per-customer rate limit. On the cap we archive the message, hand off
-        // to a human, and stop the LLM — degrade, don't refuse (#1).
+      // Per-contact rate limit — bounds EVERY non-owner auto-respond path (business
+      // AND M8 personal), not just business, so a contact can't drive unbounded LLM
+      // calls by spamming the bot's name in a personal-mode chat. On the cap we archive
+      // the message, hand off to a human, and stop the LLM — degrade, don't refuse (#1).
+      if (msg.routeAs === 'business' || msg.routeAs === 'personal') {
         if (rateLimiter) {
           const verdict = rateLimiter.consume(msg.senderId);
           if (!verdict.allowed) {
@@ -534,7 +538,7 @@ function createMessageRouter(config, deps = {}) {
               await platform.send(msg.chatId, note);
               const who = config.chats?.[msg.chatId]?.name || msg.chatId;
               await notifyAdmins(platformRegistry, config,
-                `[Rate limit] ${who} hit the ${verdict.scope} limit — bot paused for this customer; please follow up.`);
+                `[Rate limit] ${who} hit the ${verdict.scope} limit — bot paused for this contact; please follow up.`);
               logAudit({ action: 'rate_limit', user_id: msg.senderId, chatId: msg.chatId, scope: verdict.scope });
             }
             return;

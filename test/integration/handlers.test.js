@@ -906,6 +906,33 @@ describe('Business escalation', () => {
     assert.strictEqual(llm.calls.length, 2);
   });
 
+  it('rate-limits a personal-mode contact past the burst cap: no unbounded LLM (#3, M8)', async () => {
+    // M8 made `personal` a contact-facing auto-respond path (respond-when-named). It must be
+    // bounded by the same per-sender limiter as business — else a contact drives unbounded LLM
+    // calls by spamming the bot's name. Regression: pre-fix the limiter was business-only.
+    const env = createTestEnv({
+      allowed_users: ['user1'],
+      owner_id: 'user1',
+      bot_mode: 'personal-assistant',
+      security: { rate_limit: { enabled: true, burst_per_min: 2, daily_per_sender: 100 } },
+      business: { escalation: { escalate_keywords: [], admin_chat: 'admin_chat' } }
+    });
+    const platform = mockPlatform();
+    const llm = mockLLM('answer');
+    const router = createMessageRouter(env.config, { llm, indexer: stubIndexer([], { totalChunks: 1 }) });
+    router.registerPlatform('beeper', platform);
+
+    const send = () => router(
+      msg('hey', { senderId: 'cust1', chatId: 'cust_chat', routeAs: 'personal' }), platform);
+
+    await send(); await send();            // both under the cap → LLM answers
+    assert.strictEqual(llm.calls.length, 2, 'first two personal messages reach the LLM');
+
+    await send();                          // third trips the burst cap
+    assert.strictEqual(llm.calls.length, 2, 'blocked personal message must NOT reach the LLM');
+    assert.match(platform.lastTo('cust_chat').text, /flagged a human|limit/i, 'contact gets a handoff message');
+  });
+
   it('owner is never rate-limited in their own business chat', async () => {
     const env = createTestEnv({
       allowed_users: ['user1'],
