@@ -91,6 +91,44 @@ describe('loadConfig — default merging', () => {
     assert.strictEqual(loadConfig().assistant_name, 'multis');
   });
 
+  it('migrates a stale cross-role per-chat mode on load (M8 — stale `personal` flip)', () => {
+    // Pre-M8, `personal` in chats[].mode was a stale profile-rename artifact that getChatMode
+    // IGNORED. M8 makes it a real rung, so on a BUSINESS account a stale `personal` would
+    // silently flip that chat from auto-respond to respond-when-named. loadConfig must reconcile
+    // any mode outside the account's ladder to the default; silent/off survive everywhere.
+    const multisDir = path.join(tmpDir, '.multis');
+    const config = JSON.parse(fs.readFileSync(path.join(multisDir, 'config.json'), 'utf-8'));
+    config.bot_mode = 'business';
+    config.chats = {
+      stale: { mode: 'personal' },   // invalid for a business account → must remap to business
+      muted: { mode: 'off' },        // valid everywhere → must survive
+      hushed: { mode: 'silent' },    // valid everywhere → must survive
+      meta: { name: 'no mode set' }, // no mode → untouched
+    };
+    fs.writeFileSync(path.join(multisDir, 'config.json'), JSON.stringify(config, null, 2));
+
+    delete require.cache[require.resolve('../src/config')];
+    const { loadConfig } = require('../src/config');
+    const loaded = loadConfig();
+
+    assert.strictEqual(loaded.chats.stale.mode, 'business', 'stale cross-role personal remaps to the business default');
+    assert.strictEqual(loaded.chats.muted.mode, 'off', 'off survives');
+    assert.strictEqual(loaded.chats.hushed.mode, 'silent', 'silent survives');
+    assert.strictEqual(loaded.chats.meta.mode, undefined, 'a chat with no mode is untouched');
+  });
+
+  it('keeps a legitimate `personal` mode on a personal-assistant account (no false migration)', () => {
+    const multisDir = path.join(tmpDir, '.multis');
+    const config = JSON.parse(fs.readFileSync(path.join(multisDir, 'config.json'), 'utf-8'));
+    config.bot_mode = 'personal-assistant';
+    config.chats = { jane: { mode: 'personal' } }; // valid for this role → must NOT be remapped
+    fs.writeFileSync(path.join(multisDir, 'config.json'), JSON.stringify(config, null, 2));
+
+    delete require.cache[require.resolve('../src/config')];
+    const { loadConfig } = require('../src/config');
+    assert.strictEqual(loadConfig().chats.jane.mode, 'personal', 'personal is a valid rung here — kept');
+  });
+
   it('preserves a custom max_tool_rounds over the default', () => {
     const multisDir = path.join(tmpDir, '.multis');
     const config = JSON.parse(fs.readFileSync(path.join(multisDir, 'config.json'), 'utf-8'));
@@ -306,7 +344,7 @@ describe('reconcileChatModes (clean role switch)', () => {
 // logic (bin/multis.js routes through applyRoleTransport), so a regression in the
 // binding — or in the role-switch flip — fails here.
 describe('role ⟺ transport binding (§3g, init Step 1)', () => {
-  const { transportForRole, applyRoleTransport, ROLE_BY_CHOICE } = require('../src/config');
+  const { transportForRole, applyRoleTransport, ROLE_BY_CHOICE, enableKeptTelegram } = require('../src/config');
 
   it('binds personal-bot to Telegram, the other roles to Beeper', () => {
     assert.deepEqual(transportForRole('personal-bot'), { useTelegram: true, useBeeper: false });
@@ -335,6 +373,33 @@ describe('role ⟺ transport binding (§3g, init Step 1)', () => {
     assert.deepEqual(binding, { useTelegram: true, useBeeper: false });
     // It must NOT pre-enable Telegram — that is the network-gated connect step's job.
     assert.notEqual(config.platforms.telegram.enabled, true, 'selected transport is left for the connect step');
+  });
+
+  it('keep-token connect step enables the bound Telegram transport (fix: no "both off")', () => {
+    // The exact bug: switching INTO personal-bot from a Beeper role disables Beeper and leaves
+    // Telegram for the connect step (test above). If the user keeps their verified token the
+    // connect step short-circuits — enableKeptTelegram must still enable Telegram, or the daemon
+    // starts with BOTH transports off → "No platforms configured".
+    const config = { bot_mode: 'personal-assistant', platforms: { beeper: { enabled: true }, telegram: { enabled: false, bot_token: 'kept-tok' } } };
+    applyRoleTransport(config, 'personal-bot');
+    assert.notEqual(config.platforms.telegram.enabled, true, 'precondition: connect step has not run yet');
+
+    enableKeptTelegram(config, 'kept-tok');
+
+    assert.equal(config.platforms.telegram.enabled, true, 'bound transport enabled → not "both off"');
+    assert.equal(config.platforms.beeper.enabled, false, 'the non-selected transport stays off');
+    assert.equal(config.platforms.telegram.bot_token, 'kept-tok', 'existing token preserved');
+  });
+
+  it('enableKeptTelegram seeds the token on a bare block but never clobbers an existing one', () => {
+    const bare = { platforms: {} };
+    enableKeptTelegram(bare, 'from-verify');
+    assert.equal(bare.platforms.telegram.enabled, true);
+    assert.equal(bare.platforms.telegram.bot_token, 'from-verify', 'token seeded when absent');
+
+    const existing = { platforms: { telegram: { enabled: false, bot_token: 'already-there' } } };
+    enableKeptTelegram(existing, 'from-verify');
+    assert.equal(existing.platforms.telegram.bot_token, 'already-there', 'never overwrites an existing token');
   });
 
   it('switching to a Beeper role flips OFF Telegram', () => {

@@ -246,6 +246,23 @@ function loadConfig() {
     saveConfig(config);
   }
 
+  // M8 migration: pre-M8, `personal` in chats[].mode was a stale profile-rename artifact that
+  // getChatMode IGNORED (it fell through to the role default) — it was never a settable mode.
+  // M8 makes `personal` a real rung, so a stale `personal` would now be honored, silently
+  // flipping a chat to respond-when-named. Remap ONLY a stale `personal` that the current role
+  // can't use (business / personal-bot accounts) to that role's default; on a personal-assistant
+  // account `personal` is the default rung, so it's kept. business/silent/off are deliberately
+  // left alone — they behaved identically before and after M8, so retroactively re-scoping them
+  // would CHANGE behavior, not preserve it (that full reconcile belongs only on a deliberate init
+  // role switch, not on every load). Runs after the chat_modes migration so those are covered too.
+  if (!allowedModesForRole(config.bot_mode).includes('personal')) {
+    let migrated = 0;
+    for (const chat of Object.values(config.chats)) {
+      if (chat && chat.mode === 'personal') { chat.mode = defaultModeForRole(config.bot_mode); migrated++; }
+    }
+    if (migrated > 0) saveConfig(config);
+  }
+
   // Merge defaults for memory section
   if (!config.memory) config.memory = {};
   config.memory = {
@@ -492,6 +509,23 @@ function reconcileChatModes(config, newRole) {
   return remapped;
 }
 
+/**
+ * Init connect step, keep-token path (M8 fix): enable the bound Telegram transport.
+ * `applyRoleTransport` only DISABLES the non-selected transport — enabling the selected one
+ * is the connect step's job. When the user presses Enter to keep a verified token, that step
+ * short-circuits, so without this it never enables Telegram: switching INTO personal-bot from
+ * a Beeper role (where telegram.enabled was set false) leaves BOTH transports off → the daemon
+ * refuses to start with "No platforms configured". Pure + exported so the wizard's keep-token
+ * path is regression-testable without driving the interactive prompt. Mutates + returns config.
+ */
+function enableKeptTelegram(config, existingToken) {
+  if (!config.platforms) config.platforms = {};
+  if (!config.platforms.telegram) config.platforms.telegram = {};
+  config.platforms.telegram.enabled = true;
+  if (existingToken && !config.platforms.telegram.bot_token) config.platforms.telegram.bot_token = existingToken;
+  return config;
+}
+
 /** Human label for a role (init/status/doctor display). */
 function roleLabel(botMode) {
   return ROLES[normalizeRole(botMode)].label;
@@ -541,6 +575,7 @@ module.exports = {
   defaultModeForRole,
   allowedModesForRole,
   reconcileChatModes,
+  enableKeptTelegram,
   roleLabel,
   ROLE_BY_CHOICE,
   transportForRole,

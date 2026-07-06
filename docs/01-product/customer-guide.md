@@ -26,9 +26,10 @@
    - [Everyone](#everyone-commands)
    - [Owner Only](#owner-only-commands)
 8. [Modes: Personal vs Business](#8-modes)
-   - [Personal Mode](#personal-mode)
    - [Business Mode](#business-mode)
+   - [Personal Mode](#personal-mode)
    - [Silent Mode](#silent-mode)
+   - [Off Mode](#off-mode)
    - [Setting Modes Per Chat](#setting-modes-per-chat)
 9. [Business Persona Setup](#9-business-persona-setup)
 10. [Document Indexing](#10-document-indexing)
@@ -141,7 +142,7 @@ What do you want multis to be?
 - **Personal bot → Telegram.** Just a Telegram bot, owner-only. Nothing else to install.
 - **Personal assistant → Beeper** and **Business chatbot → Beeper.** Beeper is the only channel that can *see and respond to your real contacts* across networks — a Telegram bot only sees people who message the bot directly. So both of these run through Beeper, controlled from your Note-to-self chat.
 
-The difference between the two Beeper roles is purely how the bot treats **other people's** messages by default — *assistant* logs them so you can ask about them but never replies; *business* auto-responds. You're always served fully either way, and you can flip any single chat with `/mode` (e.g. tell the assistant to start replying to one person). Re-running `init` keeps your current choice unless you change it.
+The difference between the two Beeper roles is how the bot treats **other people's** messages by default — *assistant* replies only when a contact calls it **by name** (and captures the rest silently); *business* auto-responds to everyone. You're always served fully either way, and you can step any single chat down to silent/off (or back to the default) with `/mode`. Re-running `init` keeps your current choice unless you change it.
 
 ### Step 2: Connect Platforms
 
@@ -325,7 +326,8 @@ else is a customer and has none of these commands.
 | `/read <path>` | Owner | Read a file or list a directory (benign — no PIN) |
 | `/index <path> <public\|admin>` | Owner | Index a document or directory |
 | `/pin` | Owner | Change or set your PIN |
-| `/mode [mode] [target]` | Owner | View or set chat modes (business/silent/off). Turning a chat **off** needs the PIN |
+| `/mode [mode] [target]` | Owner | View or set a chat's mode. Which modes you can set depends on your account type (personal-assistant: personal/silent/off; business: business/silent/off). Turning a chat **off** needs the PIN. On Telegram it only reports the account type — change it with `multis init` |
+| `/name [new name]` | Owner | View or set the assistant's name — the personal-mode trigger word and the `[Name]` disclosure prefix on replies to contacts |
 | `/agent [name]` | Owner | View or assign an agent to this chat |
 | `/agents` | Owner | List all configured agents |
 | `/remind <duration> <action>` | Owner | Set a one-shot reminder (e.g. `/remind 30m call dentist`) |
@@ -340,11 +342,11 @@ else is a customer and has none of these commands.
 
 ## 8. Modes
 
-multis has three modes that control how the bot behaves in each chat.
+multis has **one engagement ladder** — a single axis for how much the bot participates in a chat, most → least: **business** → **personal** → **silent** → **off**. Your account type sets which *engaged* rung a chat uses by default (personal-assistant → personal, business → business); a per-chat `/mode` only steps a chat down to silent/off or back up to that default — it can't cross to the other account type's engaged rung. To change how the bot engages *all* chats, change your account type with `multis init`.
 
 ### Personal Mode
 
-The default. The bot responds to your commands and questions. This is for your own use — talking to the bot directly.
+The personal-assistant default. The bot replies **only when the assistant is called by name** (see [`/name`](#chat-modes)) — otherwise it captures the message silently for later recall. A contact summons it by name, and its reply is scoped to that contact plus your public knowledge base — never your private data. (You're always served fully in your own Note-to-self chat, where the assistant has your full context; that's where you drive actions across your contacts.)
 
 ### Business Mode
 
@@ -373,11 +375,12 @@ The bot completely ignores messages in this chat. No archiving, no logs, no memo
 
 `/mode` with no target lists your **recent** chats live from Beeper (the most recent ~24), each with its current mode — plus any chat you've already set a mode on, so it stays visible even after it drops out of the recent list. A chat that's neither recent nor already configured won't appear; set it by name with `/mode <mode> <name>`, which finds it live. If two chats share the same name (e.g. two messaging threads for one contact), each is tagged with its **last-active date** so you can tell which numbered entry is the live one — you still reply with the number.
 
-You manage Beeper chat modes from your command channel — your Beeper Note-to-self chat (and, if your setup also has a Telegram bot, from Telegram too):
+You manage Beeper chat modes from your command channel — your Beeper Note-to-self chat. (Telegram is the personal-bot transport: its `/mode` only reports your account type and points role changes at `multis init` — it never reaches Beeper chats.)
 
 ```
 /mode business Acme Corp        # Set Acme Corp's Beeper chat to business
-/mode silent                    # Set Telegram chat to silent (global)
+/mode personal "Jane Doe"       # Reply to Jane only when the assistant is named
+/mode off "WhatsApp Group"      # Exclude a chat entirely (needs PIN)
 ```
 
 ---
