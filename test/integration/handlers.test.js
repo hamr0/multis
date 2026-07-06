@@ -646,6 +646,59 @@ describe('App-verb door — governed-core ceremony (M9 increment 2)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// M8 module 5 — the account-constrained per-chat mode set (§514) + /name
+// ---------------------------------------------------------------------------
+describe('M8 mode ladder + /name', () => {
+  function ownerBeeper(extra = {}) {
+    const env = createTestEnv({
+      allowed_users: ['user1'], owner_id: 'user1',
+      platforms: { beeper: { enabled: true } },
+      chats: { 'cx': { platform: 'beeper', name: 'Xavier' } },
+      ...extra,
+    });
+    const platform = mockPlatform();
+    const router = createMessageRouter(env.config, { llm: mockLLM(), indexer: stubIndexer(), memoryBaseDir: env.memoryBaseDir });
+    router.registerPlatform('telegram', platform);
+    router.registerPlatform('beeper', { send: async () => {}, _personalChats: new Set() });
+    return { env, platform, router };
+  }
+
+  it('a business account CANNOT set a chat to personal (cross-stream rejected)', async () => {
+    const { env, platform, router } = ownerBeeper({ bot_mode: 'business' });
+    await router(msg('/mode personal Xavier', { senderId: 'user1', chatId: 'chat1' }), platform);
+    assert.match(platform.lastTo('chat1').text, /can't set a chat to "personal"/i);
+    assert.notStrictEqual(env.config.chats?.['cx']?.mode, 'personal', 'mode was not set');
+  });
+
+  it('a personal-assistant account CANNOT set a chat to business (cross-stream rejected)', async () => {
+    const { env, platform, router } = ownerBeeper({ bot_mode: 'personal-assistant' });
+    await router(msg('/mode business Xavier', { senderId: 'user1', chatId: 'chat1' }), platform);
+    assert.match(platform.lastTo('chat1').text, /can't set a chat to "business"/i);
+    assert.notStrictEqual(env.config.chats?.['cx']?.mode, 'business', 'mode was not set');
+  });
+
+  it('a personal-assistant account CAN set a chat to personal (its engaged rung)', async () => {
+    const { env, platform, router } = ownerBeeper({ bot_mode: 'personal-assistant' });
+    await router(msg('/mode personal Xavier', { senderId: 'user1', chatId: 'chat1' }), platform);
+    assert.strictEqual(env.config.chats?.['cx']?.mode, 'personal', 'engaged rung set');
+  });
+
+  it('/name — bare shows the current name; setting persists it (owner-only)', async () => {
+    const { env, platform, router } = ownerBeeper({ assistant_name: 'Roger' });
+    await router(msg('/name', { senderId: 'user1', chatId: 'chat1' }), platform);
+    assert.match(platform.lastTo('chat1').text, /Assistant name: Roger/);
+
+    await router(msg('/name Jarvis', { senderId: 'user1', chatId: 'chat1' }), platform);
+    assert.strictEqual(env.config.assistant_name, 'Jarvis');
+    assert.match(platform.lastTo('chat1').text, /set to "Jarvis"/);
+
+    // A non-owner cannot change it (the router's owner-only guard fires first on Telegram).
+    await router(msg('/name Hacker', { senderId: 'stranger', chatId: 'chat1' }), platform);
+    assert.strictEqual(env.config.assistant_name, 'Jarvis', 'unchanged by a non-owner');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // PIN change wizard (characterization — verify → new → save)
 // ---------------------------------------------------------------------------
 
@@ -1281,7 +1334,7 @@ describe('Help visibility', () => {
 
     await router(msg('/help mode'), platform);
     const text = platform.sent[0].text;
-    assert.match(text, /\/mode \[business\|silent\|off\]/, 'shows the usage line');
+    assert.match(text, /\/mode \[mode\] \[chat\]/, 'shows the usage line');
     assert.match(text, /business-persona menu/, 'shows the detail blurb');
     assert.ok(!/\nASK /.test(text), 'detail view is not the full menu');
   });
