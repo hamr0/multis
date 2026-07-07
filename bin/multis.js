@@ -23,12 +23,16 @@ const LOGO = [
 
 const command = process.argv[2];
 
-if (command) {
-  // Direct command mode: multis start, multis stop, etc.
-  runCommand(command);
-} else {
-  // Interactive menu mode: just `multis`
-  runMenu();
+// Only dispatch when run as the CLI — `require('bin/multis')` (tests) must be
+// side-effect-free so exported helpers like readPin can be exercised directly.
+if (require.main === module) {
+  if (command) {
+    // Direct command mode: multis start, multis stop, etc.
+    runCommand(command);
+  } else {
+    // Interactive menu mode: just `multis`
+    runMenu();
+  }
 }
 
 async function runCommand(cmd) {
@@ -608,35 +612,29 @@ async function runInit() {
   // -----------------------------------------------------------------------
   step(4, TOTAL_STEPS, 'Security');
 
-  const existingPin = !!config.security?.pin_hash;
+  if (!config.security) config.security = {};
+  const existingPin = !!config.security.pin_hash;
+  const warnPin = (m) => console.log(c.warn(m));
 
   if (existingPin) {
     console.log(`  PIN: set ${c.green('✓')}`);
-    const pinInput = (await ask('  [Enter to keep, or type new 4-6 digit PIN]: ')).trim();
-    if (!pinInput) {
+    // Keep on Enter, or re-prompt until a valid new PIN — never silently accept junk.
+    const newPin = await readPin(ask, { allowKeep: true, warn: warnPin });
+    if (newPin === null) {
       console.log(c.ok('Keeping PIN'));
-      summary.pin = true;
-    } else if (/^\d{4,6}$/.test(pinInput)) {
-      config.security.pin_hash = crypto.createHash('sha256').update(pinInput).digest('hex');
-      console.log(c.ok('PIN updated'));
-      summary.pin = true;
     } else {
-      console.log(c.warn('Invalid PIN (must be 4-6 digits). Keeping existing.'));
-      summary.pin = true;
+      config.security.pin_hash = crypto.createHash('sha256').update(newPin).digest('hex');
+      console.log(c.ok('PIN updated'));
     }
   } else {
-    const pinChoice = (await ask('Set a PIN for sensitive commands like /exec? (4-6 digits, Enter to skip): ')).trim();
-    if (pinChoice && /^\d{4,6}$/.test(pinChoice)) {
-      if (!config.security) config.security = {};
-      config.security.pin_hash = crypto.createHash('sha256').update(pinChoice).digest('hex');
-      console.log(c.ok('PIN set'));
-      summary.pin = true;
-    } else if (pinChoice) {
-      console.log(c.warn('Invalid PIN (must be 4-6 digits). Skipping.'));
-    } else {
-      console.log(c.dim('No PIN set (optional).'));
-    }
+    // A PIN is MANDATORY (it gates every destructive action). Loop until valid —
+    // no skip: an empty/malformed entry re-prompts rather than leaving the bot
+    // with ceremony disabled.
+    const newPin = await readPin(ask, { allowKeep: false, warn: warnPin });
+    config.security.pin_hash = crypto.createHash('sha256').update(newPin).digest('hex');
+    console.log(c.ok('PIN set'));
   }
+  summary.pin = true;
 
   // -----------------------------------------------------------------------
   // Save + Summary
@@ -1160,3 +1158,22 @@ function isRunning() {
     return false;
   }
 }
+
+// Prompt until a valid 4-6 digit PIN is entered. A PIN is MANDATORY — it gates
+// every destructive action, and with no PIN configured the ceremony degrades to a
+// no-op (destructive commands run unprompted). So there is no skip: an empty or
+// malformed entry re-prompts. With allowKeep, an empty line returns null (retain
+// the existing PIN). `ask`/`warn` are injected so the loop is unit-testable.
+async function readPin(ask, { allowKeep = false, warn = (m) => console.log(m) } = {}) {
+  for (;;) {
+    const label = allowKeep
+      ? '  [Enter to keep, or type a new 4-6 digit PIN]: '
+      : '  Set a PIN for sensitive actions (4-6 digits, required): ';
+    const input = String(await ask(label)).trim();
+    if (allowKeep && !input) return null;
+    if (/^\d{4,6}$/.test(input)) return input;
+    warn(input ? 'PIN must be 4-6 digits — required, please try again.' : 'A PIN is required — please enter 4-6 digits.');
+  }
+}
+
+module.exports = { readPin, isRunning };

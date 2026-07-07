@@ -94,59 +94,66 @@ function matchesAskEscalation(value) {
 // so an "always ask" declared on tool names lands on the type the gate evaluates.
 const TOOL_TYPE = { exec: 'bash', read_file: 'read', send_file: 'read', grep_files: 'read', find_files: 'read' };
 
-// Command governance tiers (2026-06-17, owner-authorized — see dispatch-rewrite-
-// decision). The owner has full machine access, so commands "follow bareguard by
-// default" (benign/allowlisted just run); only DESTRUCTIVE commands need a PIN,
-// and a tiny CATASTROPHIC set needs PIN **plus** a typed CONFIRM. Reads/finds are
-// benign (no PIN) now that the fs scope is open.
+// Command severity CLASSIFICATION is bareguard's job — consumed via classifyCommand
+// (require-able synchronously even though bareguard is ESM). The 2026-07-07 audit proved
+// a hand-rolled head-based classifier DRIFTS from the lib (it missed `env -i rm` and
+// `find -exec rm`, which bareguard's whole-string scan catches); the M11 decision to keep
+// our own was reversed. bareguard 0.12.0 (BG-1/2/3) covers the full corpus multis used to
+// hand-roll, verified against the installed artifact:
+//   - super_destructive: rm -rf of /, ~, $HOME, whole system roots (/etc,/usr,…) + whole
+//     home accounts (/home/<user>), dd→device, mkfs, wipefs, block-device redirect, fork
+//     bomb, shutdown/reboot/halt, init 0/6   (was multis's CATASTROPHIC_* block)
+//   - destructive: the denylist heads, incl. the env-wrapper (`env -i rm`) via the
+//     whole-string scan; find … -delete / -exec / -execdir (BG-2)
+//   - a NESTED path one level deeper (`/home/alice/project/build`, `/var/tmp/x`) stays
+//     destructive (PIN), not super — a routine build-clean never becomes un-runnable.
 //
-// Catastrophic = genuine machine-wreckers. Checked before "destructive"; this set
-// is deliberately small and explicit so ordinary deletes/moves only hit the PIN
-// tier. PIN + typed CONFIRM (never a hard block — the owner can still do it
-// deliberately).
-//
-// INTERIM, LINUX-ONLY — pending bareguard command-severity classification (PRD §7
-// ask, filed 2026-06-17). This is the CONSUMER half done right (the severity→
-// ceremony mapping is multis policy and stays here), but the cross-platform
-// CLASSIFICATION (macOS `diskutil eraseDisk`, Windows `format`/`diskpart`/
-// `Remove-Item -Recurse -Force`) belongs in the lib. When bareguard ships
-// `classifyCommand`, replace this block with the lib call — the tier→PIN/CONFIRM
-// mapping below is unchanged. Do NOT grow a parallel macOS/Windows list here.
-const CATASTROPHIC_RM = /\brm\b[^|;&\n]*?(?:-\w*r\w*\b[^|;&\n]*?-\w*f|\b-\w*f\w*\b[^|;&\n]*?-\w*r|-\w*(?:rf|fr)\w*)/i;
-const CATASTROPHIC_ROOT_TARGET = /(?:^|\s)(?:\/|\/\*|~\/?|\$HOME)(?:\s|$|\/|\*)/;
-const CATASTROPHIC_PATTERNS = [
-  /\bdd\b[^\n]*\bof=\/dev\//i,                 // dd writing to a raw device
-  /\bmkfs\S*/i,                                // make a filesystem
-  /\bwipefs\b/i,
-  />\s*\/dev\/(?:sd|nvme|vd|mmcblk|disk)/i,     // redirect over a block device
-  /:\s*\(\s*\)\s*\{/,                          // fork bomb  :(){ :|:& };:
-  /\b(?:shutdown|reboot|poweroff|halt)\b/i,     // power state
-  /\binit\s+[06]\b/i,
-];
-function isCatastrophic(cmd) {
-  const c = String(cmd || '');
-  if (CATASTROPHIC_RM.test(c) && CATASTROPHIC_ROOT_TARGET.test(c)) return true;
-  return CATASTROPHIC_PATTERNS.some((re) => re.test(c));
+// multis keeps only the CONSUMER half: the tier→ceremony mapping (super→wall, destructive
+// →PIN) lives in the M9 core, and two policy inputs ride in as extraDestructive here —
+//   1. the governance denylist (config-driven parity: an owner-edited denylist still
+//      drives severity, and every denylisted command floors to ≥ destructive); and
+//   2. INTERPRETER_PATTERNS (owner decision 2026-07-07: PIN-gate inline interpreter code
+//      `python -c` / `node -e` / … — a silent false-safe injection vector; the owner-in-
+//      the-loop PIN is the human checkpoint. Honest limit: only the INLINE shape — the
+//      same payload via a script file, heredoc, or base64|sh is opaque to any classifier,
+//      so the hard boundary stays fs/exec scope, not this tier).
+// Platform is auto-detected (process.platform) — multis now inherits macOS/Windows
+// classification for free (the old block was LINUX-ONLY by admission).
+
+// bareguard tier → multis severity tier.
+const SHELL_SEVERITY = { safe: 'benign', destructive: 'destructive', super_destructive: 'catastrophic' };
+
+let _bgClassify = null;
+function bareguardClassify() {
+  if (!_bgClassify) {
+    const bg = require('bareguard');
+    _bgClassify = { classifyCommand: bg.classifyCommand, INTERPRETER_PATTERNS: bg.INTERPRETER_PATTERNS || [] };
+  }
+  return _bgClassify;
 }
 
-// First executable token of a command (skips leading `sudo`/`env` and a path).
-function commandHead(cmd) {
-  const toks = String(cmd || '').trim().split(/\s+/);
-  let i = 0;
-  while (i < toks.length && /^(?:sudo|env)$/i.test(toks[i])) i++;
-  const head = (toks[i] || '').split('/').pop();
-  return head.toLowerCase();
+/** Governance denylist command names → word-boundary regexes for classifyCommand's
+ *  extraDestructive — parity with bareguard's own whole-string `\brm\b`-style scan, so a
+ *  denylisted command is caught anywhere in a chained/wrapped line, not just as the head. */
+function denylistToPatterns(denylist) {
+  return (denylist || []).map((c) => new RegExp('\\b' + escapeRegex(String(c)) + '\\b', 'i'));
 }
-// Destructive = the governance denylist (rm/mv-class, chmod, kill, …) + `sudo`
-// itself. PIN-gated (runs after a correct PIN). Scans EVERY segment of a chained
-// command (`;`/`&&`/`||`/`|`), like isCatastrophic — so `ls; rm -rf x` classifies
-// destructive on the `rm`, not benign on the `ls` head. (Chained commands are
-// also denied outright by the bash metachar floor; scanning all segments keeps
-// classification from silently depending on that floor — defense-in-depth.)
-function makeDestructiveCheck(denylist) {
-  const set = new Set((denylist || []).map((c) => String(c).toLowerCase()));
-  const isSeg = (seg) => (set.has('sudo') && /^\s*sudo\b/i.test(seg) ? true : set.has(commandHead(seg)));
-  return (cmd) => String(cmd || '').split(/(?:;|&&|\|\||\|)/).some(isSeg);
+
+/**
+ * Classify a shell command's effective severity via bareguard's classifyCommand.
+ * @param {string} command
+ * @param {string[]} [denylist]  governance command denylist (config-driven parity)
+ * @returns {'benign'|'destructive'|'catastrophic'}
+ */
+function classifyShellSeverity(command, denylist) {
+  const { classifyCommand, INTERPRETER_PATTERNS } = bareguardClassify();
+  const extraDestructive = [...denylistToPatterns(denylist), ...INTERPRETER_PATTERNS];
+  const tier = classifyCommand(String(command || ''), { extraDestructive });
+  // Fail-safe default: bareguard's frozen contract returns exactly safe/destructive/
+  // super_destructive, so the fallback is unreachable today — but if that contract ever
+  // drifts, an UNRECOGNIZED classification must fail toward the ceremony (PIN), never
+  // toward run-free. A security classifier's unknown case is destructive, not benign.
+  return SHELL_SEVERITY[tier] || 'destructive';
 }
 
 /**
@@ -420,9 +427,10 @@ async function createGate(opts = {}) {
     onLlmResult: wired.onLlmResult,
     onToolResult: wired.onToolResult,
     filterTools: wired.filterTools,
-    // The command denylist drives the M9 core's shell-severity classifier
-    // (classifyEffectiveSeverity → makeDestructiveCheck). Surface it here so the
-    // single governed core reads the SAME list the LLM-path 3-tier already uses.
+    // The command denylist rides into the M9 core's shell-severity classifier
+    // (classifyEffectiveSeverity → classifyShellSeverity → classifyCommand as
+    // extraDestructive). Surface it here so the single governed core feeds the SAME
+    // list to bareguard that the LLM-path and slash-path both classify against.
     denylist: governance?.commands?.denylist || [],
     HaltError,
   };
@@ -435,8 +443,6 @@ module.exports = {
   ownerCheck,
   loadGovernance,
   makeActionTranslator,
-  isCatastrophic,
-  commandHead,
-  makeDestructiveCheck,
+  classifyShellSeverity,
   matchesAskEscalation,
 };

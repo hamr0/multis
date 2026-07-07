@@ -43,8 +43,8 @@ const PIN = '1234';
 const GOV = { commands: { allowlist: ['echo'], denylist: ['echo', 'rm'] }, paths: { allowed: ['.*'], denied: [] } };
 
 const DESTRUCTIVE = 'echo parity-marker';
-// Catastrophic-classified (`~/*` matches CATASTROPHIC_ROOT_TARGET) AND passes the
-// bareguard floor — so it reaches the multis CORE wall, not a floor deny (the same
+// Catastrophic-classified (`rm -rf ~/*` → bareguard classifyCommand super_destructive)
+// AND passes the bareguard floor — so it reaches the multis CORE wall, not a floor deny (the same
 // command agent-loop.test.js uses to prove the wall; `$HOME` is rejected earlier by
 // bareguard's shell-metachar guard). The slash door runs the REAL exec, so its test
 // redirects HOME to throwaway scratch — a wall regression could then only `rm` an

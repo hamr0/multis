@@ -25,7 +25,7 @@
 
 const { TOOLS } = require('../tools/definitions');
 const { FORCE_OWNER_ONLY, DEFAULT_OWNER_ONLY } = require('../tools/registry');
-const { isCatastrophic, makeDestructiveCheck, matchesAskEscalation } = require('../governance/gate');
+const { classifyShellSeverity, matchesAskEscalation } = require('../governance/gate');
 
 const SEVERITY = Object.freeze({
   BENIGN: 'benign',
@@ -209,10 +209,10 @@ function classifyEffectiveSeverity(cap, args, denylist) {
   if (!cap) return SEVERITY.BENIGN;
   let tier;
   if (cap.severity === SHELL_DYNAMIC) {
+    // Severity classification is bareguard's (classifyCommand) — super→catastrophic,
+    // destructive→destructive, safe→benign. The denylist rides in as extraDestructive.
     const command = (args && (args.command ?? args.cmd)) || '';
-    if (isCatastrophic(command)) return SEVERITY.CATASTROPHIC;
-    const isDestructive = makeDestructiveCheck(denylist || []);
-    tier = isDestructive(command) ? SEVERITY.DESTRUCTIVE : SEVERITY.BENIGN;
+    tier = classifyShellSeverity(command, denylist || []);
   } else if (cap.destructiveWhen && cap.destructiveWhen(args)) {
     tier = rankUp(cap.severity, SEVERITY.DESTRUCTIVE);
   } else {

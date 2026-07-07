@@ -2,6 +2,24 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [0.21.0] — 2026-07-07
+
+### Changed — command danger is judged by the shared governance library now, not a multis hand-roll
+
+**One classifier, maintained in one place.** Deciding whether a shell command is harmless, needs your PIN, or is walled outright used to run on multis's own hand-written pattern list. That list quietly *drifted* from reality: a security audit found it waved through `env -i rm file` (the `rm` hidden behind an `env` wrapper), `find . -exec rm -rf {} +`, and `find /path -delete` — all real deletions it scored as harmless. multis now consumes **bareguard's `classifyCommand`** as the single source of truth, and the drifting hand-rolled code is deleted. What this means for you: those previously-missed shapes are now caught, and because the shared classifier is cross-platform, the same protection holds on macOS and Windows for free (the old list was Linux-only).
+
+**Inline interpreter code now asks for your PIN.** A command like `python3 -c "…"` or `node -e "…"` can do anything — including delete your files — but reads as harmless to any pattern matcher, because the dangerous part is *arbitrary code*, not a recognizable command. These now require your PIN before they run, so a hijacked model can't silently reach for an interpreter as an escape hatch. (Honest limit: this catches the *inline* form only — running a *script file* is not gated, and the hard boundary remains the filesystem/exec scope, not this speed bump.)
+
+**Everything that was walled stays walled, exactly.** `rm -rf /`, wiping a whole system directory (`/etc`, `/usr`, …) or a whole home account, `dd` to a raw device, `mkfs`, fork bombs, `shutdown`/`reboot` — all still hit the hard wall (no PIN, no override). One-level-deeper paths like `rm -rf /home/you/project/build` stay an ordinary PIN prompt, so a routine build-clean never becomes un-runnable. Verified end-to-end against the installed library.
+
+### Security
+
+- **A PIN is now mandatory at setup (F4).** `multis init` requires you to set a 4–6 digit PIN — the ceremony that guards every destructive action can no longer be left unset by skipping the prompt.
+- **The config file is written `0600` on the Beeper setup path too (config-F1).** It holds your PIN hash, API keys, and MCP token; the Beeper wizard now routes its write through the perms-asserting save path instead of leaving a freshly-created config world-readable.
+- **Fail-safe classifier default.** An unrecognized classification result now fails toward the PIN ceremony, never toward running free.
+
+Full suite 627/627.
+
 ## [0.20.0] — 2026-07-06
 
 ### Added — a named assistant you can summon, and a clearer "how much do I participate" ladder (M8)

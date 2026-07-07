@@ -18,7 +18,7 @@
  */
 const fs = require('fs');
 const readline = require('readline');
-const { PATHS } = require('../config');
+const { PATHS, saveConfig } = require('../config');
 const { BeeperboxMcpClient } = require('../platforms/beeperbox-mcp');
 
 const DEFAULT_MCP_URL = 'http://localhost:23375';
@@ -146,7 +146,10 @@ function updateConfig({ mcpUrl, mcpToken } = {}) {
     if (mcpToken) b.mcp_token = mcpToken;
     b.command_prefix = b.command_prefix || '/';
     b.poll_interval = b.poll_interval || 3000;
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
+    // Route through saveConfig so the 0600 perms are asserted on write — this file
+    // holds mcp_token alongside the PIN hash + API keys. A raw writeFileSync would
+    // preserve an existing mode but leave a freshly-created config world-readable.
+    saveConfig(config);
     return true;
   } catch (err) {
     console.error(`  Could not update config: ${err.message}`);

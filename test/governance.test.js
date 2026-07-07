@@ -6,7 +6,7 @@ const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
 
-const { createGate, buildGateConfig, translateAction, ownerCheck, isCatastrophic, commandHead, makeDestructiveCheck, matchesAskEscalation } = require('../src/governance/gate');
+const { createGate, buildGateConfig, translateAction, ownerCheck, classifyShellSeverity, matchesAskEscalation } = require('../src/governance/gate');
 
 const GOV = {
   commands: {
@@ -452,35 +452,76 @@ describe('createGate — thin Axis-A floor (M9 increment 3: the severity ceremon
   });
 });
 
-describe('command-governance detection helpers', () => {
-  const isDestructive = makeDestructiveCheck(['rm', 'sudo', 'dd', 'chmod', 'kill', 'shutdown']);
+describe('command-severity classification (consumes bareguard classifyCommand)', () => {
+  // Severity classification is bareguard's job (classifyCommand); multis consumes it via
+  // classifyShellSeverity, passing the governance denylist as extraDestructive. These
+  // assertions are the regression net proving the installed bareguard artifact delivers
+  // the coverage multis used to hand-roll (the 2026-07-07 consumption). Tiers:
+  //   safe→'benign' (runs free) · destructive→'destructive' (PIN) · super→'catastrophic' (wall)
+  const DENYLIST = ['rm', 'rmdir', 'sudo', 'su', 'dd', 'mkfs', 'chmod', 'chown', 'kill', 'shutdown', 'reboot', 'halt'];
+  const sev = (cmd) => classifyShellSeverity(cmd, DENYLIST);
 
-  it('commandHead skips sudo/env and a path prefix', () => {
-    assert.strictEqual(commandHead('sudo rm -rf /'), 'rm');
-    assert.strictEqual(commandHead('/usr/bin/ls -la'), 'ls');
-    assert.strictEqual(commandHead('  git status'), 'git');
+  it('denylist heads and bare sudo classify destructive (PIN)', () => {
+    assert.strictEqual(sev('rm foo.txt'), 'destructive');
+    assert.strictEqual(sev('sudo whoami'), 'destructive');
+    assert.strictEqual(sev('chmod 777 x'), 'destructive');
+    assert.strictEqual(sev('ls -la'), 'benign');
+    assert.strictEqual(sev('git commit'), 'benign');
   });
 
-  it('isDestructive flags denylist heads and bare sudo', () => {
-    assert.ok(isDestructive('rm foo.txt'));
-    assert.ok(isDestructive('sudo whoami'), 'bare sudo is destructive');
-    assert.ok(isDestructive('chmod 777 x'));
-    assert.ok(!isDestructive('ls -la'));
-    assert.ok(!isDestructive('git commit'));
+  it('the env-wrapper bypass is closed by the whole-string scan (was multis F1)', () => {
+    // `env` is allowlisted so the deterministic floor admits it; the hand-rolled
+    // head-based classifier missed `env -i rm` (2026-07-07 audit). bareguard's
+    // whole-string `\brm\b` scan catches it — the drift the consumption eliminates.
+    assert.strictEqual(sev('env FOO=bar rm foo'), 'destructive');
+    assert.strictEqual(sev('FOO=bar rm foo'), 'destructive');
+    assert.strictEqual(sev('env -i rm foo'), 'destructive');
+    assert.strictEqual(sev('env -u PATH rm foo'), 'destructive');
+    // An assignment / env prefix on a benign command stays benign (no false PIN).
+    assert.strictEqual(sev('FOO=bar ls'), 'benign');
+    assert.strictEqual(sev('env ls -la'), 'benign');
   });
 
-  it('isCatastrophic flags machine-wreckers only', () => {
-    assert.ok(isCatastrophic('rm -rf /'));
-    assert.ok(isCatastrophic('rm -rf /*'));
-    assert.ok(isCatastrophic('rm -rf ~'));
-    assert.ok(isCatastrophic('rm -fr $HOME'));
-    assert.ok(isCatastrophic('dd if=/dev/zero of=/dev/sda'));
-    assert.ok(isCatastrophic('mkfs.ext4 /dev/sdb1'));
-    assert.ok(isCatastrophic('shutdown -h now'));
-    assert.ok(isCatastrophic(':(){ :|:& };:'));
-    // NOT catastrophic — ordinary destructive (PIN tier), not CONFIRM:
-    assert.ok(!isCatastrophic('rm -rf /home/testuser/Projects/build'));
-    assert.ok(!isCatastrophic('rm old.txt'));
-    assert.ok(!isCatastrophic('chmod 644 file'));
+  it('find … -delete / -exec classify destructive (BG-2)', () => {
+    assert.strictEqual(sev('find /path -delete'), 'destructive');
+    assert.strictEqual(sev('find . -exec rm {} +'), 'destructive');
+    assert.strictEqual(sev('find . -name "*.log"'), 'benign');
+  });
+
+  it('inline interpreter payloads are PIN-gated (BG-3 opt-in, owner decision 2026-07-07)', () => {
+    // A silent false-safe injection vector: classifies safe in bareguard's defaults;
+    // multis opts INTERPRETER_PATTERNS into extraDestructive → PIN before the owner runs it.
+    assert.strictEqual(sev('python3 -c "import shutil; shutil.rmtree(\'/\')"'), 'destructive');
+    assert.strictEqual(sev('node -e "require(\'fs\').rmSync(\'/x\',{recursive:true})"'), 'destructive');
+    assert.strictEqual(sev('perl -e "unlink glob \'*\'"'), 'destructive');
+    // Running a script FILE is not the inline shape — stays benign (honest limit).
+    assert.strictEqual(sev('python3 build.py'), 'benign');
+  });
+
+  it('machine-wreckers classify catastrophic (wall) only', () => {
+    for (const cmd of ['rm -rf /', 'rm -rf /*', 'rm -rf ~', 'rm -fr $HOME',
+                       'dd if=/dev/zero of=/dev/sda', 'mkfs.ext4 /dev/sdb1',
+                       'shutdown -h now', ':(){ :|:& };:']) {
+      assert.strictEqual(sev(cmd), 'catastrophic', `${cmd} should wall`);
+    }
+    // Ordinary destructive (PIN tier), NOT a wall:
+    assert.strictEqual(sev('rm -rf /home/testuser/Projects/build'), 'destructive');
+    assert.strictEqual(sev('rm old.txt'), 'destructive');
+    assert.strictEqual(sev('chmod 644 file'), 'destructive');
+  });
+
+  it('whole system roots and whole home accounts wall; one level deeper stays PIN (BG-1)', () => {
+    for (const cmd of ['rm -rf /etc', 'rm -rf /usr', 'rm -rf /boot',
+                       'rm -rf /usr/local/lib', 'rm -rf /etc/', 'rm -rf /lib64',
+                       'rm -rf /home/alice', 'rm -rf /home/*', 'rm -rf "$HOME"',
+                       'rm -rf ${HOME}', 'rm -rf /Users/bob']) {
+      assert.strictEqual(sev(cmd), 'catastrophic', `${cmd} should wall`);
+    }
+    // Nested paths one level deeper stay destructive (PIN) — a routine build-clean
+    // must not become un-runnable through the bot:
+    for (const cmd of ['rm -rf /home/alice/projects/build', 'rm -rf /var/tmp/scratch/x',
+                       'rm -rf /tmp/scratch', 'rm -rf ./build']) {
+      assert.strictEqual(sev(cmd), 'destructive', `${cmd} should stay PIN, not wall`);
+    }
   });
 });

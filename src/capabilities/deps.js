@@ -68,6 +68,12 @@ function buildGovernDeps({ verifyPin, pinConfigured, floorPolicy, denylist = [],
  * the core). Returns true (allow) or a deny string when no policy is wired.
  */
 function makeFloor({ floorPolicy } = {}) {
+  // No floorPolicy is a DELIBERATE, load-bearing case, not a fail-open gap: the LLM
+  // door (wrapToolThroughCore) omits it on purpose because bare-agent's Loop runs
+  // the bareguard Axis-A policy UPSTREAM, before the tool executes — flooring again
+  // in the core would double-floor. The slash door DOES pass floorPolicy, so both
+  // doors are floored (the LLM path just floors upstream). Returning undefined lets
+  // the core skip its redundant floor on the LLM path.
   if (!floorPolicy) return undefined;
   return async function floor(cap, args, ctx) {
     if (cap.kind !== 'host' || !cap.tool) return true; // not a bareguard-governed call
