@@ -114,6 +114,16 @@ const TOOL_TYPE = { exec: 'bash', read_file: 'read', send_file: 'read', grep_fil
 // mapping below is unchanged. Do NOT grow a parallel macOS/Windows list here.
 const CATASTROPHIC_RM = /\brm\b[^|;&\n]*?(?:-\w*r\w*\b[^|;&\n]*?-\w*f|\b-\w*f\w*\b[^|;&\n]*?-\w*r|-\w*(?:rf|fr)\w*)/i;
 const CATASTROPHIC_ROOT_TARGET = /(?:^|\s)(?:\/|\/\*|~\/?|\$HOME)(?:\s|$|\/|\*)/;
+// Beyond the literal roots above, an `rm -rf` of a WHOLE top-level system directory
+// or an entire home account is as machine-wrecking as `rm -rf /` and has no
+// legitimate through-the-bot use — wall it (previously only PIN-gated). A NESTED
+// path one level deeper (`/home/alice/project/build`, `/var/tmp/x`) stays ordinary-
+// destructive → PIN, so a routine build-clean is not walled.
+//  - System roots: the dir OR any descendant (no legit `rm -rf` under /etc, /usr, …).
+const CATASTROPHIC_SYS_ROOT = /(?:^|\s|["'])\/(?:etc|usr|bin|sbin|lib|lib64|boot|sys|proc|dev|root)(?:\/|["']|\s|$)/i;
+//  - Home / mount roots: the dir itself or exactly ONE level (a whole account /
+//    mount), not a deeper nested path. Covers `$HOME`, `${HOME}`, quoted forms.
+const CATASTROPHIC_HOME_ROOT = /(?:^|\s|["'])(?:~|\$\{?HOME\}?|\/(?:var|opt|srv|mnt|media|home|Users)(?:\/[^/\s"']+)?)\/?(?:["']|\s|$)/i;
 const CATASTROPHIC_PATTERNS = [
   /\bdd\b[^\n]*\bof=\/dev\//i,                 // dd writing to a raw device
   /\bmkfs\S*/i,                                // make a filesystem
@@ -125,15 +135,24 @@ const CATASTROPHIC_PATTERNS = [
 ];
 function isCatastrophic(cmd) {
   const c = String(cmd || '');
-  if (CATASTROPHIC_RM.test(c) && CATASTROPHIC_ROOT_TARGET.test(c)) return true;
+  if (CATASTROPHIC_RM.test(c)
+      && (CATASTROPHIC_ROOT_TARGET.test(c) || CATASTROPHIC_SYS_ROOT.test(c) || CATASTROPHIC_HOME_ROOT.test(c))) {
+    return true;
+  }
   return CATASTROPHIC_PATTERNS.some((re) => re.test(c));
 }
 
 // First executable token of a command (skips leading `sudo`/`env` and a path).
+// Also skips leading `VAR=val` environment assignments — both the shell-native
+// form (`FOO=bar rm x`) and `env FOO=bar rm x`. `env` is on the bash allowlist,
+// so without this the assignment token becomes the "head" and a destructive
+// command (`rm`) hides behind it, dodging the PIN tier. Classification must not
+// depend on the floor to catch this (defense-in-depth, mirrors the chained-segment
+// scan below).
 function commandHead(cmd) {
   const toks = String(cmd || '').trim().split(/\s+/);
   let i = 0;
-  while (i < toks.length && /^(?:sudo|env)$/i.test(toks[i])) i++;
+  while (i < toks.length && (/^(?:sudo|env)$/i.test(toks[i]) || /^[A-Za-z_]\w*=/.test(toks[i]))) i++;
   const head = (toks[i] || '').split('/').pop();
   return head.toLowerCase();
 }
@@ -145,7 +164,17 @@ function commandHead(cmd) {
 // classification from silently depending on that floor — defense-in-depth.)
 function makeDestructiveCheck(denylist) {
   const set = new Set((denylist || []).map((c) => String(c).toLowerCase()));
-  const isSeg = (seg) => (set.has('sudo') && /^\s*sudo\b/i.test(seg) ? true : set.has(commandHead(seg)));
+  const isSeg = (seg) => {
+    if (set.has('sudo') && /^\s*sudo\b/i.test(seg)) return true;
+    // `env` carrying OPTION FLAGS (-i, -u NAME, -S STR, -C DIR, --) can hide or
+    // relocate the real command past the head check — and `env` is allowlisted, so
+    // the deterministic floor admits it (proven: `env -i rm x` runs unfloored). We
+    // don't parse env's full grammar; conservatively treat any flag-bearing env as
+    // destructive → PIN. Plain `env VAR=val cmd` (no flags) still resolves to `cmd`
+    // via commandHead, so `env FOO=bar ls` stays benign and `env FOO=bar rm` → rm.
+    if (/^\s*env\s+-/i.test(seg)) return true;
+    return set.has(commandHead(seg));
+  };
   return (cmd) => String(cmd || '').split(/(?:;|&&|\|\||\|)/).some(isSeg);
 }
 
