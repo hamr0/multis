@@ -9,12 +9,9 @@
 ```
 
 <p align="center">
-  <img src="https://img.shields.io/badge/status-WIP-e8a33d" alt="status: work in progress">
   <img src="https://img.shields.io/github/package-json/v/hamr0/multis?label=version&color=2a4f8c" alt="version (auto from package.json)">
   <img src="https://img.shields.io/badge/license-Apache%202.0-2a4f8c" alt="license: Apache 2.0">
 </p>
-
-> **🚧 Work in progress.** The core is built and tested; a live end-to-end verification pass stands between here and the first tagged release. See [Status](#status).
 
 **A local-first chatbot and assistant for personal and small-business use.** Run it as your own *personal assistant* — ask it about your documents, let it run things on your machine — or point it at a *customer-facing chat* and let it answer on your behalf from your knowledge base. Either way it lives in the chat apps you already use, runs on *your* computer so your conversations and files never leave home, and puts a single governance gate between the AI and anything that matters.
 
