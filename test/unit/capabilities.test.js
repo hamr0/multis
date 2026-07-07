@@ -79,10 +79,10 @@ test('shell severity is resolved per-command (3-tier)', () => {
   assert.strictEqual(classifyEffectiveSeverity(sh, { command: 'rm -rf ~/*' }, DENYLIST), SEVERITY.CATASTROPHIC);
 });
 
-test('F1: a chained destructive command classifies destructive, not benign (scan all segments)', () => {
-  // The destructive token is NOT the command head — without scanning every
-  // segment, commandHead reads `ls`/`echo` and the line misclassifies benign
-  // (then runs with no PIN if the metachar floor is ever relaxed).
+test('a chained destructive command classifies destructive, not benign (whole-string scan)', () => {
+  // The destructive token is NOT the command head; bareguard's classifyCommand
+  // scans the whole string, so `ls; rm …` classifies destructive on the `rm`
+  // (a head-only classifier would read `ls` and misclassify benign).
   const sh = getCapability('run_shell');
   assert.strictEqual(classifyEffectiveSeverity(sh, { command: 'ls; rm -rf /tmp/x' }, DENYLIST), SEVERITY.DESTRUCTIVE);
   assert.strictEqual(classifyEffectiveSeverity(sh, { command: 'echo hi && rm notes.txt' }, DENYLIST), SEVERITY.DESTRUCTIVE);
