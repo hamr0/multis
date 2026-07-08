@@ -194,6 +194,13 @@ function loadConfig() {
 
   // Merge defaults for security section
   if (!config.security) config.security = {};
+  // Reply-side limiter (LLM answers) and its write-side twin (rows a contact can make
+  // us STORE — bloat/embed-burn guard; only customer episodes counted, owner/facts/
+  // docs/promotions exempt). write_limit is deliberately generous: a dropped write is
+  // a silently-forgotten message, so it must only ever catch a flood, not a busy
+  // customer. Over the cap → drop + audit.
+  const RATE_LIMIT_DEFAULT = { enabled: true, burst_per_min: 10, daily_per_sender: 100 };
+  const WRITE_LIMIT_DEFAULT = { enabled: true, burst_per_min: 60, daily_per_sender: 2000 };
   config.security = {
     pin_timeout_hours: 24,
     pin_lockout_minutes: 60,
@@ -202,9 +209,16 @@ function loadConfig() {
     // bareguard can't price (unknown model / no rate-table entry) HALTS instead of
     // silently passing under the cap. No-op when no cost cap is set. (bareguard 0.9.0)
     fail_closed_on_unpriced: true,
-    rate_limit: { enabled: true, burst_per_min: 10, daily_per_sender: 100 },
+    rate_limit: RATE_LIMIT_DEFAULT,
+    write_limit: WRITE_LIMIT_DEFAULT,
     ...config.security
   };
+  // Deep-merge the nested limit blocks: the spread above replaces them wholesale, so a
+  // PARTIAL user override (e.g. just {enabled:false}) would blank the other knobs and
+  // silently fall back to the RateLimiter's own 10/100 defaults — wrong for write_limit
+  // (intended 60/2000). Re-apply each default under the user's override.
+  config.security.rate_limit = { ...RATE_LIMIT_DEFAULT, ...config.security.rate_limit };
+  config.security.write_limit = { ...WRITE_LIMIT_DEFAULT, ...config.security.write_limit };
 
   // Merge defaults for business section
   if (!config.business) config.business = {};

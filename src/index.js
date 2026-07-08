@@ -5,6 +5,8 @@ const { TelegramPlatform } = require('./platforms/telegram');
 const { BeeperPlatform } = require('./platforms/beeper');
 const { cleanupLogs } = require('./maintenance/cleanup');
 const context = require('./context');
+const { RateLimiter } = require('./security/rate-limit');
+const { makeWriteGate } = require('./security/write-gate');
 const fs = require('fs');
 const path = require('path');
 
@@ -19,10 +21,20 @@ async function main() {
 
   // Bring up litectx (process-wide doc + memory store) before the router/platforms.
   // embeddings: semantic recall (R4) on unless config.memory.semantic === false (loads a model ~2s).
+  // Write-side guard: a DEDICATED limiter (separate from the reply limiter — consume()
+  // mutates, so sharing double-counts) bounds how many rows a single contact can make
+  // us store. Wired into litectx's writeGate slot so EVERY store write passes it; only
+  // customer episodes (meta.writer) are counted, owner/facts/docs/promotions are exempt.
+  const wlCfg = config.security?.write_limit || {};
+  const writeGate = wlCfg.enabled === false ? undefined : makeWriteGate({
+    limiter: new RateLimiter({ burstPerMin: wlCfg.burst_per_min, dailyPerSender: wlCfg.daily_per_sender }),
+    audit: logAudit,
+  });
   await context.init({
     documents: config.documents,
     embeddings: config.memory?.semantic !== false,
     episodeWindowDays: config.memory?.episode_window_days, // litectx 0.25.0 episode retention+promotion window (default 90)
+    writeGate,
   });
   context.setBounds(config.documents);
 

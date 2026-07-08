@@ -647,6 +647,10 @@ Edit `~/.multis/auth/governance.json` to customize allowed/denied commands and p
 
 In business mode each customer is rate-limited so a contact stuck in a loop can't run up your LLM bill or overload the process. Defaults: ~10 messages/minute (burst) and 100/day per customer. When a customer hits the cap, the bot **doesn't go silent** — it sends one short "I've flagged a human to follow up" message and escalates to you, so a genuinely busy customer reaches a person instead of a wall. Tune under `security.rate_limit` in `~/.multis/config.json` (`enabled`, `burst_per_min`, `daily_per_sender`); the message is `business.rate_limit_message`.
 
+### Bounding what gets saved (write limit)
+
+The rate limit above caps how many *replies* a contact gets; a separate **write limit** caps how many of their messages get *saved* into your searchable memory store — so a flood can't bloat the database or burn embedding compute. It's deliberately generous (defaults ~60/minute, 2000/day per contact) because a dropped write is a silently-forgotten message: it should only ever catch an actual flood, never a busy customer. Over the cap, the message is quietly dropped from the store and the block is logged (`action: 'write_denied'` in `audit.log`). Your own notes, `/remember` facts, indexed documents, and the bot's internal memory are never affected. Tune under `security.write_limit` (`enabled`, `burst_per_min`, `daily_per_sender`); set `enabled: false` to turn it off. (The raw daily log — a plain-text backup that's never searched — stays complete even during a flood.)
+
 ### Bounding the agent loop
 
 `llm.max_tool_rounds` (default 5) caps how many tool calls the assistant can chain in a single reply, so it can't run away. Adjust in config.

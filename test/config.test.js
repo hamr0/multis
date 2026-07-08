@@ -83,6 +83,30 @@ describe('loadConfig — default merging', () => {
     assert.strictEqual(config.documents.parseTimeoutMs, 30000);
   });
 
+  it('deep-merges a PARTIAL security limit block so default knobs survive', () => {
+    // A hand-written partial override (just {enabled:true}) must NOT blank burst/daily
+    // — else the RateLimiter falls back to its 10/100 constructor defaults, silently
+    // over-throttling writes whose intended cap is 60/2000. (rate_limit gets the same
+    // treatment; its footgun is only masked because its defaults equal RateLimiter's.)
+    const multisDir = path.join(tmpDir, '.multis');
+    const onDisk = JSON.parse(fs.readFileSync(path.join(multisDir, 'config.json'), 'utf-8'));
+    onDisk.security = { write_limit: { enabled: true }, rate_limit: { daily_per_sender: 50 } };
+    fs.writeFileSync(path.join(multisDir, 'config.json'), JSON.stringify(onDisk, null, 2));
+
+    delete require.cache[require.resolve('../src/config')];
+    const { loadConfig } = require('../src/config');
+    const c = loadConfig();
+
+    // write_limit: only `enabled` given → burst/daily keep their 60/2000 defaults
+    assert.strictEqual(c.security.write_limit.enabled, true);
+    assert.strictEqual(c.security.write_limit.burst_per_min, 60);
+    assert.strictEqual(c.security.write_limit.daily_per_sender, 2000);
+    // rate_limit: the explicit knob wins, unspecified ones keep defaults
+    assert.strictEqual(c.security.rate_limit.daily_per_sender, 50);
+    assert.strictEqual(c.security.rate_limit.burst_per_min, 10);
+    assert.strictEqual(c.security.rate_limit.enabled, true);
+  });
+
   it('defaults assistant_name to "multis" for configs that predate it (M8)', () => {
     delete require.cache[require.resolve('../src/config')];
     const { loadConfig } = require('../src/config');
