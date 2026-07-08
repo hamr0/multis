@@ -124,6 +124,6 @@ POC 1-5 done (bot, skills, indexing, RAG, memory). POC 6 next (daemon + CLI + se
 -> docs/00-context/knowledge-base.md (topic index with links to full docs)
 
 <!-- MEMORY:START -->
-@.claude/memory/MEMORY.md
+@.claude/remember/MEMORY.md
 @.claude/memory/AGENT_RULES.md
 <!-- MEMORY:END -->

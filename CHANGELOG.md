@@ -2,6 +2,14 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [Unreleased]
+
+### Removed — repo cleanup
+
+- Dropped the `.aurora/` tooling directory (indexing metadata, agent manifest, BM25 index scratch) — external tooling artifacts, not part of multis.
+- Deleted `litectx-asks/PRD-memory-axis-scoring-and-scoped-delete.md` — delivered in litectx 0.27.0 and consumed in 0.19.4; zero litectx asks remain open.
+- `CLAUDE.md` memory include path updated to `.claude/remember/MEMORY.md`.
+
 ## [0.22.0] — 2026-07-08
 
 ### Changed — a spamming contact can no longer bloat your memory store
