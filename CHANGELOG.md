@@ -2,7 +2,7 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
-## [0.21.1] — 2026-07-08
+## [0.22.0] — 2026-07-08
 
 ### Changed — a spamming contact can no longer bloat your memory store
 
