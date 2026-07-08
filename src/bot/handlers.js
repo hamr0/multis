@@ -259,9 +259,19 @@ const fmtTurns = (turns) => turns.map((t) => `${t.role === 'assistant' ? 'Assist
 // Episodes carry NO per-row TTL — litectx self-prunes them on a fixed 30-day rolling window
 // (expiresAt is doc-axis only, ignored for fact/episode; litectx 0.24.0 clarification). Durability is
 // the promotion ladder's job: a hot episode is copied to a durable fact before that window lapses.
-const rememberEpisodeFor = (indexer, _memCfg, admin, chatId, turns) =>
-  indexer.rememberEpisode(memScopeFor(admin, chatId), fmtTurns(turns), { meta: { turns } })
-    .catch((e) => console.error(`[memory] episode write failed: ${e.message}`));
+const rememberEpisodeFor = (indexer, _memCfg, admin, chatId, turns) => {
+  // `writer` marks a CUSTOMER write so the writeGate counts it per-scope; owner
+  // writes (admin) omit it and are never throttled (see src/security/write-gate.js).
+  const meta = { turns };
+  if (!admin) meta.writer = memScopeFor(admin, chatId);
+  return indexer.rememberEpisode(memScopeFor(admin, chatId), fmtTurns(turns), { meta })
+    .catch((e) => {
+      // Over the per-scope write-limit: litectx throws WriteDeniedError before commit.
+      // The deny is already audited at the gate (single choke point) — drop silently.
+      if (e && e.name === 'WriteDeniedError') return null;
+      console.error(`[memory] episode write failed: ${e.message}`);
+    });
+};
 const sweepPromotionsFor = (indexer, memCfg, admin, chatId) =>
   indexer.promotionSweep(memScopeFor(admin, chatId), { threshold: memCfg.promote_threshold })
     .catch((e) => console.error(`[memory] promotion sweep failed: ${e.message}`));
