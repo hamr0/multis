@@ -2,6 +2,18 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [0.21.1] — 2026-07-08
+
+### Changed — a spamming contact can no longer bloat your memory store
+
+**Every message a contact sent used to be saved forever-ish, with no limit.** The per-customer rate limit only ever capped how many *replies* the bot sends (10/min, 100/day) — it never limited how many messages got *saved* into the searchable memory store. So a contact who flooded you with thousands of messages wrote thousands of rows into the database, each one running an embedding computation, bounded only by the 30-day auto-cleanup. multis now bounds the *write* side too: customer message captures pass through a dedicated write limit (default **60/min, 2000/day per contact** — deliberately generous, so it only ever catches an actual flood, never a busy customer). Over the cap, the message is quietly dropped from the store and the block is recorded in your audit log. Your own notes, `/remember` facts, indexed documents, and the bot's internal memory promotions are **never** limited.
+
+This closes the last item on the baresuite migration roadmap (M7): it reuses the shared context library's write-gate slot, backed by multis's existing rate limiter. The raw daily log (a plain-text backup, never searched) stays intentionally unbounded so you keep a complete forensic record even during a flood.
+
+### Fixed
+
+- **Partial `security` config no longer blanks the limit defaults.** If you hand-edited `config.json` to set just one knob on `rate_limit` or `write_limit` (e.g. `{"enabled": true}`), the other knobs used to silently blank out and fall back to the limiter's built-in 10/100 — wrong for `write_limit`, whose intended cap is 60/2000. `loadConfig` now deep-merges each limit block, so a partial override keeps every default you didn't touch.
+
 ## [0.21.0] — 2026-07-07
 
 ### Changed — command danger is judged by the shared governance library now, not a multis hand-roll
