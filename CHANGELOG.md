@@ -2,7 +2,7 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
-## [Unreleased]
+## [0.22.2] — 2026-07-09
 
 ### Changed — npm 12 native-module install
 
