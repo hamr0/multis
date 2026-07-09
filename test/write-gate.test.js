@@ -60,6 +60,20 @@ describe('makeWriteGate', () => {
     assert.strictEqual(lines[0].scope, 'daily');
   });
 
+  it('audits ONCE per block streak under a flood, not once per dropped write', async () => {
+    // A sustained flood past the cap must NOT append one (blocking) audit line per
+    // message — consume() returns notify=true only on the first deny of a streak, and
+    // the gate must honour it (mirrors the reply path). Without the notify guard this
+    // logs 100 lines. (Regression for the M7 audit-flood finding.)
+    const now = fakeClock();
+    const limiter = new RateLimiter({ burstPerMin: 0, dailyPerSender: 1, now });
+    const lines = [];
+    const gate = makeWriteGate({ limiter, audit: (e) => lines.push(e) });
+    await gate.check(custWrite('user:flood'));             // allowed
+    for (let i = 0; i < 100; i++) await gate.check(custWrite('user:flood', i)); // all denied
+    assert.strictEqual(lines.length, 1, 'one audit line per streak, not per drop');
+  });
+
   it('is inert (allows all) when no limiter is wired', async () => {
     const gate = makeWriteGate({});
     for (let i = 0; i < 5; i++) assert.strictEqual((await gate.check(custWrite('user:x', i))).outcome, 'allow');
