@@ -13,7 +13,10 @@
  * is never throttled; internal writes never drop). A denied write throws litectx's
  * `WriteDeniedError` BEFORE commit (no embed, no row); the caller drops it silently.
  * The deny is audited HERE — the gate is the single choke point every write passes,
- * so one line per blocked write regardless of which call site issued it.
+ * so one line per block streak (`consume()` returns `notify` true once per streak)
+ * regardless of which call site issued it. Auditing every dropped write instead
+ * would flood audit.log with a blocking appendFileSync per message under the exact
+ * abuse this gate bounds — the reply path gates on `notify` for the same reason.
  *
  * @param {object}   deps
  * @param {import('./rate-limit').RateLimiter} [deps.limiter]  dedicated write limiter (omit → inert)
@@ -28,7 +31,9 @@ function makeWriteGate({ limiter, audit } = {}) {
       if (!writer || !limiter) return { outcome: 'allow', reason: 'exempt' };
       const v = limiter.consume(writer);
       if (v.allowed) return { outcome: 'allow' };
-      if (audit) audit({ action: 'write_denied', chatId: writer, kind: action.kind, scope: v.scope });
+      // Audit once per block streak (v.notify), not per dropped write — else a
+      // sustained flood appends one blocking fs write per message (see audit.js).
+      if (audit && v.notify) audit({ action: 'write_denied', chatId: writer, kind: action.kind, scope: v.scope });
       return { outcome: 'deny', reason: `write-limit:${v.scope}` };
     },
   };
