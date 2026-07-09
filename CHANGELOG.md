@@ -2,7 +2,12 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
-## [Unreleased]
+## [0.22.1] — 2026-07-09
+
+### Fixed
+
+- **A flood of dropped writes no longer floods your audit log.** When a contact blew past the write limit, multis recorded *every* dropped message to the audit log — one blocking disk write per message — which reintroduced the very event-loop/log flood the write limit exists to prevent. It now records the block **once per streak** (matching how the reply-side limit already behaves), so a sustained flood produces a single audit line, not thousands.
+- **Restored the `AGENT_RULES.md` include path in `CLAUDE.md`.** The 0.22.0-cleanup memory move updated the `MEMORY.md` include but left the sibling `@.claude/memory/AGENT_RULES.md` reference (and its prose pointer) dangling at the old path — so the development/testing standards silently stopped loading. Both now point at `.claude/remember/AGENT_RULES.md`.
 
 ### Removed — repo cleanup
 
