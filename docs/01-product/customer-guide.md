@@ -111,6 +111,14 @@ multis init             # interactive setup wizard
 multis start            # run as a background daemon
 ```
 
+> **On npm 12+** (Node 22+): npm blocks dependency install-scripts by default, so multis's native modules (the SQLite store and the semantic-recall engine) won't build on a plain global install — the daemon then fails to start. Allow the builds explicitly:
+>
+> ```bash
+> npm install -g --allow-scripts=better-sqlite3,onnxruntime-node,sharp,protobufjs,@matrix-org/matrix-sdk-crypto-nodejs multis
+> ```
+>
+> Or persist it for all global installs once: `npm config set allow-scripts=better-sqlite3,onnxruntime-node,sharp,protobufjs,@matrix-org/matrix-sdk-crypto-nodejs --location=user`. On npm ≤ 11 (the version bundled with Node 20) the plain install works as-is.
+
 **Or from source** (for development):
 
 ```bash

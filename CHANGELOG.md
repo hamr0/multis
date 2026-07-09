@@ -2,6 +2,14 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [Unreleased]
+
+### Changed — npm 12 native-module install
+
+- **npm 12 (released 2026-07-09) blocks dependency install-scripts by default**, which stops multis's native modules (`better-sqlite3`, `onnxruntime-node`) from building. Adopted npm's sanctioned handling: a committed `allowScripts` allowlist in `package.json` (generated via `npm approve-scripts`, name-only so routine dep bumps don't re-prompt) covering the five native-build packages, all of which already ran under npm ≤ 11.
+- The publish workflow now pins `npm@12` and installs with `npm ci --strict-allow-scripts`, so a native addon missing from `allowScripts` fails the run loudly instead of silently shipping a broken binary. (Supersedes the interim `npm@11` pin from 0.22.1.)
+- **README + customer guide** now document the end-user install on npm 12+: `npm install -g --allow-scripts=… multis` (or a one-time `npm config set allow-scripts=… --location=user`). A package's own `allowScripts` does not carry to consumers, so global installers must allow the scripts themselves; on npm ≤ 11 (Node 20) the plain install still works.
+
 ## [0.22.1] — 2026-07-09
 
 ### Fixed

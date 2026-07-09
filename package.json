@@ -54,8 +54,16 @@
   "optionalDependencies": {
     "@matrix-org/matrix-sdk-crypto-nodejs": "^0.4.0"
   },
+  "allowScripts": {
+    "@matrix-org/matrix-sdk-crypto-nodejs": true,
+    "better-sqlite3": true,
+    "onnxruntime-node": true,
+    "protobufjs": true,
+    "sharp": true
+  },
   "comments": {
-    "overrides": "Pin patched transitive deps of mammoth (the DOCX->md parser multis supplies as litectx's peerOptional). @xmldom/xmldom <=0.8.12 (XML injection/DoS) and underscore <=1.13.7 (recursion DoS) are reachable via a malicious uploaded DOCX. Both patched versions are within mammoth's declared ranges (^0.8.6, ^1.13.1), so this is a non-breaking security pin, durable against lockfile regen. Drop once mammoth bumps them upstream."
+    "overrides": "Pin patched transitive deps of mammoth (the DOCX->md parser multis supplies as litectx's peerOptional). @xmldom/xmldom <=0.8.12 (XML injection/DoS) and underscore <=1.13.7 (recursion DoS) are reachable via a malicious uploaded DOCX. Both patched versions are within mammoth's declared ranges (^0.8.6, ^1.13.1), so this is a non-breaking security pin, durable against lockfile regen. Drop once mammoth bumps them upstream.",
+    "allowScripts": "npm 12 blocks dependency install-scripts by default; this allowlist (generated via `npm approve-scripts`, name-only so routine dep bumps don't re-prompt) permits the native-addon builds multis needs — better-sqlite3 (litectx store) and onnxruntime-node (semantic recall) are required; sharp/protobufjs are their transitive build deps; matrix-sdk-crypto is optional. All five already ran under npm <=11, so this preserves prior install behavior. Governs multis's OWN `npm ci` (repo root); it does NOT carry to end-user `npm install -g multis` on npm 12 — those users pass `--allow-scripts=...` (see README). CI uses `npm ci --strict-allow-scripts` so a newly-blocked script fails loudly instead of silently shipping a broken native module."
   },
   "overrides": {
     "@xmldom/xmldom": "^0.8.13",
