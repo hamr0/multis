@@ -32,14 +32,19 @@ jobs:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
       - name: Upgrade npm (trusted publishing needs >= 11.5.1)
-        # Pin to 11.x: npm 12 (2026-07-09) blocks dependency install-scripts by
-        # default, so `npm ci` silently skips better-sqlite3's native build and
-        # the litectx tests fail on a missing binding. 11.x still satisfies OIDC
-        # trusted publishing (>= 11.5.1). Follow-up: add an `allowScripts` allowlist
-        # so npm 12 (and end-user installs on it) build the native deps.
-        run: npm install -g npm@11
+        # Pin to a MAJOR, not @latest: a floating npm eventually raises its Node
+        # floor or flips a default under CI. npm 12 blocks dependency install-scripts
+        # by default; multis handles that the npm-blessed way — a committed
+        # `allowScripts` allowlist (package.json) + `--strict-allow-scripts` on the
+        # install below. npm 12 needs Node 22+, which the runner uses. (>= 11.5.1
+        # for OIDC trusted publishing is satisfied.)
+        run: npm install -g npm@12
       - name: Install dependencies
-        run: npm ci
+        # --strict-allow-scripts: turn npm 12's SILENT skip of an unapproved install
+        # script into a HARD failure, so a native addon that isn't in package.json's
+        # allowScripts fails the run here instead of shipping a broken binary that
+        # only crashes deep in a request at runtime.
+        run: npm ci --strict-allow-scripts
       - name: Typecheck
         run: npm run typecheck --if-present
       - name: Test
