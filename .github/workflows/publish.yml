@@ -32,7 +32,12 @@ jobs:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
       - name: Upgrade npm (trusted publishing needs >= 11.5.1)
-        run: npm install -g npm@latest
+        # Pin to 11.x: npm 12 (2026-07-09) blocks dependency install-scripts by
+        # default, so `npm ci` silently skips better-sqlite3's native build and
+        # the litectx tests fail on a missing binding. 11.x still satisfies OIDC
+        # trusted publishing (>= 11.5.1). Follow-up: add an `allowScripts` allowlist
+        # so npm 12 (and end-user installs on it) build the native deps.
+        run: npm install -g npm@11
       - name: Install dependencies
         run: npm ci
       - name: Typecheck
