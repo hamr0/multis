@@ -2,6 +2,13 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [Unreleased]
+
+### Changed
+
+- **`.gitignore` now default-denies every dot-directory** (`.*/`), re-admitting only what ships. Agent/IDE scratch (`.claude/`, `.litectx/`, `.idea/`, and whatever the next tool invents) is ignored by default instead of chasing each new scratch dir with its own line. **`.multis-template/` is explicitly re-admitted** — it ships in the npm `files` allowlist and `multis init` reads it, so a blanket dot-dir ignore would have resurrected the 0.19.1 fresh-install `ENOENT`. `.github/` likewise re-admitted. Repo hygiene only — no code or published-artifact change.
+- **`CLAUDE.md`**: `AGENT_RULES.md` moved into its own marked include block, separate from the hot `MEMORY.md` context, with a note on when to consult it (a standards guide, not hot context).
+
 ## [0.22.2] — 2026-07-09
 
 ### Changed — npm 12 native-module install
