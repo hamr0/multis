@@ -20,8 +20,9 @@ Personal chatbot/assistant that runs locally. Control your laptop and query your
 
 - Node.js >= 20, vanilla (minimal deps)
 - Telegraf (Telegram), better-sqlite3 (SQLite + FTS5), pdfjs-dist (PDF.js), mammoth
-- bare-agent ^0.10.2 (Loop, Retry, CircuitBreaker, Checkpoint, Scheduler, wireGate + actionTranslator, HaltError)
-- bareguard ^0.4.2 (Gate, audit, budget, humanChannel, limits.maxToolRounds — ESM, dynamic-imported from CJS)
+- bare-agent ^0.29.0 (Loop, Retry, CircuitBreaker, Scheduler, Planner/runPlan, wireGate + actionTranslator, HaltError)
+- bareguard ^0.12.0 (Gate, audit, budget, humanChannel, classifyCommand, limits.maxToolRounds — ESM, dynamic-imported from CJS)
+- litectx ^0.30.0 (docs + memory store: ingest/recall/remember/forget, assemble — ESM, dynamic-imported from CJS)
 - Beeper Desktop API on localhost:23373 (opt-in)
 - LLM: Anthropic, OpenAI, Ollama (configurable via .env)
 
