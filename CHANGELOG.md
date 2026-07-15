@@ -2,7 +2,7 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
-## [Unreleased]
+## [0.22.3] — 2026-07-15
 
 ### Changed — foundation refresh: bare-agent 0.19 → 0.29, litectx 0.27 → 0.30
 
