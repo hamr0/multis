@@ -1360,6 +1360,24 @@ async function runAgentLoop(agentProvider, messages, tools, opts = {}) {
     // the "Locked out…" notice) is already in chat, so end quietly — surfacing a
     // tool-result string here would make the model re-narrate it (double message).
     if (result.error === 'halt:ceremony-parked' || result.error === 'halt:ceremony-locked') return '';
+    // bare-agent ≥0.27 honest-termination tokens (BA-6/11/12/13) — bounded exits, not faults. Pre-0.27
+    // these came back as a clean empty answer (truncation/refusal) or spun to the round cap (deny/stuck);
+    // now the Loop names them and BA-5 preserves the model's last text on every terminating path. Surface
+    // that text with an honest stopped-early marker instead of throwing the raw token at the chat. Tool
+    // names stay OUT of the reply (contacts can reach this path) — the audit line carries the full token.
+    const errToken = String(result.error);
+    const boundedReason =
+      errToken === 'truncated:max_tokens' ? 'the response hit the output limit' :
+      errToken === 'refusal' ? 'the model declined to continue' :
+      errToken === 'context_exceeded' ? 'the conversation no longer fits the model\'s context window' :
+      errToken.startsWith('denied:') ? 'the action was blocked by policy after repeated attempts' :
+      errToken.startsWith('stuck:') ? 'a tool kept failing the same way, so I stopped retrying' :
+      null;
+    if (boundedReason) {
+      logAudit({ action: 'loop_bounded', error: errToken, chatId: ctx.chatId, user_id: ctx.senderId });
+      const note = `(stopped early — ${boundedReason})`;
+      return result.text ? `${result.text}\n\n${note}` : note;
+    }
     // Other halt errors come back as `error: 'halt:<rule>'` strings — surface as a normal Error
     throw result.error instanceof Error ? result.error : new Error(String(result.error));
   }
