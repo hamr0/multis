@@ -2,6 +2,12 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [Unreleased]
+
+### Fixed
+
+- **The publish workflow now fails when `package-lock.json`'s version drifts from `package.json`.** npm writes that field on install, so a release that bumps `package.json` without running one leaves it behind — and nothing caught it: `npm ci` fails when the lockfile's *dependency* entries disagree, but never checks the lockfile's copy of the project's own version. `scripts/check-lockfile.mjs` (`npm run check:lockfile`) compares both places npm writes it and runs in the publish workflow. No lockfile is not a failure.
+
 ## [0.22.3] — 2026-07-15
 
 ### Changed — foundation refresh: bare-agent 0.19 → 0.29, litectx 0.27 → 0.30
