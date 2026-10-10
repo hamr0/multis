@@ -2,7 +2,13 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
-## [Unreleased]
+## [0.22.4] — 2026-10-10
+
+### Changed — litectx 0.30 → 0.35: `/forget` relevance filter moves off the retired `score` proxy
+
+- **Bumped `litectx` `^0.30.0` → `^0.35.0`.** 0.35.0 redefines `recall`'s `score` to the per-query min-max-scaled **fused** rank value (scaled BM25 + embedWeight × scaled cosine), so a meaning-only KNN nominee now scores `> 0` too — `score > 0` is no longer a reliable "this hit matched a query word" signal. 0.35.0 ships a dedicated per-hit boolean `keyword` for that instead (requested by multis, recorded in `docs/01-product/prd.md` §7): `true` = matched the FTS keyword index, `false` = added by meaning only. `keyword` is slightly wider than "contains the word" (id/path tokens count, terms are porter-stemmed), both erring toward keep — the safe direction for `/forget`.
+- **Targeted `/forget <topic>` now filters on `keyword` instead of `score > 0`** (`src/bot/handlers.js`, `src/context/index.js factCandidates`). Behaviour is unchanged where it already worked — an exact-word hit is still kept even when its cosine is below the match threshold (the load-bearing case; validated at a real cosine of 0.23 against the installed 0.35.0), and an unrelated topic that KNN surfaced as its always-present nearest neighbour is still dropped (the "unicorn bug" the filter exists to stop). The BM25-only passthrough (no cosine → keep all, recall is already keyword-precise) is retained, so the embeddings-off path is byte-identical. `factCandidates` now carries `keyword` through and no longer returns the (now-meaningless-as-a-keyword-proxy) `score`; `sim` (the M13 cosine) is unchanged.
+- Validated against the **installed** 0.35.0 artifact (failable POC: `keyword` correct for lexical vs. meaning-only hits, a keyword hit kept at cosine 0.23 while a cosine-only filter drops it) and mutation-proven in the suite (drop the `keyword` clause → the low-cosine keyword hit is wrongly filtered; strip the mapping → the real-path `factCandidates` test fails). 639/639.
 
 ### Fixed
 

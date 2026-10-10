@@ -425,6 +425,12 @@ describe('context wrapper — native memory ladder (M4)', () => {
     const cands = await ctx2.factCandidates('user:w4-cand', 'deploy window', { n: 5 });
     assert.ok(cands.length >= 1, 'the existing fact is surfaced as a candidate');
     assert.ok(cands.every((c) => typeof c.id === 'string' && typeof c.text === 'string'), 'shape is {id,text}');
+    // litectx 0.35.0: every candidate carries a boolean `keyword` (matched the FTS index) — the signal
+    // /forget filters on in place of the retired `score > 0` proxy. BM25-only here → all true. Asserting it
+    // on the REAL factCandidates path (not a mock) catches a stripped mapping that the mocked handler tests
+    // would miss.
+    assert.ok(cands.every((c) => typeof c.keyword === 'boolean'), 'each candidate carries a boolean keyword flag');
+    assert.ok(cands.some((c) => c.keyword === true), 'the lexical "deploy window" match reports keyword:true');
     assert.match(cands.map((c) => c.text).join('\n'), /deploy window is Tuesday/, 'candidate carries the fact text');
     // the id round-trips: re-passing it to rememberFact upserts the same row, not a new one
     await ctx2.rememberFact('user:w4-cand', 'the deploy window is Thursday at 2pm', { by: 'human', id: cands[0].id });

@@ -202,18 +202,23 @@ function forScope(scope) {
      */
     async factCandidates(text, { n = 5 } = {}) {
       const hits = await view.recall(String(text), { kind: 'fact', n, body: true, log: false });
-      // `score` = the recall's BM25/blended relevance (a keyword hit → >0; a shared/low-IDF term or a
-      // pure-KNN nearest-neighbour → 0). Surfaced alongside `sim` so a caller can tell a genuine match
-      // from KNN's always-present nearest neighbour (targeted /forget filters on score>0 || sim>=thresh).
+      // `keyword` (litectx 0.35.0) = this hit matched the FTS keyword index (true) vs. was added by meaning
+      // only (false, a pure-KNN nearest-neighbour). This is the signal targeted /forget filters on to tell a
+      // genuine lexical match from KNN's always-present nearest neighbour. It REPLACES the old `score > 0`
+      // proxy: as of 0.35.0 `score` is the per-query min-max-scaled FUSED rank value (scaled BM25 +
+      // embedWeight × scaled cosine), so a meaning-only nominee now scores > 0 too — `score` no longer
+      // means "matched a word". `keyword` is slightly wider than "contains the query word" (id/path tokens
+      // count, terms are porter-stemmed), both erring toward keep — the safe direction for /forget.
       // M13 supersede pre-check: `cosine` (litectx 0.27.0, embeddings mode only) is the raw note↔candidate
-      // semantic similarity litectx already computed for KNN ranking, surfaced verbatim — so the caller can
-      // skip the LLM judge when nothing is genuinely close (a low-cosine note can only be NEW) WITHOUT
-      // re-embedding. In BM25-only mode `cosine` is absent → `sim` stays undefined and the caller falls
-      // through to the judge, byte-identical to the pre-M13 path. Strictly additive; never blocks a write.
+      // semantic similarity litectx already computed for KNN ranking, surfaced verbatim as `sim` — so the
+      // caller can skip the LLM judge when nothing is genuinely close (a low-cosine note can only be NEW)
+      // WITHOUT re-embedding. In BM25-only mode `cosine` is absent → `sim` stays undefined (and every hit
+      // is `keyword:true`), so the caller falls through to the judge, byte-identical to the pre-M13 path.
+      // Strictly additive; never blocks a write.
       return hits.map((h) => ({
         id: h.path,
         text: h.body || '',
-        score: h.score ?? 0,
+        keyword: h.keyword === true,
         ...(typeof h.cosine === 'number' ? { sim: h.cosine } : {}),
       }));
     },
