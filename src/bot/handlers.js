@@ -1594,11 +1594,15 @@ async function routeForget(msg, platform, config, getMem, query, toolDeps = {}) 
 
   // Relevance filter (semantic mode): recall's KNN ALWAYS returns a nearest neighbour, so an unrelated
   // topic ("unicorn") comes back with a low sim — without this, /forget unicorn would offer to delete a
-  // random note. Keep a candidate only if it's a keyword hit (score>0) OR genuinely close (sim>=thresh).
-  // Inert when sim is absent (BM25-only mode / tests): recall there is already keyword-precise (no KNN
-  // noise), so nothing is filtered. Measured gap (installed litectx): spurious ≤0.17, legit ≥0.38.
+  // random note. Keep a candidate only if it's a keyword hit (`keyword`, litectx 0.35.0 — matched the FTS
+  // index) OR genuinely close by meaning (sim>=thresh). `keyword` replaced the pre-0.35 `score>0` proxy:
+  // litectx's `score` is now the per-query-scaled fused rank value, so a meaning-only nominee also scores
+  // >0 and `score` no longer tells a lexical match from KNN noise. The keyword clause is load-bearing: it
+  // keeps an exact-word hit whose cosine is BELOW threshold (validated at cosine 0.23 < 0.30). Inert when
+  // sim is absent (BM25-only mode / tests): recall there is already keyword-precise (no KNN noise), so
+  // nothing is filtered. Measured gap (installed litectx): spurious ≤0.17, legit ≥0.38.
   const forgetThreshold = config?.memory?.forget_match_threshold ?? 0.30;
-  matches = matches.filter((m) => typeof m.sim !== 'number' || m.score > 0 || m.sim >= forgetThreshold);
+  matches = matches.filter((m) => typeof m.sim !== 'number' || m.keyword || m.sim >= forgetThreshold);
 
   if (!matches.length) {
     const n = await noteCount();

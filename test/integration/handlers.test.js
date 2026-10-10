@@ -580,18 +580,19 @@ describe('App-verb door — governed-core ceremony (M9 increment 2)', () => {
     // Semantic recall always returns a nearest note; an unrelated topic comes back with a low sim.
     // Without the relevance filter, /forget unicorn offered to delete a random note (live-found).
     const { platform, router, indexer } = buildPin();
-    indexer.factCandidates = async () => [{ id: 'fact:wed', text: 'my wedding is on Wednesday', score: 0, sim: 0.06 }];
+    indexer.factCandidates = async () => [{ id: 'fact:wed', text: 'my wedding is on Wednesday', keyword: false, sim: 0.06 }];
     await router(msg('/forget unicorn'), platform);
     assert.match(platform.sent.at(-1).text, /Nothing matches "unicorn"/i, 'a low-sim nearest neighbour is not offered for deletion');
     assert.ok(!platform.sent.some((s) => /PIN/i.test(s.text)), 'no ceremony — nothing genuinely matched');
     assert.equal(indexer.forgetByIdCalls.length, 0, 'nothing deleted');
   });
 
-  it('/forget <topic> keeps a keyword hit even when its cosine is low (score>0 clause)', async () => {
-    // A shared/low-IDF term ("Wednesday") or a diluted keyword can score sim<threshold but IS a real
-    // keyword hit (score>0) → must still be offered.
+  it('/forget <topic> keeps a keyword hit even when its cosine is low (keyword clause)', async () => {
+    // A shared/low-IDF term ("Wednesday") or a diluted keyword can score cosine < threshold but IS a real
+    // keyword hit (litectx 0.35.0 `keyword:true`, matched the FTS index) → must still be offered. This is
+    // the load-bearing case: a cosine-only filter would wrongly drop it (proven at real cosine 0.23).
     const { platform, router, indexer } = buildPin();
-    indexer.factCandidates = async () => [{ id: 'fact:x', text: 'my long note that mentions wednesday somewhere', score: 0.4, sim: 0.20 }];
+    indexer.factCandidates = async () => [{ id: 'fact:x', text: 'my long note that mentions wednesday somewhere', keyword: true, sim: 0.20 }];
     const p = router(msg('/forget wednesday'), platform);
     await waitFor(() => platform.sent.some((s) => /PIN/i.test(s.text)), 'PIN prompt (keyword hit kept)');
     await router(msg('1234'), platform);
