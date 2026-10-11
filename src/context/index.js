@@ -174,7 +174,7 @@ function forScope(scope) {
 
     /**
      * Record one exchange as an `episode` (`by:'agent'`) — the scratchpad rung. Promotes to a durable
-     * fact by USE (recall count); otherwise litectx self-prunes it on a fixed 30-day rolling window.
+     * fact by USE (recall→fetch cycles); otherwise litectx self-prunes it on a fixed 30-day rolling window.
      * Episodes carry NO per-row TTL (`expiresAt` is doc-axis only — ignored for fact/episode, litectx
      * 0.24.0), so durability is the promotion ladder, not an expiry. Tenant-fenced by the bound owner.
      */
@@ -233,7 +233,7 @@ function forScope(scope) {
       return [...(g.fact || []), ...(g.episode || [])].slice(0, n).map(mapMemHit);
     },
     /**
-     * Promotion sweep (the ladder's agent rung): hot `episode`s (recalled ≥threshold within litectx's
+     * Promotion sweep (the ladder's agent rung): hot `episode`s (used ≥threshold recall→fetch cycles within litectx's
      * 30-day active window) → durable `fact`s, copied VERBATIM (`by:'agent'`, no summarizer — litectx
      * flags, multis copies). The fact id is derived from the episode path so a re-sweep UPSERTS the same
      * fact rather than duplicating. Returns the count promoted. Cheap (a SQL query + N copies); the host

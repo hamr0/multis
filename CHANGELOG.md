@@ -2,6 +2,12 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [0.22.7] — 2026-10-11
+
+### Changed
+
+- **Bumped `litectx` `^0.35.0` → `^0.36.0`.** 0.36.0 changes episode-to-fact promotion to count recall→fetch cycles instead of raw recall appearances. multis recalls with `body:true`, so promotion keeps working unchanged (verified against the installed 0.36.0: a DB written by 0.35 opens, scopes stay fenced, and 11 `body:true` recalls promote an episode at the threshold of 10; no-body recalls and fetch-only access count 0). Promotion counts accumulated under 0.35 are not backfilled, so episodes that were near the threshold restart counting. Comment and doc wording that described raw recall appearances was updated (`src/config.js`, `src/context/index.js`, PRD, `CLAUDE.md`, blueprint). No new feature.
+
 ## [0.22.6] — 2026-10-11
 
 ### Security
