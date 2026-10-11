@@ -25,6 +25,9 @@ concurrency:                # never let two publish runs race
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # A blackholed Hugging Face fetch (embedding model, tests) has no timeout of
+    # its own, so bound the job and fail fast instead of GitHub's 6h default.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
