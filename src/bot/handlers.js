@@ -1600,7 +1600,10 @@ async function routeForget(msg, platform, config, getMem, query, toolDeps = {}) 
   // >0 and `score` no longer tells a lexical match from KNN noise. The keyword clause is load-bearing: it
   // keeps an exact-word hit whose cosine is BELOW threshold (validated at cosine 0.23 < 0.30). Inert when
   // sim is absent (BM25-only mode / tests): recall there is already keyword-precise (no KNN noise), so
-  // nothing is filtered. Measured gap (installed litectx): spurious ≤0.17, legit ≥0.38.
+  // nothing is filtered. Measured (installed litectx, meaning-only nominees): unrelated topics up to ~0.32,
+  // genuine paraphrases ~0.29–0.49 — the bands OVERLAP, so 0.30 is an accepted trade-off: an occasional
+  // unrelated note may be offered, harmless since the picker is read-only and deleting still needs a PIN.
+  // Keyword hits bypass the threshold.
   const forgetThreshold = config?.memory?.forget_match_threshold ?? 0.30;
   matches = matches.filter((m) => typeof m.sim !== 'number' || m.keyword || m.sim >= forgetThreshold);
 

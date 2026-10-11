@@ -27,6 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     # A blackholed Hugging Face fetch (embedding model, tests) has no timeout of
     # its own, so bound the job and fail fast instead of GitHub's 6h default.
+    # Budget: the Test step is capped at 6 min; each registry poll call in the
+    # Publish step is bounded (~30s worst case: 15s fetch timeout + 1 retry), so
+    # the 10 min job cap leaves room for install + publish around them.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -74,7 +77,16 @@ jobs:
       - name: Typecheck
         run: npm run typecheck --if-present
       - name: Test
+        timeout-minutes: 6
         run: npm test --if-present
+      - name: Warn if the embedding model cache is empty
+        # Warning only, never fails: an empty cache means the tests (and the next
+        # publish) depend on Hugging Face being reachable.
+        run: |
+          CACHE_DIR=node_modules/@huggingface/transformers/.cache
+          if [ -z "$(ls -A "$CACHE_DIR" 2>/dev/null)" ]; then
+            echo "::warning::Embedding model cache ($CACHE_DIR) is empty after tests — the cache step will save nothing and the next run will refetch from Hugging Face."
+          fi
       - name: Skip if this version is already on npm
         id: check
         run: |
@@ -101,7 +113,7 @@ jobs:
           # actually succeeded. `npm view` caches, so --prefer-online bypasses it.
           PUBLISHED=""
           for _ in $(seq 1 20); do
-            PUBLISHED=$(npm view "$NAME@$VERSION" version --prefer-online 2>/dev/null || true)
+            PUBLISHED=$(npm view "$NAME@$VERSION" version --prefer-online --fetch-timeout=15000 --fetch-retries=1 2>/dev/null || true)
             [ "$PUBLISHED" = "$VERSION" ] && break
             sleep 6
           done
