@@ -194,7 +194,7 @@ describe('Tool definitions', () => {
     const mk = (n) => path.join(dir, n);
     const stub = '#!/bin/sh\nn=$(basename "$0")\nprintf \'%s\\0\' "$@" > "' + dir + '/$n.argv"\n' +
       '[ "$n" = xclip ] && cat > "' + dir + '/xclip.stdin"\nexit 0\n';
-    for (const b of ['xdg-open', 'xclip', 'gnome-screenshot', 'grim', 'nmcli']) {
+    for (const b of ['xdg-open', 'xclip', 'gnome-screenshot', 'nmcli']) {
       fs.writeFileSync(path.join(bin, b), stub, { mode: 0o755 });
     }
     const argvOf = (b) => fs.readFileSync(mk(`${b}.argv`), 'utf8').split('\0').slice(0, -1);
