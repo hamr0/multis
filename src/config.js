@@ -318,8 +318,8 @@ function loadConfig() {
     supersede_threshold: 0.30,
     // M14: cosine floor for a targeted `/forget <topic>` match. Semantic recall's KNN always returns a
     // nearest note, so an unrelated topic would otherwise offer to delete a random note; a candidate is
-    // shown only if it's a keyword hit OR its similarity clears this. Measured gap (broad POC): spurious
-    // topics ≤0.17, genuine ≥0.38 — 0.30 sits in the middle. Only active in semantic mode.
+    // shown only if it's a keyword hit OR its similarity clears this. Measured: meaning-only unrelated
+    // topics up to ~0.32, genuine paraphrases ~0.29–0.49 — bands overlap; 0.30 is an accepted trade-off.
     forget_match_threshold: 0.30,
     // M5 context-engineering — token budget for the conversation window sent to the model each agent
     // round. litectx's `assemble` (via bare-agent's Loop hook) fits the running transcript to this many

@@ -57,7 +57,7 @@ Node.js only, single user, offline except LLM calls. Beeper Desktop API may chan
 -> docs/00-context/assumptions.md
 
 ## Testing
-243 tests: 181 unit, 62 integration, 0 automated e2e. Coverage analysis, gap tracking, manual smoke checklist.
+641 tests (unit + integration; no automated browser/chat e2e). Coverage analysis, gap tracking, manual smoke checklist.
 -> docs/04-process/testing-guide.md
 
 ## Roadmap

@@ -25,6 +25,14 @@ concurrency:                # never let two publish runs race
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # A blackholed Hugging Face fetch (embedding model, tests) has no timeout of
+    # its own, so bound the job and fail fast instead of GitHub's 6h default.
+    # Budget: the Test step is capped at 6 min; each registry poll call in the
+    # Publish step is bounded at ~40s worst case (15s fetch timeout + 10s retry
+    # backoff + 1 retry). A fully hung registry could still run the 20-pass loop
+    # past the job cap, so the 10 min cap is what ends it; the package is already
+    # live then, the run shows red, and a re-run takes the "already on npm" skip.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -44,6 +52,22 @@ jobs:
         run: npm install -g npm@11
       - name: Install dependencies
         run: npm ci
+      - name: Embedding model cache key
+        # The test suite loads Xenova/all-MiniLM-L6-v2 (litectx's default, q8) via
+        # @huggingface/transformers; key on its installed version so a bump re-fetches.
+        id: hf
+        run: echo "ver=$(node -p "require('./node_modules/@huggingface/transformers/package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Cache embedding model
+        # Publish shouldn't depend on Hugging Face being reachable on every run.
+        # transformers.js defaults env.cacheDir to <its package dir>/.cache, i.e.
+        # INSIDE node_modules, which `npm ci` deletes — so this restore MUST stay
+        # after "Install dependencies" or it would be wiped before the tests run.
+        uses: actions/cache@v6
+        with:
+          path: node_modules/@huggingface/transformers/.cache
+          key: hf-Xenova-all-MiniLM-L6-v2-q8-transformers-${{ steps.hf.outputs.ver }}
+          restore-keys: |
+            hf-Xenova-all-MiniLM-L6-v2-q8-transformers-
       - name: Lockfile version matches package.json
         # `npm ci` above already fails when the lockfile's DEPENDENCY entries
         # disagree with package.json; it does not check the lockfile's copy of
@@ -55,7 +79,16 @@ jobs:
       - name: Typecheck
         run: npm run typecheck --if-present
       - name: Test
+        timeout-minutes: 6
         run: npm test --if-present
+      - name: Warn if the embedding model cache is empty
+        # Warning only, never fails: an empty cache means the tests (and the next
+        # publish) depend on Hugging Face being reachable.
+        run: |
+          CACHE_DIR=node_modules/@huggingface/transformers/.cache
+          if [ -z "$(ls -A "$CACHE_DIR" 2>/dev/null)" ]; then
+            echo "::warning::Embedding model cache ($CACHE_DIR) is empty after tests — the cache step will save nothing and the next run will refetch from Hugging Face."
+          fi
       - name: Skip if this version is already on npm
         id: check
         run: |
@@ -82,7 +115,7 @@ jobs:
           # actually succeeded. `npm view` caches, so --prefer-online bypasses it.
           PUBLISHED=""
           for _ in $(seq 1 20); do
-            PUBLISHED=$(npm view "$NAME@$VERSION" version --prefer-online 2>/dev/null || true)
+            PUBLISHED=$(npm view "$NAME@$VERSION" version --prefer-online --fetch-timeout=15000 --fetch-retries=1 2>/dev/null || true)
             [ "$PUBLISHED" = "$VERSION" ] && break
             sleep 6
           done
