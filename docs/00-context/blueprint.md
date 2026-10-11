@@ -326,7 +326,7 @@ Message / exchange → append to daily log + write the episode (the conversation
                      ▼
               promotionSweep(scope)  (fire-and-forget, after a response):
                      │
-                     ├─ promotionCandidates(threshold=10)  # episodes recalled ≥10× within
+                     ├─ promotionCandidates(threshold=10)  # episodes with ≥10 recall→fetch cycles (litectx 0.36+) within
                      │                                      # the episode window (episode_window_days, default 90)
                      │
                      └─ for each hot candidate: copy episode text VERBATIM → fact (by:'agent')
@@ -351,7 +351,7 @@ window (agent msg history)  →  recentMemory(scope, {kind:'episode'})  # newest
 
 ### Promotion (no capture skill, no LLM)
 
-Since M4 there is **no LLM capture/summarize step** and no human-written `capture.md`. Durable memory is earned by use: every exchange is an `episode`; `promotionSweep` copies an episode **verbatim** to a `fact` once it's been recalled ≥`promote_threshold` (10) times within the episode window (`memory.episode_window_days`, default 90 — litectx 0.25.0; the window is BOTH retention and promotion-eligibility, one coupled clock) — an episode that never gets that hot simply prunes at the window edge (durability lives in the fact tier, not in the episode timer). `/remember` writes a `fact` directly, and a restated same-subject note **supersedes** the prior fact in place rather than piling up a contradiction (an LLM judge picks the fact to overwrite; tenant-fenced, fail-toward-keep — see Memory supersession below). litectx owns ranking (BM25 + optional KNN when `memory.semantic` is on, the default), decay, and retention — multis only writes episodes/facts and reads them back.
+Since M4 there is **no LLM capture/summarize step** and no human-written `capture.md`. Durable memory is earned by use: every exchange is an `episode`; `promotionSweep` copies an episode **verbatim** to a `fact` once it has ≥`promote_threshold` (10) recall→fetch cycles within the episode window (litectx 0.36+: a recall followed by a fetch, where `recall({body:true})` counts as the fetch; counts are not backfilled from 0.35) (`memory.episode_window_days`, default 90 — litectx 0.25.0; the window is BOTH retention and promotion-eligibility, one coupled clock) — an episode that never gets that hot simply prunes at the window edge (durability lives in the fact tier, not in the episode timer). `/remember` writes a `fact` directly, and a restated same-subject note **supersedes** the prior fact in place rather than piling up a contradiction (an LLM judge picks the fact to overwrite; tenant-fenced, fail-toward-keep — see Memory supersession below). litectx owns ranking (BM25 + optional KNN when `memory.semantic` is on, the default), decay, and retention — multis only writes episodes/facts and reads them back.
 
 ### Memory supersession (W4 — restated facts update in place)
 
