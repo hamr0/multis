@@ -11,6 +11,8 @@ node --test test/integration/*.test.js  # integration only
 node --test test/beeper.test.js         # beeper platform only
 ```
 
+The suite runs litectx BM25-only (deterministic, offline) with one exception: `test/integration/forget-embeddings.test.js` loads the real embedding model (`Xenova/all-MiniLM-L6-v2`, ~23 MB, via `@huggingface/transformers`) to exercise `/forget` with embeddings on. The first run downloads it from Hugging Face (cached afterwards under `node_modules/@huggingface/transformers/.cache`), so that file needs network access on a cold cache. `publish.yml` caches that directory and caps the Test step at 6 minutes.
+
 ## Test Pyramid
 
 ```
