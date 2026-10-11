@@ -2,6 +2,16 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [0.22.6] — 2026-10-11
+
+### Security
+
+- **`npm audit fix` (lockfile-only, no `--force`) clears the high advisories in `adm-zip`, `sharp` and `@xmldom/xmldom`, plus `protobufjs`.** Resolved versions: `@huggingface/transformers` 4.3.1, `onnxruntime-node` 1.30.0, `adm-zip` 0.6.1, `sharp` 0.35.5, `protobufjs` 7.6.6, `@xmldom/xmldom` 0.8.15, `mammoth` 1.13.0. One moderate advisory remains: `sprintf-js` via `mammoth` → `argparse`, fixable only by a breaking `mammoth` downgrade — accepted.
+
+### Fixed
+
+- **`npm test` no longer launches real desktop programs.** The desktop-tools shell-injection test spawned the real `xdg-open` (plus `xclip`, `gnome-screenshot`/`grim`, `nmcli`) with the `$(touch …)` payload, popping a file-manager error dialog on every run. Recording stubs on `PATH` now stand in for them, and the test asserts each received the payload verbatim as a single argv element (stronger than the old sentinel-only check). Test-only; no end-user behaviour change.
+
 ## [0.22.5] — 2026-10-11
 
 ### Changed
