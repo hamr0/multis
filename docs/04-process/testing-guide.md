@@ -1,6 +1,6 @@
 # Testing Guide
 
-> Last updated: 2026-02-23 | 387 tests | 0 failures
+> Last updated: 2026-10-11 | 641 tests | 0 failures
 
 ## Running Tests
 
@@ -17,23 +17,23 @@ The suite runs litectx BM25-only (deterministic, offline) with one exception: `t
 
 ```
         /\
-       /  \      E2E: 0 tests
+       /  \      E2E: manual smoke only (plus test/e2e)
       / -- \     Manual smoke test only (see below)
      /      \
-    / ====== \   Integration: 62 tests
+    / ====== \   Integration
    / ======== \  Handler pipeline, CLI, SQLite smoke
   / ========== \
- / ============ \  Unit: 205 tests
+ / ============ \  Unit
 /________________\ PIN, injection, config, store, memory, cleanup, activation, governance, parsers, beeper
 ```
 
-**Current ratio: 205 unit / 62 integration / 0 automated e2e**
+**Current shape: mostly unit, a smaller integration layer, no automated browser/chat e2e. Per-file counts below are approximate and drift; run `npm test` for the real total.**
 
 This is the right shape for a single-user local tool. The integration layer catches wiring bugs (like the `escalationRetries` closure bug found during initial test writing). E2E is manual until we ship to others.
 
 ---
 
-## Unit Tests (205 tests, 28 suites)
+## Unit Tests
 
 All in `test/*.test.js`. Each tests a single module in isolation.
 
@@ -119,7 +119,7 @@ Uses temp HOME directory with mocked `_api` method — no real HTTP calls needed
 
 ---
 
-## Integration Tests (62 tests, 17 suites)
+## Integration Tests
 
 All in `test/integration/`. Exercise real wiring between modules.
 
