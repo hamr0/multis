@@ -2,6 +2,16 @@
 
 All notable changes to multis. Pre-stable (0.x) — versions track feature milestones, not releases.
 
+## [0.22.5] — 2026-10-11
+
+### Changed
+
+- **Publish workflow hardened against a Hugging Face outage or hang.** The always-on embeddings test downloads the `Xenova/all-MiniLM-L6-v2` model on a fresh runner, and transformers' fetch has no timeout. `publish.yml` now caches the model (`actions/cache`, restored *after* `npm ci` because transformers.js keeps it inside `node_modules`, which `npm ci` deletes; key = model id + installed transformers version), caps the whole job at 10 minutes (about 5.6x the longest recent successful run), caps the Test step at 6 minutes, bounds the registry poll (`npm view` with a 15s fetch timeout and one retry, about 40s per call), and emits a warning-only step when the model cache is empty. This bounds a hang; it does not stop a Hugging Face outage from blocking a cache-miss publish. The cache has not yet been verified on a real Actions run.
+- **`/forget` relevance threshold stays at 0.30; docs and comments now state the measured, overlapping ranges.** Unrelated KNN noise reaches a cosine of about 0.32 while genuine paraphrases span about 0.29-0.49, so no single cosine threshold separates them. 0.30 is recorded as an accepted trade-off (`src/bot/handlers.js`, `src/config.js`, `docs/01-product/prd.md`), and the PRD describes the filter as keeping `keyword` OR `sim >= threshold` (not the retired `score > 0`). Comment and doc changes only — no behaviour change.
+- **`CLAUDE.md`**: `AGENT_RULES.md` is now an on-demand reference (plain path) rather than an auto-loaded `@` include, so it is not pulled into every session.
+- **Docs refreshed**: testing guide (641-test count, stale per-layer counts removed, the embeddings test's Hugging Face dependency and the publish model cache noted), knowledge base, and PRD.
+- **Always-on embeddings-mode `/forget` test** (`test/`): the suite was BM25-only, so nothing exercised the embeddings-on `/forget` path — the production default (`memory.semantic:true`). The new test runs the real `factCandidates` and the real `/forget` handler against the installed litectx with the real embedder, asserts `keyword` true/false, and asserts that an exact-word fact with cosine below the 0.30 threshold is still offered while KNN noise is not. Mutation-proven against both the keyword mapping and the filter clause. Test-only; no end-user behaviour change.
+
 ## [0.22.4] — 2026-10-10
 
 ### Changed — litectx 0.30 → 0.35: `/forget` relevance filter moves off the retired `score` proxy
