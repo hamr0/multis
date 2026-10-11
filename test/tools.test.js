@@ -184,22 +184,47 @@ describe('Tool definitions', () => {
   it('desktop tools do not execute shell injection in their string args', async () => {
     // open_url/wifi go through execArgv (no shell); clipboard/screenshot use a
     // shell but shq()-quote the user value. Either way `$()` must stay inert.
-    // The underlying binaries may be absent — that is fine; we assert only that
-    // the injected sentinel never gets created.
+    // The host binaries are replaced by recording stubs on PATH so nothing
+    // launches on the real desktop (xdg-open pops a file-manager error dialog);
+    // each stub records its argv, so we also prove the payload arrived as ONE
+    // literal argument instead of just "the sentinel was not created".
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'multis-desk-'));
+    const bin = path.join(dir, 'bin');
+    fs.mkdirSync(bin);
     const mk = (n) => path.join(dir, n);
-    const ctx = { senderId: 'u', runtimePlatform: 'linux' };
-    const get = (n) => TOOLS.find(t => t.name === n);
-
-    await get('open_url').execute({ url: `$(touch ${mk('pwned_url')})` }, ctx);
-    await get('clipboard').execute({ action: 'set', text: `$(touch ${mk('pwned_clip')})` }, ctx);
-    await get('screenshot').execute({ output: `/tmp/x$(touch ${mk('pwned_shot')}).png` }, ctx);
-    await get('wifi').execute({ action: 'connect', ssid: `$(touch ${mk('pwned_wifi')})` }, ctx);
-
-    for (const n of ['pwned_url', 'pwned_clip', 'pwned_shot', 'pwned_wifi']) {
-      assert.ok(!fs.existsSync(mk(n)), `injection via ${n} must NOT execute`);
+    const stub = '#!/bin/sh\nn=$(basename "$0")\nprintf \'%s\\0\' "$@" > "' + dir + '/$n.argv"\n' +
+      '[ "$n" = xclip ] && cat > "' + dir + '/xclip.stdin"\nexit 0\n';
+    for (const b of ['xdg-open', 'xclip', 'gnome-screenshot', 'nmcli']) {
+      fs.writeFileSync(path.join(bin, b), stub, { mode: 0o755 });
     }
-    fs.rmSync(dir, { recursive: true, force: true });
+    const argvOf = (b) => fs.readFileSync(mk(`${b}.argv`), 'utf8').split('\0').slice(0, -1);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${savedPath}`;
+    try {
+      const ctx = { senderId: 'u', runtimePlatform: 'linux' };
+      const get = (n) => TOOLS.find(t => t.name === n);
+      const url = `$(touch ${mk('pwned_url')})`;
+      const clip = `$(touch ${mk('pwned_clip')})`;
+      const shot = `/tmp/x$(touch ${mk('pwned_shot')}).png`;
+      const ssid = `$(touch ${mk('pwned_wifi')})`;
+
+      await get('open_url').execute({ url }, ctx);
+      await get('clipboard').execute({ action: 'set', text: clip }, ctx);
+      await get('screenshot').execute({ output: shot }, ctx);
+      await get('wifi').execute({ action: 'connect', ssid }, ctx);
+
+      for (const n of ['pwned_url', 'pwned_clip', 'pwned_shot', 'pwned_wifi']) {
+        assert.ok(!fs.existsSync(mk(n)), `injection via ${n} must NOT execute`);
+      }
+      // The payload reached the program as one literal argv element.
+      assert.deepStrictEqual(argvOf('xdg-open'), [url]);
+      assert.deepStrictEqual(argvOf('gnome-screenshot'), ['-f', shot]);
+      assert.deepStrictEqual(argvOf('nmcli'), ['device', 'wifi', 'connect', ssid]);
+      assert.strictEqual(fs.readFileSync(mk('xclip.stdin'), 'utf8'), clip);
+    } finally {
+      process.env.PATH = savedPath;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
