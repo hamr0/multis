@@ -28,8 +28,10 @@ jobs:
     # A blackholed Hugging Face fetch (embedding model, tests) has no timeout of
     # its own, so bound the job and fail fast instead of GitHub's 6h default.
     # Budget: the Test step is capped at 6 min; each registry poll call in the
-    # Publish step is bounded (~30s worst case: 15s fetch timeout + 1 retry), so
-    # the 10 min job cap leaves room for install + publish around them.
+    # Publish step is bounded at ~40s worst case (15s fetch timeout + 10s retry
+    # backoff + 1 retry). A fully hung registry could still run the 20-pass loop
+    # past the job cap, so the 10 min cap is what ends it; the package is already
+    # live then, the run shows red, and a re-run takes the "already on npm" skip.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
