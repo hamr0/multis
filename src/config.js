@@ -282,7 +282,7 @@ function loadConfig() {
   config.memory = {
     enabled: true,
     recent_window: 20,
-    // M4: durable memory is the litectx episode→fact ladder. promote_threshold = episode recalls
+    // M4: durable memory is the litectx episode→fact ladder. promote_threshold = recall→fetch cycles on an episode (litectx 0.36+; a body:true recall counts as fetched)
     // (within the episode window below) that auto-promote it to a durable fact. Facts are durable
     // until /forget. litectx owns decay/ranking (no ACT-R, no memory.md caps).
     promote_threshold: 10,
